@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 512 512"
+     role="img"
+     aria-labelledby="title desc">
+  <title id="title">Janus doorway mark</title>
+  <desc id="desc">A three-piece geometric doorway or portal mark.</desc>
+
+  <!-- Top lintel / ceiling -->
+  <path fill="#3B82F6"
+        d="M144 92H368L315 136H197Z"/>
+
+  <!-- Left jamb -->
+  <path fill="#3B82F6"
+        d="M112 96L190 142V348L112 396Z"/>
+
+  <!-- Right jamb -->
+  <path fill="#3B82F6"
+        d="M400 96L322 142V348L400 396Z"/>
+</svg>

@@ -1,6 +1,14 @@
-# Janus
+<p align="center">
+  <img src="docs/janus-720w-white.png" alt="Janus Logo" width="360">
+</p>
 
-> **Caddy module: long-lived edge doorway — TLS admission, dynamic host routing, and a WebSocket hub, driven by a JSON control API.**
+<h1 align="center">Janus</h1>
+
+<p align="center">
+  <strong>Caddy module: long-lived edge doorway — TLS admission, dynamic host routing, and a WebSocket hub, driven by a JSON control API.</strong>
+</p>
+
+---
 
 Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Janus provides the inward face: a memory-resident registry and engines controlled only by the `/1.0` JSON API over a unix socket. Cold Caddyfile config decides which traffic is admitted into Janus; hot `/1.0` calls decide how admitted hosts map to upstreams, health, hub, and certificate allowlisting.
 
@@ -120,3 +128,7 @@ Confirm the module is linked:
 ## Design notes
 
 See [`docs/`](docs/) for the control-plane sketch and related material. The `/1.0` API follows an Incus-inspired style (envelopes, resource paths, ETag on config writes) while remaining Janus’s own protocol.
+
+## Name
+
+In Roman myth, **Janus** is the god of doorways and thresholds — beginnings, passages, and the space between inside and outside. He is shown with two faces: one looking out, one looking in. That is the shape of this module. One face serves the public world over TLS; the other coordinates private upstreams, registry, and control-plane state so that serving is possible. The passage between them is the product.
