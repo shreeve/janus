@@ -2,8 +2,6 @@
   <img src="docs/janus-720w-white.png" alt="Janus Logo" width="360">
 </p>
 
-<h1 align="center">Janus</h1>
-
 <p align="center">
   <strong>Caddy module: long-lived edge doorway — TLS admission, dynamic host routing, and a WebSocket hub, driven by a JSON control API.</strong>
 </p>
