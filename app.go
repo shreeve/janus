@@ -23,6 +23,9 @@ type App struct {
 
 	logger      *zap.Logger
 	controlSrvs []*controlServer
+
+	// appsReg is the memory-only apps registry (hot /1.0/apps).
+	appsReg *appRegistry
 }
 
 // CaddyModule returns the Caddy module information.
@@ -36,6 +39,7 @@ func (App) CaddyModule() caddy.ModuleInfo {
 // Provision sets up the app.
 func (a *App) Provision(ctx caddy.Context) error {
 	a.logger = ctx.Logger()
+	a.appsReg = newAppRegistry()
 	if len(a.Control) == 0 {
 		a.Control = []Control{{Mode: "internal"}}
 	}

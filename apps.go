@@ -1,0 +1,411 @@
+package janus
+
+import (
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+)
+
+// Upstream is one entry in an app's upstream list.
+type Upstream struct {
+	// Path is the unix socket path Janus may dial.
+	Path string `json:"path"`
+
+	// Doorbell marks the tenant's wake-up socket. A doorbell entry must
+	// be the only entry in the list. Phase 3 stores and validates the
+	// flag; ringing is data-plane behavior (Phase 4).
+	Doorbell bool `json:"doorbell,omitempty"`
+}
+
+// AppRecord is one registered app in the hot registry.
+type AppRecord struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Hosts     []string   `json:"hosts"`
+	Upstreams []Upstream `json:"upstreams"`
+}
+
+func (rec *AppRecord) clone() AppRecord {
+	out := *rec
+	out.Hosts = append([]string{}, rec.Hosts...)
+	out.Upstreams = append([]Upstream{}, rec.Upstreams...)
+	return out
+}
+
+// apiError carries an HTTP status with a precise message.
+type apiError struct {
+	Status int
+	Msg    string
+}
+
+func (e *apiError) Error() string { return e.Msg }
+
+func errBadRequest(format string, args ...any) *apiError {
+	return &apiError{Status: http.StatusBadRequest, Msg: fmt.Sprintf(format, args...)}
+}
+
+func errUnknownApp(id string) *apiError {
+	return &apiError{Status: http.StatusNotFound, Msg: fmt.Sprintf("unknown app id %q", id)}
+}
+
+func errHostConflict(host, holder string) *apiError {
+	return &apiError{
+		Status: http.StatusConflict,
+		Msg:    fmt.Sprintf("host %q is already claimed by app %q", host, holder),
+	}
+}
+
+// --- validation ------------------------------------------------------------
+
+var (
+	appNameRE   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	hostLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+)
+
+func validateAppName(name string) error {
+	if name == "" {
+		return errBadRequest("name is required")
+	}
+	if !appNameRE.MatchString(name) {
+		return errBadRequest("invalid name %q (want lowercase letters, digits, and interior hyphens; max 63 chars)", name)
+	}
+	return nil
+}
+
+// normalizeHosts lowercases (hostnames are case-insensitive), validates each
+// host, and rejects duplicates within the request.
+func normalizeHosts(hosts []string) ([]string, error) {
+	if len(hosts) == 0 {
+		return nil, errBadRequest("hosts is required and must not be empty")
+	}
+	out := make([]string, 0, len(hosts))
+	seen := map[string]bool{}
+	for _, h := range hosts {
+		n := strings.ToLower(h)
+		if err := validateHostname(n); err != nil {
+			return nil, err
+		}
+		if seen[n] {
+			return nil, errBadRequest("duplicate host %q in request", n)
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func validateHostname(h string) error {
+	if h == "" {
+		return errBadRequest("host must not be empty")
+	}
+	if len(h) > 253 {
+		return errBadRequest("host %q is too long (max 253 chars)", h)
+	}
+	for _, label := range strings.Split(h, ".") {
+		if len(label) > 63 || !hostLabelRE.MatchString(label) {
+			return errBadRequest("host %q is not a plausible hostname", h)
+		}
+	}
+	return nil
+}
+
+func validateUpstreams(ups []Upstream) error {
+	doorbells := 0
+	seen := map[string]bool{}
+	for _, u := range ups {
+		if u.Path == "" {
+			return errBadRequest("upstream path is required")
+		}
+		if seen[u.Path] {
+			return errBadRequest("duplicate upstream path %q", u.Path)
+		}
+		seen[u.Path] = true
+		if u.Doorbell {
+			doorbells++
+		}
+	}
+	if doorbells > 1 {
+		return errBadRequest("at most one doorbell entry is allowed, got %d", doorbells)
+	}
+	if doorbells == 1 && len(ups) > 1 {
+		return errBadRequest("a doorbell entry must be the only entry, got %d entries", len(ups))
+	}
+	return nil
+}
+
+// --- id minting ------------------------------------------------------------
+
+const (
+	idSuffixAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	idSuffixLen      = 6
+)
+
+func mintIDSuffix() (string, error) {
+	b := make([]byte, idSuffixLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	for i := range b {
+		b[i] = idSuffixAlphabet[int(b[i])%len(idSuffixAlphabet)]
+	}
+	return string(b), nil
+}
+
+// --- registry --------------------------------------------------------------
+
+// appRegistry is the memory-only apps registry. Janus restart → empty;
+// tenants re-register. Reads share the lock; writes are exclusive.
+type appRegistry struct {
+	mu    sync.RWMutex
+	apps  map[string]*AppRecord // id → record
+	hosts map[string]string     // host → holding app id (first-wins)
+}
+
+func newAppRegistry() *appRegistry {
+	return &appRegistry{
+		apps:  map[string]*AppRecord{},
+		hosts: map[string]string{},
+	}
+}
+
+func (r *appRegistry) create(name string, hosts []string) (AppRecord, error) {
+	if err := validateAppName(name); err != nil {
+		return AppRecord{}, err
+	}
+	hosts, err := normalizeHosts(hosts)
+	if err != nil {
+		return AppRecord{}, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, h := range hosts {
+		if holder, taken := r.hosts[h]; taken {
+			return AppRecord{}, errHostConflict(h, holder)
+		}
+	}
+	var id string
+	for {
+		suffix, err := mintIDSuffix()
+		if err != nil {
+			return AppRecord{}, fmt.Errorf("minting app id: %w", err)
+		}
+		id = name + "-" + suffix
+		if _, exists := r.apps[id]; !exists {
+			break
+		}
+	}
+	rec := &AppRecord{ID: id, Name: name, Hosts: hosts, Upstreams: []Upstream{}}
+	r.apps[id] = rec
+	for _, h := range hosts {
+		r.hosts[h] = id
+	}
+	return rec.clone(), nil
+}
+
+func (r *appRegistry) list() []AppRecord {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]AppRecord, 0, len(r.apps))
+	for _, rec := range r.apps {
+		out = append(out, rec.clone())
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+func (r *appRegistry) get(id string) (AppRecord, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.apps[id]
+	if !ok {
+		return AppRecord{}, errUnknownApp(id)
+	}
+	return rec.clone(), nil
+}
+
+// patch updates name and/or hosts; nil means "leave unchanged".
+func (r *appRegistry) patch(id string, name *string, hosts *[]string) (AppRecord, error) {
+	if name == nil && hosts == nil {
+		return AppRecord{}, errBadRequest("nothing to update (want name and/or hosts)")
+	}
+	if name != nil {
+		if err := validateAppName(*name); err != nil {
+			return AppRecord{}, err
+		}
+	}
+	var newHosts []string
+	if hosts != nil {
+		var err error
+		newHosts, err = normalizeHosts(*hosts)
+		if err != nil {
+			return AppRecord{}, err
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.apps[id]
+	if !ok {
+		return AppRecord{}, errUnknownApp(id)
+	}
+	if hosts != nil {
+		for _, h := range newHosts {
+			if holder, taken := r.hosts[h]; taken && holder != id {
+				return AppRecord{}, errHostConflict(h, holder)
+			}
+		}
+		for _, h := range rec.Hosts {
+			delete(r.hosts, h)
+		}
+		for _, h := range newHosts {
+			r.hosts[h] = id
+		}
+		rec.Hosts = newHosts
+	}
+	if name != nil {
+		rec.Name = *name
+	}
+	return rec.clone(), nil
+}
+
+// setUpstreams replaces the entire upstream list atomically.
+// Empty list is legal: registered but not routable.
+func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error) {
+	if err := validateUpstreams(ups); err != nil {
+		return AppRecord{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.apps[id]
+	if !ok {
+		return AppRecord{}, errUnknownApp(id)
+	}
+	rec.Upstreams = append([]Upstream{}, ups...)
+	return rec.clone(), nil
+}
+
+func (r *appRegistry) delete(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.apps[id]
+	if !ok {
+		return errUnknownApp(id)
+	}
+	for _, h := range rec.Hosts {
+		delete(r.hosts, h)
+	}
+	delete(r.apps, id)
+	return nil
+}
+
+// --- HTTP handlers ---------------------------------------------------------
+
+func (a *App) appsRegistry() *appRegistry { return a.appsReg }
+
+type appCreateRequest struct {
+	Name  string   `json:"name"`
+	Hosts []string `json:"hosts"`
+}
+
+type appPatchRequest struct {
+	Name  *string   `json:"name"`
+	Hosts *[]string `json:"hosts"`
+}
+
+type upstreamsPutRequest struct {
+	Upstreams *[]Upstream `json:"upstreams"`
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return errBadRequest("malformed JSON body: %v", err)
+	}
+	if dec.More() {
+		return errBadRequest("malformed JSON body: trailing data")
+	}
+	return nil
+}
+
+func writeAPIError(w http.ResponseWriter, err error) {
+	var ae *apiError
+	if !errors.As(err, &ae) {
+		ae = &apiError{Status: http.StatusInternalServerError, Msg: err.Error()}
+	}
+	writeJSON(w, ae.Status, map[string]string{"error": ae.Msg})
+}
+
+func (a *App) handleAppsCreate(w http.ResponseWriter, r *http.Request) {
+	var req appCreateRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rec, err := a.appsRegistry().create(req.Name, req.Hosts)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": rec.ID})
+}
+
+func (a *App) handleAppsList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.appsRegistry().list())
+}
+
+func (a *App) handleAppsGet(w http.ResponseWriter, r *http.Request) {
+	rec, err := a.appsRegistry().get(r.PathValue("id"))
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (a *App) handleAppsPatch(w http.ResponseWriter, r *http.Request) {
+	var req appPatchRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rec, err := a.appsRegistry().patch(r.PathValue("id"), req.Name, req.Hosts)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (a *App) handleAppsDelete(w http.ResponseWriter, r *http.Request) {
+	if err := a.appsRegistry().delete(r.PathValue("id")); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleAppsUpstreamsPut(w http.ResponseWriter, r *http.Request) {
+	var req upstreamsPutRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if req.Upstreams == nil {
+		writeAPIError(w, errBadRequest("upstreams is required (empty list means not routable)"))
+		return
+	}
+	rec, err := a.appsRegistry().setUpstreams(r.PathValue("id"), *req.Upstreams)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}

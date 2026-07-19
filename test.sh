@@ -247,6 +247,7 @@ stop_caddy() {
 
 cleanup() {
 	stop_caddy
+	rm -f "$ROOT/.test-app-id"
 }
 
 trap cleanup EXIT INT TERM
@@ -322,6 +323,137 @@ case_control_unix_health() {
 	json_has "$body" '"status":"ok"'
 }
 
+# --- cases: apps -----------------------------------------------------------
+
+APP_ID_FILE="$ROOT/.test-app-id"
+
+# capi METHOD PATH [JSON] — control API over local TCP; sets REPLY_CODE / REPLY_BODY
+capi() {
+	local method=$1 path=$2 data=${3:-} resp
+	if [[ -n "$data" ]]; then
+		resp="$(curl -sS --max-time 5 -X "$method" -H 'Content-Type: application/json' \
+			--data "$data" -w $'\n%{http_code}' "http://127.0.0.1:7600$path")"
+	else
+		resp="$(curl -sS --max-time 5 -X "$method" -w $'\n%{http_code}' "http://127.0.0.1:7600$path")"
+	fi
+	REPLY_CODE="${resp##*$'\n'}"
+	REPLY_BODY="${resp%$'\n'*}"
+}
+
+# capi_unix METHOD PATH [JSON] — same, over the internal unix socket
+capi_unix() {
+	local method=$1 path=$2 data=${3:-} resp
+	if [[ -n "$data" ]]; then
+		resp="$(curl -sS --max-time 5 --unix-socket "$ROOT/run/janus.sock" -X "$method" \
+			-H 'Content-Type: application/json' --data "$data" -w $'\n%{http_code}' "http://janus$path")"
+	else
+		resp="$(curl -sS --max-time 5 --unix-socket "$ROOT/run/janus.sock" -X "$method" \
+			-w $'\n%{http_code}' "http://janus$path")"
+	fi
+	REPLY_CODE="${resp##*$'\n'}"
+	REPLY_BODY="${resp%$'\n'*}"
+}
+
+app_id() {
+	cat "$APP_ID_FILE"
+}
+
+case_apps_register() {
+	capi POST /1.0/apps '{"name":"shop","hosts":["shop.example.com"]}'
+	eq "$REPLY_CODE" "201"
+	local id
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	if [[ ! "$id" =~ ^shop-[a-z0-9]{6}$ ]]; then
+		printf 'id %q does not match shop-xxxxxx in %q' "$id" "$REPLY_BODY" >&2
+		return 1
+	fi
+	printf '%s' "$id" >"$APP_ID_FILE"
+}
+
+case_apps_register_bad() {
+	capi POST /1.0/apps '{"hosts":["a.example.com"]}'
+	eq "$REPLY_CODE" "400"
+	capi POST /1.0/apps '{"name":"shop2","hosts":[]}'
+	eq "$REPLY_CODE" "400"
+	capi POST /1.0/apps '{"name":"shop2","hosts":["not a host"]}'
+	eq "$REPLY_CODE" "400"
+	capi POST /1.0/apps 'not json'
+	eq "$REPLY_CODE" "400"
+}
+
+case_apps_host_conflict() {
+	capi POST /1.0/apps '{"name":"rival","hosts":["shop.example.com"]}'
+	eq "$REPLY_CODE" "409"
+	json_has "$REPLY_BODY" 'shop.example.com'
+	json_has "$REPLY_BODY" "$(app_id)"
+}
+
+case_apps_list() {
+	capi GET /1.0/apps
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" "\"$(app_id)\""
+}
+
+case_apps_get() {
+	capi GET "/1.0/apps/$(app_id)"
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" '"name":"shop"'
+	json_has "$REPLY_BODY" '"shop.example.com"'
+}
+
+case_apps_get_unknown() {
+	capi GET /1.0/apps/shop-zzzzzz
+	eq "$REPLY_CODE" "404"
+}
+
+case_apps_unix_sees_registry() {
+	capi_unix GET /1.0/apps
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" "\"$(app_id)\""
+}
+
+case_apps_put_upstreams() {
+	capi PUT "/1.0/apps/$(app_id)/upstreams" \
+		'{"upstreams":[{"path":"/run/w1.sock"},{"path":"/run/w2.sock"}]}'
+	eq "$REPLY_CODE" "200"
+	capi GET "/1.0/apps/$(app_id)"
+	json_has "$REPLY_BODY" '"/run/w1.sock"'
+	json_has "$REPLY_BODY" '"/run/w2.sock"'
+}
+
+case_apps_put_upstreams_empty() {
+	capi PUT "/1.0/apps/$(app_id)/upstreams" '{"upstreams":[]}'
+	eq "$REPLY_CODE" "200"
+	capi GET "/1.0/apps/$(app_id)"
+	json_has "$REPLY_BODY" '"upstreams":[]'
+}
+
+case_apps_put_upstreams_mixed_doorbell() {
+	capi PUT "/1.0/apps/$(app_id)/upstreams" \
+		'{"upstreams":[{"path":"/run/bell.sock","doorbell":true},{"path":"/run/w1.sock"}]}'
+	eq "$REPLY_CODE" "400"
+	json_has "$REPLY_BODY" 'doorbell'
+}
+
+case_apps_delete() {
+	capi DELETE "/1.0/apps/$(app_id)"
+	eq "$REPLY_CODE" "204"
+	capi GET "/1.0/apps/$(app_id)"
+	eq "$REPLY_CODE" "404"
+}
+
+case_apps_register_survivor() {
+	# Register an app that exists when Janus restarts; it must not survive.
+	capi POST /1.0/apps '{"name":"ghost","hosts":["ghost.example.com"]}'
+	eq "$REPLY_CODE" "201"
+}
+
+case_apps_empty_after_restart() {
+	capi GET /1.0/apps
+	eq "$REPLY_CODE" "200"
+	eq "$(printf '%s' "$REPLY_BODY" | tr -d '[:space:]')" "[]"
+}
+
 # --- main -----------------------------------------------------------------
 
 SUITE_START_NS=$(now_ns)
@@ -353,6 +485,25 @@ test "local GET /1.0 → janus meta" case_control_local_root
 test "local GET /1.0/health → ok" case_control_local_health
 test "unix GET /1.0 → janus meta" case_control_unix_root
 test "unix GET /1.0/health → ok" case_control_unix_health
+
+group "apps"
+test "register shop → 201 shop-xxxxxx" case_apps_register
+test "register invalid bodies → 400" case_apps_register_bad
+test "host already claimed → 409 names host+holder" case_apps_host_conflict
+test "list apps → contains shop" case_apps_list
+test "get app → name + hosts" case_apps_get
+test "get unknown id → 404" case_apps_get_unknown
+test "unix socket sees same registry" case_apps_unix_sees_registry
+test "put upstreams → 200 stored" case_apps_put_upstreams
+test "put empty upstreams → 200 (not routable)" case_apps_put_upstreams_empty
+test "put mixed doorbell list → 400" case_apps_put_upstreams_mixed_doorbell
+test "delete app → 204, then 404" case_apps_delete
+test "register app to survive restart" case_apps_register_survivor
+
+printf '%s\n' "$(paint "$DIM" "restarting caddy …")"
+stop_caddy
+start_caddy || exit 1
+test "restart → registry empty" case_apps_empty_after_restart
 
 report
 exit $?

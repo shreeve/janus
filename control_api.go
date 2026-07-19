@@ -127,6 +127,14 @@ func (a *App) controlMux() *http.ServeMux {
 		mux.HandleFunc(p1+"/", a.handleControlRoot)
 		mux.HandleFunc(p2, a.handleControlHealth)
 		mux.HandleFunc(p2+"/", a.handleControlHealth)
+
+		apps := base + "/1.0/apps"
+		mux.HandleFunc("POST "+apps, a.handleAppsCreate)
+		mux.HandleFunc("GET "+apps, a.handleAppsList)
+		mux.HandleFunc("GET "+apps+"/{id}", a.handleAppsGet)
+		mux.HandleFunc("PATCH "+apps+"/{id}", a.handleAppsPatch)
+		mux.HandleFunc("DELETE "+apps+"/{id}", a.handleAppsDelete)
+		mux.HandleFunc("PUT "+apps+"/{id}/upstreams", a.handleAppsUpstreamsPut)
 	}
 	return mux
 }
