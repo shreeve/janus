@@ -1,0 +1,49 @@
+# Janus — control + cascading ping on *.ripdev.io
+#
+# *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
+#
+#   ./bin/caddy run
+#
+# Global ping ON.
+#   catchall  *.ripdev.io     → inherit on  → pong
+#   on.ripdev.io              → explicit on → pong
+#   off.ripdev.io             → explicit off → 404
+#
+#   curl -s https://foo.ripdev.io/ping                                   → pong
+#   curl -s https://on.ripdev.io/ping                                    → pong
+#   curl -s https://off.ripdev.io/ping -o /dev/null -w '%{http_code}\n'  → 404
+#
+{
+	auto_https disable_redirects
+
+	janus {
+		control local
+		ping # site-scoped default: on
+	}
+}
+
+(ripdev_tls) {
+	tls certs/ripdev.io.crt certs/ripdev.io.key
+}
+
+# Catchall — any other *.ripdev.io name inherits global ping on
+*.ripdev.io {
+	import ripdev_tls
+	janus
+}
+
+# Explicit on (same effective result as catchall; proves site-level on)
+on.ripdev.io {
+	import ripdev_tls
+	janus {
+		ping on
+	}
+}
+
+# Explicit off
+off.ripdev.io {
+	import ripdev_tls
+	janus {
+		ping off
+	}
+}

@@ -1,10 +1,14 @@
 <p align="center">
-  <img src="docs/janus-social.png" alt="Janus" width="640">
+  <img src="docs/janus-720w-white.png" alt="Janus Logo" width="360">
+</p>
+
+<p align="center">
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, and a WebSocket hub, driven by a JSON control API.</strong>
 </p>
 
 ---
 
-Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Janus provides the inward face: a memory-resident registry and engines controlled only by the `/1.0` JSON API over a unix socket. Cold Caddyfile config decides which traffic is admitted into Janus; hot `/1.0` calls decide how admitted hosts map to upstreams, health, hub, and certificate allowlisting.
+Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Janus provides the inward face: a memory-resident registry and engines driven by the `/1.0` JSON API. Cold Caddyfile config sets capabilities (such as **control** reachability) and which sites admit traffic into Janus; hot `/1.0` calls decide how admitted hosts map to upstreams, health, hub, and certificate allowlisting.
 
 This repository is a Go module. Caddy is a dependency, not a git submodule. A Janus-enabled binary is produced with [xcaddy](https://github.com/caddyserver/xcaddy), which compiles stock Caddy together with this module into one static `caddy` binary.
 
@@ -14,7 +18,7 @@ This repository is a Go module. Caddy is a dependency, not a git submodule. A Ja
 
 - **Go** — current stable release ([go.dev/dl](https://go.dev/dl/))
 - **xcaddy** — builds Caddy with modules
-- A Caddyfile that loads Janus (see `Caddyfile.example` when present)
+- A `Caddyfile` that loads Janus (repo root)
 
 ### Install Go (macOS, Homebrew)
 
@@ -35,9 +39,9 @@ go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 xcaddy version
 ```
 
-## Ping-only proof (current tree)
+## Ping proof (current tree)
 
-This tree ships a **ping-only** Janus: `GET /ping` → `pong`. Enough to prove the module links, Caddyfile admission works, and HTTPS serves on localhost.
+**ping** is a cascading cold capability (default off). The working `Caddyfile` turns it **on** globally, uses a `*.ripdev.io` catchall (inherit on), `on.ripdev.io` (explicit on), and `off.ripdev.io` (explicit off). Hosts use the trusted wildcard cert (→ `127.0.0.1`) from [`certs/`](certs/). See [`docs/20260718-204255-capability-ping.md`](docs/20260718-204255-capability-ping.md).
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -55,24 +59,24 @@ xcaddy build \
 # → http.handlers.janus
 ```
 
-### HTTPS on localhost:443
+### HTTPS on *.ripdev.io:443
 
-Yes — `Caddyfile.example` binds `https://localhost` (port **443**) with `tls internal` (Caddy’s local CA).
+`Caddyfile` serves `*.ripdev.io` / `on.ripdev.io` / `off.ripdev.io` on **:443** with the signed cert in `certs/`. DNS always returns `127.0.0.1`; Caddy picks the site by SNI / Host.
 
 ```bash
-./bin/caddy run --config Caddyfile.example
+./bin/caddy run
 ```
 
 In another terminal:
 
 ```bash
-curl -sk https://localhost/ping
-# → pong
+curl -s https://foo.ripdev.io/ping          # catchall → pong
+curl -s https://on.ripdev.io/ping           # explicit on → pong
+curl -s -o /dev/null -w '%{http_code}\n' https://off.ripdev.io/ping
+# → 404
 ```
 
-On some systems binding :443 needs elevated privileges (`sudo ./bin/caddy run …`). On current macOS it often works without sudo. Curl `-k` skips verifying the local CA for the smoke test; `./bin/caddy trust` installs that CA into the system trust store when you want browsers quiet.
-
-If 443 is unavailable, change the site address to `https://localhost:8443` in `Caddyfile.example`.
+On some systems binding :443 needs elevated privileges (`sudo ./bin/caddy run …`). On current macOS it often works without sudo.
 
 ## Build and run
 
@@ -80,13 +84,13 @@ From this repository (local module replacement is automatic when you run `xcaddy
 
 ```bash
 # Develop: build a temporary caddy+janus and run it
-xcaddy run --config Caddyfile.example
+xcaddy run
 
 # Produce a binary (see ping-only proof above)
 xcaddy build \
   --with github.com/shreeve/janus=. \
   --output ./bin/caddy
-./bin/caddy run --config Caddyfile.example
+./bin/caddy run
 ```
 
 From anywhere, against a published module version:
@@ -115,9 +119,12 @@ Confirm the module is linked:
 
 | Path | Role |
 | --- | --- |
-| `janus.go` | `http.handlers.janus` (ping-only for now) |
-| `Caddyfile.example` | Cold config: HTTPS localhost → Janus |
-| `docs/` | Design notes and API sketches (`YYYYMMDD-HHMMSS-` prefixed) |
+| `app.go` | Process-wide `janus` app (control, global defaults) |
+| `handler.go` | Site `http.handlers.janus` (admission + site overrides) |
+| `settings.go` | Cascade helpers (`ping on` / `ping off`) |
+| `Caddyfile` | Working cold config (multi-site cascade demos) |
+| `test.sh` | High-level acceptance suite (self-contained; not a substitute for `go test`) |
+| `docs/` | Design notes, SPEC, capabilities (`YYYYMMDD-HHMMSS-` prefixed) |
 
 ## Design notes
 
