@@ -6,11 +6,40 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"time"
+
+	"go.uber.org/zap"
 )
+
+// Heartbeat TTL (docs/20260719-002000-pool-protocol.md "Defaults": 5s / 15s).
+// An app whose heartbeat clock is older than the TTL is dead — same effect
+// as DELETE. Heartbeat ≠ readiness: the clock proves the supervising process
+// is alive, independent of upstreams[].
+const defaultHeartbeatTTL = 15 * time.Second
+
+// heartbeatTTLEnv lets a test harness shorten the TTL. Unset in production.
+const heartbeatTTLEnv = "JANUS_HEARTBEAT_TTL"
+
+// heartbeatTTLFromEnv resolves the TTL, rejecting illegal values loudly.
+func heartbeatTTLFromEnv() (time.Duration, error) {
+	v := os.Getenv(heartbeatTTLEnv)
+	if v == "" {
+		return defaultHeartbeatTTL, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not a Go duration (want e.g. \"15s\"): %v", heartbeatTTLEnv, v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be positive, got %q", heartbeatTTLEnv, v)
+	}
+	return d, nil
+}
 
 // Upstream is one entry in an app's upstream list.
 type Upstream struct {
@@ -29,6 +58,11 @@ type AppRecord struct {
 	Name      string     `json:"name"`
 	Hosts     []string   `json:"hosts"`
 	Upstreams []Upstream `json:"upstreams"`
+
+	// heartbeatAt is the app's heartbeat clock. Registration stamps it
+	// (heartbeats begin immediately after registration, so a slow cold
+	// boot is never mistaken for dead); each POST …/heartbeat re-stamps.
+	heartbeatAt time.Time
 }
 
 func (rec *AppRecord) clone() AppRecord {
@@ -165,12 +199,23 @@ type appRegistry struct {
 	mu    sync.RWMutex
 	apps  map[string]*AppRecord // id → record
 	hosts map[string]string     // host → holding app id (first-wins)
+
+	// now is the heartbeat clock source; tests inject a fake.
+	now func() time.Time
+
+	// ttl is the heartbeat TTL; the background sweep reaps older clocks.
+	ttl time.Duration
+
+	sweepStop chan struct{}
+	sweepDone chan struct{}
 }
 
 func newAppRegistry() *appRegistry {
 	return &appRegistry{
 		apps:  map[string]*AppRecord{},
 		hosts: map[string]string{},
+		now:   time.Now,
+		ttl:   defaultHeartbeatTTL,
 	}
 }
 
@@ -201,7 +246,8 @@ func (r *appRegistry) create(name string, hosts []string) (AppRecord, error) {
 			break
 		}
 	}
-	rec := &AppRecord{ID: id, Name: name, Hosts: hosts, Upstreams: []Upstream{}}
+	// Registration counts as the first heartbeat.
+	rec := &AppRecord{ID: id, Name: name, Hosts: hosts, Upstreams: []Upstream{}, heartbeatAt: r.now()}
 	r.apps[id] = rec
 	for _, h := range hosts {
 		r.hosts[h] = id
@@ -302,6 +348,77 @@ func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error)
 	return rec.clone(), nil
 }
 
+// heartbeat stamps the app's heartbeat clock.
+func (r *appRegistry) heartbeat(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.apps[id]
+	if !ok {
+		return errUnknownApp(id)
+	}
+	rec.heartbeatAt = r.now()
+	return nil
+}
+
+// sweepExpired reaps every app whose heartbeat clock is older than the TTL
+// and returns the reaped ids. Same effect as delete: entry removed, hosts
+// freed; the tenant must re-register. Heartbeat ≠ readiness — empty
+// upstreams with a fresh clock stays registered; only a stale clock kills.
+// All state is per app id, so one expiring app never touches another.
+func (r *appRegistry) sweepExpired() []string {
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var reaped []string
+	for id, rec := range r.apps {
+		if now.Sub(rec.heartbeatAt) > r.ttl {
+			for _, h := range rec.Hosts {
+				delete(r.hosts, h)
+			}
+			delete(r.apps, id)
+			reaped = append(reaped, id)
+		}
+	}
+	return reaped
+}
+
+// startSweeper runs the background TTL sweep on a ticker at TTL/3.
+func (r *appRegistry) startSweeper(logger *zap.Logger) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	r.sweepStop = make(chan struct{})
+	r.sweepDone = make(chan struct{})
+	go func() {
+		defer close(r.sweepDone)
+		ticker := time.NewTicker(r.ttl / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				for _, id := range r.sweepExpired() {
+					logger.Warn("janus app heartbeat TTL expired; registration reaped",
+						zap.String("app", id),
+						zap.Duration("ttl", r.ttl),
+					)
+				}
+			case <-r.sweepStop:
+				return
+			}
+		}
+	}()
+}
+
+// stopSweeper stops the sweep and waits for its goroutine to exit.
+func (r *appRegistry) stopSweeper() {
+	if r.sweepStop == nil {
+		return
+	}
+	close(r.sweepStop)
+	<-r.sweepDone
+	r.sweepStop = nil
+}
+
 func (r *appRegistry) delete(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -397,6 +514,20 @@ func (a *App) handleAppsPatch(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleAppsDelete(w http.ResponseWriter, r *http.Request) {
 	if err := a.appsRegistry().delete(r.PathValue("id")); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleAppsHeartbeat(w http.ResponseWriter, r *http.Request) {
+	// The protocol heartbeat is bodyless; reject anything else loudly.
+	var probe [1]byte
+	if n, _ := r.Body.Read(probe[:]); n > 0 {
+		writeAPIError(w, errBadRequest("heartbeat takes no body"))
+		return
+	}
+	if err := a.appsRegistry().heartbeat(r.PathValue("id")); err != nil {
 		writeAPIError(w, err)
 		return
 	}

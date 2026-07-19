@@ -43,6 +43,11 @@ func (App) CaddyModule() caddy.ModuleInfo {
 func (a *App) Provision(ctx caddy.Context) error {
 	a.logger = ctx.Logger()
 	a.appsReg = newAppRegistry()
+	ttl, err := heartbeatTTLFromEnv()
+	if err != nil {
+		return fmt.Errorf("janus: %w", err)
+	}
+	a.appsReg.ttl = ttl
 	a.dp = newDataPlane(a.appsReg, a.logger)
 	if len(a.Control) == 0 {
 		a.Control = []Control{{Mode: "internal"}}
@@ -65,11 +70,13 @@ func (a *App) Start() error {
 	a.logger.Info("janus ping default",
 		zap.Bool("enabled", resolveBool(nil, a.Ping, false)),
 	)
+	a.appsReg.startSweeper(a.logger)
 	return a.startControlListeners()
 }
 
 // Stop stops the Janus app.
 func (a *App) Stop() error {
+	a.appsReg.stopSweeper()
 	return a.stopControlListeners()
 }
 

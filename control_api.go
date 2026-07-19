@@ -135,6 +135,7 @@ func (a *App) controlMux() *http.ServeMux {
 		mux.HandleFunc("PATCH "+apps+"/{id}", a.handleAppsPatch)
 		mux.HandleFunc("DELETE "+apps+"/{id}", a.handleAppsDelete)
 		mux.HandleFunc("PUT "+apps+"/{id}/upstreams", a.handleAppsUpstreamsPut)
+		mux.HandleFunc("POST "+apps+"/{id}/heartbeat", a.handleAppsHeartbeat)
 	}
 	return mux
 }
