@@ -136,8 +136,36 @@ func (a *App) controlMux() *http.ServeMux {
 		mux.HandleFunc("DELETE "+apps+"/{id}", a.handleAppsDelete)
 		mux.HandleFunc("PUT "+apps+"/{id}/upstreams", a.handleAppsUpstreamsPut)
 		mux.HandleFunc("POST "+apps+"/{id}/heartbeat", a.handleAppsHeartbeat)
+
+		mux.HandleFunc("GET "+base+"/1.0/tls/ask", a.handleTLSAsk)
 	}
 	return mux
+}
+
+// handleTLSAsk answers Caddy's on_demand_tls ask: may a certificate be
+// minted for this domain? 200 = the domain is a host claimed by a
+// registered app; 404 = it is not (Caddy denies on any non-200). The
+// match is exact after hostname normalization (lowercase, trailing dot
+// stripped) — the registry holds exact hosts only, never wildcards.
+// Allowance follows the registry lifecycle: register → allowed; DELETE
+// or TTL reap → denied. Heartbeat ≠ readiness: an alive app with empty
+// upstreams keeps its allowance — a reload never breaks TLS.
+func (a *App) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		writeAPIError(w, errBadRequest("domain query parameter is required"))
+		return
+	}
+	name := normalizeHostHeader(domain)
+	rec, ok := a.appsRegistry().resolveHost(name)
+	if !ok {
+		writeAPIError(w, &apiError{
+			Status: http.StatusNotFound,
+			Msg:    fmt.Sprintf("domain %q is not a host of any registered app", name),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"domain": name, "app": rec.ID})
 }
 
 func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {

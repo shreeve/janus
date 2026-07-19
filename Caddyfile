@@ -22,8 +22,22 @@
 #   curl -s http://127.0.0.1:7600/1.0/health
 #   curl -s --unix-socket run/janus.sock http://janus/1.0
 #
+# 6) tls — on-demand minting gated by the hot registry
+#   Cold config owns the machinery (on_demand_tls global + per-site
+#   tls { on_demand }); the registry only answers "may we mint for
+#   this name?" via GET /1.0/tls/ask?domain=… (200 allow, 404 deny).
+#   The :8443 site below mints from Caddy's internal CA on demand:
+#   registered hosts complete the handshake, unknown names are denied.
+#
+#   curl -s 'http://127.0.0.1:7600/1.0/tls/ask?domain=some.host'  → 404 until registered
+#
 {
 	auto_https disable_redirects
+	skip_install_trust
+
+	on_demand_tls {
+		ask http://127.0.0.1:7600/1.0/tls/ask
+	}
 
 	janus {
 		ping # 1) site-scoped default: on
@@ -56,4 +70,14 @@ off.ripdev.io {
 	janus {
 		ping off
 	}
+}
+
+# On-demand TLS — certs minted per SNI from the internal CA, but only
+# for names the registry allows (see on_demand_tls ask above)
+https://:8443 {
+	tls {
+		on_demand
+		issuer internal
+	}
+	janus
 }
