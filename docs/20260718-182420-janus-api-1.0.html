@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Janus /1.0 — actions → module work</title>
+<style>
+:root { --bg:#f6f8fa; --fg:#1f2328; --muted:#656d76; --border:#d0d7de; --card:#fff; --head:#f6f8fa; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --border:#30363d; --card:#161b22; --head:#21262d; }
+}
+* { box-sizing: border-box; }
+body { margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; color:var(--fg); background:var(--bg); padding:24px; }
+h1 { font-size:22px; margin:0 0 8px; }
+h2 { font-size:16px; margin:24px 0 10px; }
+h3 { font-size:14px; margin:20px 0 8px; }
+p.lead { color:var(--muted); max-width:70rem; margin:0 0 16px; }
+.note { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin-bottom:16px; font-size:13px; color:var(--muted); }
+.stats { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:16px; }
+.stat { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px; }
+.stat b { display:block; font-size:22px; }
+.stat span { font-size:12px; color:var(--muted); }
+.controls { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:14px; }
+label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+input, select { font:inherit; padding:7px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--fg); }
+input { min-width:220px; flex:1; }
+.wrap { background:var(--card); border:1px solid var(--border); border-radius:8px; overflow:auto; max-height:calc(100vh - 260px); }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { border-bottom:1px solid var(--border); padding:10px 12px; vertical-align:top; text-align:left; }
+th { position:sticky; top:0; background:var(--head); z-index:1; }
+.ep { font-weight:600; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+.grp { color:var(--muted); font-size:11px; margin-top:2px; }
+.pill { display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; border:1px solid var(--border); white-space:nowrap; }
+pre { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px; overflow:auto; font-size:12px; }
+ul { margin:8px 0 0 20px; color:var(--muted); font-size:13px; }
+footer { margin-top:18px; font-size:12px; color:var(--muted); }
+@media print {
+  .controls, .note { display:none; }
+  .wrap { max-height:none; overflow:visible; border:none; }
+  th { position:static; }
+  tr { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+  <h1>Janus /1.0 — actions → module work</h1>
+  <p class="lead">
+    Control plane only. Does not change the Caddyfile admission gate.
+    Unknown public hosts → 404. Registry is memory-only; tenants re-register after restart.
+  </p>
+
+  <div class="stats">
+    <div class="stat"><b>18</b><span>Endpoints</span></div>
+    <div class="stat"><b>8</b><span>Write</span></div>
+    <div class="stat"><b>8</b><span>Read</span></div>
+    <div class="stat"><b>2</b><span>Lifecycle</span></div>
+  </div>
+
+  <div class="note">
+    <strong>Public data plane</strong> is not these URLs — browsers hit Caddy:443 → Janus router/hub.
+    The <code>/1.0</code> API lives on the control unix socket (Incus-style).
+    Caddyfile decides admission into Janus; JSON decides routing inside Janus.
+  </div>
+
+  <h2>Register body (canonical)</h2>
+  <pre>{
+  "id": "blog",
+  "hosts": ["blog.example.com"],
+  "upstreams": ["unix//run/blog/w0.sock", "unix//run/blog/w1.sock"],
+  "expose": "public",
+  "realtime": false,
+  "bridge_path": "/v1/realtime"
+}</pre>
+
+  <div class="controls">
+    <label style="flex:1">Search
+      <input id="q" type="search" placeholder="heartbeat, upstream, host…"/>
+    </label>
+    <label>Group
+      <select id="group">
+        <option value="">All</option>
+        <option value="Meta">Meta</option><option value="Apps">Apps</option><option value="Upstreams">Upstreams</option><option value="Lifecycle">Lifecycle</option><option value="Hosts">Hosts</option><option value="Hub">Hub</option><option value="Events">Events</option>
+      </select>
+    </label>
+    <label>Kind
+      <select id="kind">
+        <option value="">All</option>
+        <option value="read">Read</option>
+        <option value="write">Write</option>
+        <option value="lifecycle">Lifecycle</option>
+      </select>
+    </label>
+    <span id="showing" style="font-size:12px;color:var(--muted);padding-bottom:8px"></span>
+  </div>
+
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:22%">Endpoint</th>
+          <th style="width:8%">Kind</th>
+          <th style="width:30%">Purpose</th>
+          <th>Module work</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <h2>Internal engines</h2>
+  <ul>
+    <li><strong>Registry</strong> — app/host/upstream maps; first-wins hosts</li>
+    <li><strong>Router / proxy</strong> — host lookup → lb → reverse_proxy; else 404</li>
+    <li><strong>Health</strong> — heartbeat clock + optional probes; unhealthy → 502/503</li>
+    <li><strong>Allowlist</strong> — On-Demand/ACME ask callback; CertMagic obtains certs</li>
+    <li><strong>Hub</strong> — WS hold, membership, bridge POST, publish fan-out</li>
+    <li><strong>mDNS</strong> — ads from expose + hosts</li>
+  </ul>
+
+  <h3>v1 cut line</h3>
+  <p class="lead">
+    Ship first: GET /1.0, apps CRUD, PUT upstreams, heartbeat, DELETE.
+    Defer: drain, events stream, separate host allow (fold into POST/PUT apps), hub diagnostics.
+  </p>
+
+  <footer>Source: Cursor canvas janus-api-1.0 · 18 endpoints · saved under packages/server/docs</footer>
+
+<script>
+const ROWS = [{"group": "Meta", "method": "GET", "path": "/1.0", "kind": "read", "purpose": "Server info: API version, Janus build, uptime, admission gate summary (read-only echo of cold config).", "work": "Return process metadata. No registry mutation."}, {"group": "Meta", "method": "GET", "path": "/1.0/health", "kind": "read", "purpose": "Liveness for systemd / load balancers watching the control plane.", "work": "Cheap OK if control socket + app Start() succeeded."}, {"group": "Apps", "method": "GET", "path": "/1.0/apps", "kind": "read", "purpose": "List registered apps (id, hosts, upstreams, expose, realtime, state).", "work": "Snapshot in-memory registry."}, {"group": "Apps", "method": "GET", "path": "/1.0/apps/{id}", "kind": "read", "purpose": "Get one app + live state (healthy/unhealthy, last heartbeat, cert status per host).", "work": "Lookup registry + derive health from heartbeat clock + upstream probes."}, {"group": "Apps", "method": "POST", "path": "/1.0/apps", "kind": "write", "purpose": "Register a new app. Body: id, hosts[], upstreams[], expose?, realtime?, bridge_path?.", "work": "First-register-wins on each host (409 if taken). Insert registry row. Wire host\u2192app in router. If expose needs certs, admit hosts into On-Demand allowlist. If realtime, attach hub namespace for app. Start upstream health tracking."}, {"group": "Apps", "method": "PUT", "path": "/1.0/apps/{id}", "kind": "write", "purpose": "Full replace of app config (idempotent re-register after tenant restart).", "work": "Same as create-or-replace. Reconcile hosts (release removed, claim new with first-wins). Replace upstream set. Toggle hub on/off. Refresh allowlist."}, {"group": "Apps", "method": "PATCH", "path": "/1.0/apps/{id}", "kind": "write", "purpose": "Partial update \u2014 typically upstreams, expose, or realtime flags.", "work": "Merge fields. Hot-swap upstream list in lb pool (drain removed sockets). Adjust allowlist/hub if flags changed."}, {"group": "Apps", "method": "DELETE", "path": "/1.0/apps/{id}", "kind": "write", "purpose": "Deregister app immediately.", "work": "Remove routes \u2192 unknown host 404. Stop health probes. Revoke host allowlist entries owned by app. Clear hub rooms/clients for that app (or mark draining then clear)."}, {"group": "Upstreams", "method": "PUT", "path": "/1.0/apps/{id}/upstreams", "kind": "write", "purpose": "Replace upstream list after worker recycle/scale. Body: string[].", "work": "Atomic swap of lb targets. New sockets enter rotation; removed stop receiving new requests (in-flight finish)."}, {"group": "Upstreams", "method": "GET", "path": "/1.0/apps/{id}/upstreams", "kind": "read", "purpose": "List upstreams + per-target health (up/down, latency, errors).", "work": "Read lb/health state Janus already maintains for proxying."}, {"group": "Lifecycle", "method": "POST", "path": "/1.0/apps/{id}/heartbeat", "kind": "lifecycle", "purpose": "Tenant still alive. Optional body: generation, upstream hint.", "work": "Bump last_seen. If was unhealthy, mark healthy again (503 lifts when upstreams up). Reset give-up timer."}, {"group": "Lifecycle", "method": "POST", "path": "/1.0/apps/{id}/drain", "kind": "lifecycle", "purpose": "Voluntary drain before stop (optional polite shutdown).", "work": "Mark draining: no new HTTP; hub may refuse new WS; keep proxying in-flight until empty or timeout; then same as DELETE or wait for DELETE."}, {"group": "Hosts", "method": "GET", "path": "/1.0/hosts", "kind": "read", "purpose": "All claimed hosts \u2192 app id + cert state (none/pending/ready/error).", "work": "Join registry with CertMagic/allowlist status."}, {"group": "Hosts", "method": "POST", "path": "/1.0/hosts/{name}/allow", "kind": "write", "purpose": "Explicitly admit a hostname for On-Demand/ACME (if not implied by register).", "work": "Add to allowlist callback set. Does not create a route without an app binding. Optional: trigger obtain."}, {"group": "Hosts", "method": "DELETE", "path": "/1.0/hosts/{name}/allow", "kind": "write", "purpose": "Revoke admit (usually automatic on app DELETE).", "work": "Remove from allowlist. Existing cert may remain in storage until expiry; new handshakes for that name fail ask."}, {"group": "Hub", "method": "GET", "path": "/1.0/apps/{id}/hub", "kind": "read", "purpose": "Hub stats: clients, groups, messages (diagnostics).", "work": "Read hub counters for that app namespace."}, {"group": "Hub", "method": "POST", "path": "/1.0/apps/{id}/hub/publish", "kind": "write", "purpose": "Control-plane publish into hub (same idea as public /publish, but scoped + authenticated as tenant).", "work": "Fan-out to WS clients in app\u2019s hub per Bam-shaped payload. Does not hit tenant HTTP unless bridge rules say so."}, {"group": "Events", "method": "GET", "path": "/1.0/events", "kind": "read", "purpose": "Optional SSE/WS stream of registry changes (Incus-like). Defer if heavy.", "work": "Subscribe to internal bus: app added/removed, unhealthy, cert ready. v1 can skip."}];
+const LABEL = {"read": "Read", "write": "Write", "lifecycle": "Lifecycle"};
+const COLOR = {"read": "#0969da", "write": "#1a7f37", "lifecycle": "#9a6700"};
+const tbody = document.getElementById("tbody");
+const q = document.getElementById("q");
+const group = document.getElementById("group");
+const kind = document.getElementById("kind");
+const showing = document.getElementById("showing");
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function render() {
+  const qs = q.value.trim().toLowerCase();
+  const f = ROWS.filter(r => {
+    if (group.value && r.group !== group.value) return false;
+    if (kind.value && r.kind !== kind.value) return false;
+    if (!qs) return true;
+    return (r.method + " " + r.path + " " + r.purpose + " " + r.work + " " + r.group).toLowerCase().includes(qs);
+  });
+  showing.textContent = "Showing " + f.length + " / " + ROWS.length;
+  tbody.innerHTML = f.map(r => {
+    const color = COLOR[r.kind] || "#656d76";
+    return `<tr>
+      <td><div class="ep">${esc(r.method)} ${esc(r.path)}</div><div class="grp">${esc(r.group)}</div></td>
+      <td><span class="pill" style="color:${color};border-color:${color}33">${esc(LABEL[r.kind])}</span></td>
+      <td>${esc(r.purpose)}</td>
+      <td>${esc(r.work)}</td>
+    </tr>`;
+  }).join("");
+}
+q.addEventListener("input", render);
+group.addEventListener("change", render);
+kind.addEventListener("change", render);
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<!-- saved from url=(0065)file:///Users/shreeve/Data/Code/rip/misc/rip-server-vs-caddy.html -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rip Server vs Caddy — capability matrix</title>
+<style>
+  :root {
+    --bg: #f6f8fa;
+    --fg: #1f2328;
+    --muted: #656d76;
+    --border: #d0d7de;
+    --card: #ffffff;
+    --head: #f6f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --muted: #8b949e;
+      --border: #30363d;
+      --card: #161b22;
+      --head: #21262d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    padding: 24px;
+  }
+  h1 { font-size: 22px; margin: 0 0 8px; font-weight: 650; }
+  h2 { font-size: 16px; margin: 28px 0 10px; }
+  p.lead { color: var(--muted); margin: 0 0 16px; max-width: 70rem; }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .stat b { display: block; font-size: 22px; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .note {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: flex-end;
+    margin-bottom: 14px;
+  }
+  .controls label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  input, select {
+    font: inherit;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--fg);
+    min-width: 180px;
+  }
+  input { min-width: 240px; flex: 1; }
+  .count { color: var(--muted); font-size: 12px; padding-bottom: 8px; }
+  .wrap {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: auto;
+    max-height: calc(100vh - 220px);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th, td {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+    vertical-align: top;
+    text-align: left;
+  }
+  th {
+    position: sticky;
+    top: 0;
+    background: var(--head);
+    z-index: 1;
+    font-weight: 600;
+  }
+  tr:nth-child(even) td { background: color-mix(in srgb, var(--head) 55%, transparent); }
+  .cap { font-weight: 600; }
+  .cat { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .pill {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .split {
+    margin-top: 24px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .split li { margin: 6px 0; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  @media print {
+    body { background: white; color: black; padding: 12px; }
+    .controls, .note { display: none; }
+    .wrap { max-height: none; overflow: visible; border: none; }
+    th { position: static; }
+    tr { break-inside: avoid; }
+    .stats { grid-template-columns: repeat(3, 1fr); }
+  }
+</style>
+</head>
+<body>
+  <h1>Rip Server vs Caddy — capability matrix</h1>
+  <p class="lead">
+    Exhaustive inventory of <code>rip-lang/packages/server</code> (v1.4.x) against Caddy 2.
+    Includes bam-style WebSocket↔HTTP bridge and Caddy-only edge capabilities as Rip holes.
+  </p>
+
+  <div class="stats">
+    <div class="stat"><b id="n-total">142</b><span>Rows total</span></div>
+    <div class="stat"><b>43</b><span>Both cover</span></div>
+    <div class="stat"><b>35</b><span>Rip-only (app)</span></div>
+    <div class="stat"><b>29</b><span>Caddy-only</span></div>
+    <div class="stat"><b>32</b><span>Partial overlap</span></div>
+    <div class="stat"><b>3</b><span>Rip gaps/stubs</span></div>
+  </div>
+
+  <div class="note">
+    <strong>How to read:</strong> Rip-only rows are mostly the Sinatra app framework, workers,
+    <code>serve()</code> bundler, and the built-in WS hub — keep those behind Caddy.
+    Caddy-only rows are public-edge strengths (HTTP/3, DNS-01, On-Demand TLS, PKI, admin API, L4 via caddy-l4).
+    Partial = both touch it with material differences. Rip gap = documented/stubbed but not fully delivered.
+    Use your browser’s Print → Save as PDF.
+  </div>
+
+  <div class="controls">
+    <label style="flex:1">Search
+      <input id="q" type="search" placeholder="TLS, WebSocket, ACME, workers…">
+    </label>
+    <label>Category
+      <select id="cat">
+        <option value="">All categories</option>
+        <option value="1. Core HTTP">1. Core HTTP</option><option value="2. TLS">2. TLS</option><option value="3. ACME">3. ACME</option><option value="4. Layer-7 proxy">4. Layer-7 proxy</option><option value="5. Layer-4 / streams">5. Layer-4 / streams</option><option value="6. WebSocket / realtime">6. WebSocket / realtime</option><option value="7. Static / SPA">7. Static / SPA</option><option value="8. Edge security">8. Edge security</option><option value="9. Compression">9. Compression</option><option value="10. App framework (Rip API)">10. App framework (Rip API)</option><option value="11. Validation">11. Validation</option><option value="12. App middleware">12. App middleware</option><option value="13. Rip app delivery">13. Rip app delivery</option><option value="14. Workers / concurrency">14. Workers / concurrency</option><option value="15. Control plane / ops">15. Control plane / ops</option><option value="16. Hot reload / watch">16. Hot reload / watch</option><option value="17. Config model">17. Config model</option><option value="18. Compat export">18. Compat export</option><option value="19. Observability">19. Observability</option><option value="20. LAN / mDNS">20. LAN / mDNS</option><option value="21. Misc / packaging">21. Misc / packaging</option><option value="22. Rip stubs / incomplete">22. Rip stubs / incomplete</option><option value="23. Caddy-only (Rip holes)">23. Caddy-only (Rip holes)</option>
+      </select>
+    </label>
+    <label>Coverage
+      <select id="cov">
+        <option value="">All</option>
+        <option value="both">Both</option>
+        <option value="rip">Rip only</option>
+        <option value="caddy">Caddy only</option>
+        <option value="partial">Partial</option>
+        <option value="gap">Rip gap</option>
+      </select>
+    </label>
+    <div class="count" id="showing">Showing 142 / 142</div>
+  </div>
+
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:18%">Capability</th>
+          <th style="width:9%">Coverage</th>
+          <th style="width:36.5%">Rip Server</th>
+          <th style="width:36.5%">Caddy</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"><tr>
+      <td><div class="cap">Serve HTTP</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Bun.serve listener; port tokens http / http:N / bare port; default intent HTTPS.</td>
+      <td>http app; HTTP/1.1+2+3; listeners per site or global.</td>
+    </tr><tr>
+      <td><div class="cap">Serve HTTPS</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>TLS listeners; https / https:N; --https-port; shipped *.ripdev.io cert for local.</td>
+      <td>HTTPS by default; automatic or manual certs.</td>
+    </tr><tr>
+      <td><div class="cap">HTTP/2</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Via Bun/TLS stack (host-dependent).</td>
+      <td>Native HTTP/2.</td>
+    </tr><tr>
+      <td><div class="cap">HTTP/3 (QUIC)</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking — not exposed as a first-class server feature.</td>
+      <td>Native HTTP/3 by default.</td>
+    </tr><tr>
+      <td><div class="cap">Port bind / EADDRINUSE walk</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Preferred port, then walk a window; EACCES on privileged → 3000/3443.</td>
+      <td>Bind failures are loud; no auto port walk (you pick ports).</td>
+    </tr><tr>
+      <td><div class="cap">Idle connection timeout</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>--idle-timeout-sec (default 30; 0 disables); Bun idleTimeout. Documented: does not stop trickle slow-loris.</td>
+      <td>Configurable read/write/idle timeouts on servers.</td>
+    </tr><tr>
+      <td><div class="cap">Max request body size</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>--max-body-mb (default 10) → Bun maxRequestBodySize; separate app bodyLimit() middleware.</td>
+      <td>request_body max_size; streaming-aware.</td>
+    </tr><tr>
+      <td><div class="cap">Host / path / method routing</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Multi-host registry; exact + wildcard hosts; prefix/exact path scoring; longest mount wins.</td>
+      <td>Site blocks + matchers (host, path, method, header, …); matcher composition.</td>
+    </tr><tr>
+      <td><div class="cap">Path mounts (multi-app per host)</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>site@/path mounts; static strips prefix; proxy forwards full path (no rewrite yet).</td>
+      <td>handle /path/* + rewrite /uri strip_prefix — first-class.</td>
+    </tr><tr>
+      <td><div class="cap">Redirect routes</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Config/runtime redirect responses; HTTP→HTTPS redirect on :80.</td>
+      <td>redir / redir * https://…; auto HTTP→HTTPS with Automatic HTTPS.</td>
+    </tr><tr>
+      <td><div class="cap">Error / 404 / status pages</div><div class="cat">1. Core HTTP</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>App: onError / notFound / errorEnvelope (masks 5xx). Edge: status responses from gates.</td>
+      <td>handle_errors; status; templates for custom error pages.</td>
+    </tr><tr>
+      <td><div class="cap">TLS termination</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Terminates TLS at the edge; SNI cert selection including wildcards.</td>
+      <td>Core strength; terminates TLS with modern defaults.</td>
+    </tr><tr>
+      <td><div class="cap">SNI certificate selection</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>buildTlsArray / matchCertForHost; ssl-dir SAN scan maps certs to hosts.</td>
+      <td>Automatic per-hostname cert selection from managed store.</td>
+    </tr><tr>
+      <td><div class="cap">Manual cert / key</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>--cert/--key; serve.rip server.cert/key; ssl directory of .crt/.key pairs.</td>
+      <td>tls /path/cert /path/key or tls internal / custom issuers.</td>
+    </tr><tr>
+      <td><div class="cap">Shipped local/dev cert (*.ripdev.io)</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Bundled certs/ripdev.io.{crt,key}; auto *.ripdev.io host aliases.</td>
+      <td>tls internal + local trust; no ripdev.io product, but localhost/internal HTTPS is automatic.</td>
+    </tr><tr>
+      <td><div class="cap">HSTS</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>--hsts or serve.rip hsts / server.hsts on HTTPS responses.</td>
+      <td>header Strict-Transport-Security; often paired with Automatic HTTPS.</td>
+    </tr><tr>
+      <td><div class="cap">HTTP → HTTPS redirect</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Port-80 redirect listener; --no-redirect-http; ACME challenge short-circuit. Bind failure → warn only.</td>
+      <td>Automatic with Automatic HTTPS; configurable.</td>
+    </tr><tr>
+      <td><div class="cap">OCSP stapling / Must-Staple</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking as an explicit ops surface.</td>
+      <td>OCSP stapling, Must-Staple, revocation handling built in.</td>
+    </tr><tr>
+      <td><div class="cap">TLS session ticket hardening / key types</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Relies on Bun/BoringSSL defaults; little operator surface.</td>
+      <td>Configurable key types, ticket keys, lifetimes, cluster coordination.</td>
+    </tr><tr>
+      <td><div class="cap">On-demand TLS</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking — certs provisioned for known hosts only.</td>
+      <td>On-Demand TLS: obtain cert at first handshake for dynamic names (with ask policy).</td>
+    </tr><tr>
+      <td><div class="cap">Encrypted Client Hello (ECH)</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking.</td>
+      <td>ECH support in modern Caddy TLS stack.</td>
+    </tr><tr>
+      <td><div class="cap">mTLS / client certificates</div><div class="cat">2. TLS</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking as a first-class edge feature.</td>
+      <td>tls client_auth; internal PKI + ACME server for mTLS fleets.</td>
+    </tr><tr>
+      <td><div class="cap">ACME / Let's Encrypt client</div><div class="cat">3. ACME</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>RFC 8555 client (acme/*); LE + staging; --acme / --acme-staging / --no-acme.</td>
+      <td>CertMagic; LE + ZeroSSL by default; any ACME CA.</td>
+    </tr><tr>
+      <td><div class="cap">HTTP-01 challenge</div><div class="cat">3. ACME</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Yes — challenge store on :80 before redirect.</td>
+      <td>Yes (default challenge set).</td>
+    </tr><tr>
+      <td><div class="cap">TLS-ALPN-01 challenge</div><div class="cat">3. ACME</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking — HTTP-01 only.</td>
+      <td>Yes.</td>
+    </tr><tr>
+      <td><div class="cap">DNS-01 challenge / wildcards</div><div class="cat">3. ACME</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Wildcards rejected for ACME; manual certs required. No DNS-01.</td>
+      <td>DNS-01 via many dns provider modules; wildcards first-class.</td>
+    </tr><tr>
+      <td><div class="cap">Cert store &amp; renewal loop</div><div class="cat">3. ACME</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>~/.rip/certs (or server.certDir); 30d renewal threshold; AcmeManager ~12h loop; renew/fail metrics.</td>
+      <td>Managed storage; smart renewal scheduling; cluster-shared storage.</td>
+    </tr><tr>
+      <td><div class="cap">ACME account / P-256 / JWS / CSR crypto</div><div class="cat">3. ACME</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Custom crypto in acme/crypto.rip (account keys, thumbprint, CSR).</td>
+      <td>Handled inside CertMagic.</td>
+    </tr><tr>
+      <td><div class="cap">ACME server (internal PKI)</div><div class="cat">3. ACME</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking — client only.</td>
+      <td>Built-in ACME server (Smallstep) for internal mTLS PKI.</td>
+    </tr><tr>
+      <td><div class="cap">Multi-CA fallback / EAB / preferred chains</div><div class="cat">3. ACME</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>LE + staging only; no ZeroSSL/EAB/chain prefs.</td>
+      <td>Multi-issuer fallback, EAB, preferred chains, staging backoff.</td>
+    </tr><tr>
+      <td><div class="cap">HTTP reverse proxy</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>http(s):// targets in serve.rip; hop-header strip; Via: 1.1 rip.</td>
+      <td>reverse_proxy — flagship feature.</td>
+    </tr><tr>
+      <td><div class="cap">X-Forwarded-* handling</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Overwrites For/Proto/Host from real peer (anti-spoof). No X-Real-IP in Rip proxy (nginx export has it).</td>
+      <td>header_up / trusted_proxies; sophisticated client IP trust.</td>
+    </tr><tr>
+      <td><div class="cap">Trusted proxies (client IP from XFF)</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#cf222e;border-color:#cf222e33">Rip gap</span></td>
+      <td>server.trustedProxies parsed/validated in config but NEVER applied — client IP = Bun requestIP only. Hole.</td>
+      <td>trusted_proxies first-class for real client IP / rate limits / logs.</td>
+    </tr><tr>
+      <td><div class="cap">Proxy path rewrite</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Documented future — full path forwarded today.</td>
+      <td>rewrite / uri strip_prefix / handle_path — standard.</td>
+    </tr><tr>
+      <td><div class="cap">Upstream pools / load balancing</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Multi-target selection; busy accounting; strategies in upstream module.</td>
+      <td>lb_policy (round_robin, least_conn, ip_hash, random, weighted, …).</td>
+    </tr><tr>
+      <td><div class="cap">Active health checks</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Periodic GET /health (configurable path); thresholds.</td>
+      <td>Active + passive health checks; rich status matching.</td>
+    </tr><tr>
+      <td><div class="cap">Retry policy</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Attempts, status/method filters, backoff (defaults: 2 tries; 502/503/504; GET/HEAD/OPTIONS).</td>
+      <td>lb_retries / retry_match; transport dial retries.</td>
+    </tr><tr>
+      <td><div class="cap">Circuit breaker</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Error-rate open + cooldown jitter on upstreams.</td>
+      <td>fail / circuit breaker style passive health + modules.</td>
+    </tr><tr>
+      <td><div class="cap">Proxy connect / read timeouts</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>--connect-timeout-ms / --read-timeout-ms (+ RIP_* env); per-route/upstream overrides.</td>
+      <td>transport http { dial_timeout; response_header_timeout; … }.</td>
+    </tr><tr>
+      <td><div class="cap">Request / route identity headers</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>X-Request-Id, X-Rip-Route on proxy responses; rip-mark correlation (stripped from clients).</td>
+      <td>header_up/down; {http.request.uuid} placeholders; tracing modules.</td>
+    </tr><tr>
+      <td><div class="cap">Dynamic upstreams (SRV / A / …)</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking — static target lists.</td>
+      <td>dynamic_upstreams (SRV, A, multi, …).</td>
+    </tr><tr>
+      <td><div class="cap">Response buffering / streaming control</div><div class="cat">4. Layer-7 proxy</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Basic Bun fetch proxy; limited streaming/buffer knobs.</td>
+      <td>flush_interval, buffer responses, streaming controls.</td>
+    </tr><tr>
+      <td><div class="cap">TCP / TLS passthrough (L4)</div><div class="cat">5. Layer-4 / streams</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>tcp://host:port apps; streams/* router + pipe; shared-port HTTPS mux.</td>
+      <td>Standard binary is L7; L4 via community caddy-l4 module (xcaddy).</td>
+    </tr><tr>
+      <td><div class="cap">ClientHello SNI peek (ssl_preread)</div><div class="cat">5. Layer-4 / streams</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Strict bounded ClientHello parse (16KB cap); structured fail codes; nginx-like topology.</td>
+      <td>caddy-l4 TLS matcher peeks SNI; listener_wrappers for shared-port mux.</td>
+    </tr><tr>
+      <td><div class="cap">Shared-port HTTPS multiplexer</div><div class="cat">5. Layer-4 / streams</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Matching SNI → TCP backend; else internal HTTPS; buffered handshake fallback.</td>
+      <td>caddy-l4 + http app together (OPNsense docs cover this pattern).</td>
+    </tr><tr>
+      <td><div class="cap">Backpressure-safe byte pipe</div><div class="cat">5. Layer-4 / streams</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Bidirectional pause/drain pipe; idle/connect/handshake timers (~300s idle default).</td>
+      <td>caddy-l4 proxy with connection handling; Go net semantics.</td>
+    </tr><tr>
+      <td><div class="cap">Stream upstream accounting / diagnostics</div><div class="cat">5. Layer-4 / streams</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Active/total connections; /diagnostics streams section; drain on reload.</td>
+      <td>Depends on l4 module + admin/metrics; less turnkey than Rip's built-in.</td>
+    </tr><tr>
+      <td><div class="cap">UDP proxying</div><div class="cat">5. Layer-4 / streams</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking.</td>
+      <td>caddy-l4 supports UDP routes.</td>
+    </tr><tr>
+      <td><div class="cap">WebSocket reverse proxy (upgrade)</div><div class="cat">6. WebSocket / realtime</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Automatic Upgrade passthrough to upstream WS URL; drain-aware with runtime retention.</td>
+      <td>reverse_proxy upgrades automatically — no extra config.</td>
+    </tr><tr>
+      <td><div class="cap">Built-in WebSocket hub (pub/sub)</div><div class="cat">6. WebSocket / realtime</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>serving/realtime.rip: groups, fan-out, protocol keys @ + - &gt; *; binary broadcast; --realtime-path (default /realtime).</td>
+      <td>No built-in room hub. Closest: Mercure module (SSE pub/sub) or custom Go module. Bam-like hub = custom module opportunity.</td>
+    </tr><tr>
+      <td><div class="cap">WS → HTTP backend bridge (bam-style)</div><div class="cat">6. WebSocket / realtime</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>WS frames → POST /v1/realtime over worker Unix socket with frame semantics; app stays HTTP. Mirrors bam's Sec-WebSocket-Frame open/text/close pattern.</td>
+      <td>Lacking natively. Custom module (or keep a small Rip/bam process behind reverse_proxy) fills this.</td>
+    </tr><tr>
+      <td><div class="cap">External publish endpoint</div><div class="cat">6. WebSocket / realtime</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>POST /publish into hub; --publish-secret / RIP_PUBLISH_SECRET Bearer gate. Bam had bampub CLI → /publish.</td>
+      <td>Lacking natively (Mercure has publisher auth; different protocol).</td>
+    </tr><tr>
+      <td><div class="cap">WS idle timeout / pings</div><div class="cat">6. WebSocket / realtime</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>120s idle, sendPings on hub.</td>
+      <td>Transport-level keepalive via Go; proxy has no room-hub pings.</td>
+    </tr><tr>
+      <td><div class="cap">Realtime stats in diagnostics</div><div class="cat">6. WebSocket / realtime</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Clients/groups/messages under /diagnostics.</td>
+      <td>N/A for hub; proxy metrics via Prometheus module.</td>
+    </tr><tr>
+      <td><div class="cap">Mercure / SSE pub/sub (standard)</div><div class="cat">6. WebSocket / realtime</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>SSE used for /watch reload only — not a general Mercure hub.</td>
+      <td>Mercure module for SSE-based pub/sub (different model than Rip/bam WS hub).</td>
+    </tr><tr>
+      <td><div class="cap">Static file serving</div><div class="cat">7. Static / SPA</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>MIME, traversal checks, mount-prefix strip; security path checks.</td>
+      <td>file_server — production-hardened.</td>
+    </tr><tr>
+      <td><div class="cap">Directory browse / listing</div><div class="cat">7. Static / SPA</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>browse flag + HTML listing UI; browse.rip fallback when no index.rip/ts.</td>
+      <td>file_server browse.</td>
+    </tr><tr>
+      <td><div class="cap">SPA fallback to index.html</div><div class="cat">7. Static / SPA</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>spa flag: missing path → index.html for HTML Accept.</td>
+      <td>try_files {path} /index.html pattern.</td>
+    </tr><tr>
+      <td><div class="cap">Markdown → HTML rendering</div><div class="cat">7. Static / SPA</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>.md via Bun.markdown in static/browse.</td>
+      <td>templates / markdown modules or prebuild; not core default.</td>
+    </tr><tr>
+      <td><div class="cap">Syntax-highlighted text view</div><div class="cat">7. Static / SPA</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>highlight.js + Rip grammar at /_rip/hljs-rip.js (CDN styles).</td>
+      <td>Lacking — would be a custom handler/module.</td>
+    </tr><tr>
+      <td><div class="cap">ETag / 304 revalidation</div><div class="cat">7. Static / SPA</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>@send / Bun.file weak ETag; serve() Brotli+ETag for bundles.</td>
+      <td>file_server etag / cache headers.</td>
+    </tr><tr>
+      <td><div class="cap">HTTP response caching at edge</div><div class="cat">7. Static / SPA</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Roadmap only — not implemented. App @cache sets Cache-Control.</td>
+      <td>cache module (Souin etc.) / Cache-Control honoring varies by build.</td>
+    </tr><tr>
+      <td><div class="cap">Request validation / hardening</div><div class="cat">8. Edge security</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>URL length 8KB; CL+TE conflict; multi-Host; null bytes; multi-decode path traversal.</td>
+      <td>Go HTTP stack + matchers; request body controls; security headers modules.</td>
+    </tr><tr>
+      <td><div class="cap">Per-IP rate limiting</div><div class="cat">8. Edge security</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Token bucket + LRU (100k); --rate-limit / --rate-limit-window (default 300/min); 429 + Retry-After. Uses direct TCP IP (not XFF).</td>
+      <td>rate_limit module (zone keys, cluster storage); enterprise-grade sliding window.</td>
+    </tr><tr>
+      <td><div class="cap">Internal header stripping</div><div class="cat">8. Edge security</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Strips rip-worker-*, rip-no-log, rip-mark from clients.</td>
+      <td>header_down / request_header delete.</td>
+    </tr><tr>
+      <td><div class="cap">Secure response headers (app middleware)</div><div class="cat">8. Edge security</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>secureHeaders(): nosniff, frameOptions, XSS, Referrer-Policy, optional CSP/HSTS.</td>
+      <td>header directive; security modules; Authelia integrations.</td>
+    </tr><tr>
+      <td><div class="cap">Basic / advanced auth at edge</div><div class="cat">8. Edge security</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>No edge basic-auth gate; app-level sessions/bail!.</td>
+      <td>basicauth; JWT/OAuth/OIDC via modules; Authelia.</td>
+    </tr><tr>
+      <td><div class="cap">WAF / bot / CrowdSec integration</div><div class="cat">8. Edge security</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>JSON access log schema designed for CrowdSec-style parsers; no WAF engine.</td>
+      <td>CrowdSec / WAF modules in ecosystem; richer security app modules.</td>
+    </tr><tr>
+      <td><div class="cap">Response compression (app)</div><div class="cat">9. Compression</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>compress() middleware: gzip/deflate via CompressionStream after threshold; buffers as text (streams poorly).</td>
+      <td>encode gzip zstd — streaming, skip already-encoded.</td>
+    </tr><tr>
+      <td><div class="cap">Brotli for app bundles</div><div class="cat">9. Compression</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>serve() middleware serves Brotli for compiled Rip browser assets.</td>
+      <td>encode zstd br gzip (build-dependent).</td>
+    </tr><tr>
+      <td><div class="cap">Sinatra-style route verbs</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>get/post/put/patch/del/all; :id, :name{regex}, /* wildcards; prefix groups.</td>
+      <td>Not an app framework — reverse_proxy to your app. (php_fastcgi etc. are different.)</td>
+    </tr><tr>
+      <td><div class="cap">Middleware pipeline (use / before / after / raw)</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Koa-style compose; path-scoped use; lifecycle filters.</td>
+      <td>Handler chains / route blocks — different model, not ALS request context.</td>
+    </tr><tr>
+      <td><div class="cap">Request context helpers</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>@json/@text/@html/@redirect/@body/@send/@header/@cache; @req.*; AsyncLocalStorage ctx()/session/env.</td>
+      <td>N/A — app concern behind the proxy.</td>
+    </tr><tr>
+      <td><div class="cap">start / startHandler / App</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Listen, export fetch handler, or wrap route setup; worker mode skips listen when WORKER_ID/SOCKET_PATH set.</td>
+      <td>N/A.</td>
+    </tr><tr>
+      <td><div class="cap">error! / notice! / bail!</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Structured halt helpers; bail clears session → 401; errorEnvelope JSON shape.</td>
+      <td>N/A — app concern.</td>
+    </tr><tr>
+      <td><div class="cap">mark() / @mark correlation</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Sets internal rip-mark; stripped from client response; kept in access log.</td>
+      <td>Approx: custom log fields / tracing IDs.</td>
+    </tr><tr>
+      <td><div class="cap">subrequest()</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Nested ALS store with override data for internal calls.</td>
+      <td>N/A.</td>
+    </tr><tr>
+      <td><div class="cap">Schema input: on routes + OpenAPI 3.1</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Validates JSON body → @input; auto GET /openapi.json; openapi(info).</td>
+      <td>N/A at edge; API gateways exist as modules but not Rip schemas.</td>
+    </tr><tr>
+      <td><div class="cap">CORS preflight policy hook</div><div class="cat">10. App framework (Rip API)</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>setCorsPreflightPolicy; cors() middleware. enableCorsPreflight export is a no-op stub.</td>
+      <td>header Access-Control-* or cors modules.</td>
+    </tr><tr>
+      <td><div class="cap">read() param/query/body validators</div><div class="cat">11. Validation</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Re-exports @rip-lang/validate; required !, defaults, ranges, enums, regex.</td>
+      <td>N/A — app concern.</td>
+    </tr><tr>
+      <td><div class="cap">Built-in validator vocabulary (~37)</div><div class="cat">11. Validation</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>id,int,money,email,phone,ssn,uuid,slug,json, … plus registerValidator / ~:name coercers on import.</td>
+      <td>N/A.</td>
+    </tr><tr>
+      <td><div class="cap">Helpers (isBlank, toName, toPhone, formatMoney)</div><div class="cat">11. Validation</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Exported from server API surface.</td>
+      <td>N/A.</td>
+    </tr><tr>
+      <td><div class="cap">cors()</div><div class="cat">12. App middleware</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Origins/methods/headers/credentials/maxAge/expose; optional early preflight; unified with OPTIONS policy.</td>
+      <td>header or community cors modules.</td>
+    </tr><tr>
+      <td><div class="cap">logger() (app access log)</div><div class="cat">12. App middleware</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Formats (dev/tiny), skip, stream — distinct from process access log.</td>
+      <td>log / access logs at edge.</td>
+    </tr><tr>
+      <td><div class="cap">sessions() (signed / encrypted cookies)</div><div class="cat">12. App middleware</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>HMAC signed or AES-256-GCM encrypt: true cookie sessions.</td>
+      <td>No general session store; auth modules differ.</td>
+    </tr><tr>
+      <td><div class="cap">csrf()</div><div class="cat">12. App middleware</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Double-submit + optional HMAC; c.csrfToken. Form-field _csrf incomplete (header path works).</td>
+      <td>N/A built-in; app or security modules.</td>
+    </tr><tr>
+      <td><div class="cap">timeout() / bodyLimit() middleware</div><div class="cat">12. App middleware</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Per-handler timeout; max parsed body for app layer.</td>
+      <td>timeouts / request_body at edge.</td>
+    </tr><tr>
+      <td><div class="cap">htmlJson (iOS Safari JSON-as-HTML)</div><div class="cat">12. App middleware</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>UA+Accept heuristic so Safari doesn't download JSON.</td>
+      <td>Lacking — niche app middleware.</td>
+    </tr><tr>
+      <td><div class="cap">serve() browser bundler middleware</div><div class="cat">13. Rip app delivery</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Bundles Rip apps: rip.min.js, named bundles, routes, Brotli, ETag, watch registration, @rip-lang/* browser packages, schema projections. Requires rip.browser: true.</td>
+      <td>Lacking — would reverse_proxy to Rip app process that does this.</td>
+    </tr><tr>
+      <td><div class="cap">Managed Rip app workers (index.rip)</div><div class="cat">13. Rip app delivery</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Local index.rip → process workers on Unix sockets; static otherwise.</td>
+      <td>reverse_proxy to external process; no Rip worker manager.</td>
+    </tr><tr>
+      <td><div class="cap">App aliases / ripdev hosts</div><div class="cat">13. Rip app delivery</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>path@alias1,alias2; auto *.ripdev.io host.</td>
+      <td>Site addresses are hostnames you configure; no ripdev product.</td>
+    </tr><tr>
+      <td><div class="cap">Default entry resolution</div><div class="cat">13. Rip app delivery</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>index.rip / index.ts / cwd; else browse.rip static browser.</td>
+      <td>file_server root or reverse_proxy target you name.</td>
+    </tr><tr>
+      <td><div class="cap">Multi-worker process pool</div><div class="cat">14. Workers / concurrency</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Bun.spawn workers; w:N / w:auto (default cores/2); Unix sockets.</td>
+      <td>Single process event loop; scale via OS processes / containers. FrankenPHP/process modules exist separately.</td>
+    </tr><tr>
+      <td><div class="cap">Per-worker concurrency gate</div><div class="cat">14. Workers / concurrency</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>c:N (default 1); inflight gate; busy → 503 Rip-Worker-Busy. ALS required for per-request state.</td>
+      <td>N/A — Go goroutines multiplex freely.</td>
+    </tr><tr>
+      <td><div class="cap">Request queue + shed</div><div class="cat">14. Workers / concurrency</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>--max-queue / --queue-timeout-ms; full queue 503; stale wait 504; capacity = w×c before queue.</td>
+      <td>No identical queue; can 503 via rate_limit / custom handlers.</td>
+    </tr><tr>
+      <td><div class="cap">Retry clone for busy workers</div><div class="cat">14. Workers / concurrency</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Clone body ≤10MB for retry when worker busy.</td>
+      <td>lb_try_duration / retries to other upstreams — different model.</td>
+    </tr><tr>
+      <td><div class="cap">Rolling recycle (max requests / seconds)</div><div class="cat">14. Workers / concurrency</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>r:N,Ss policy; drain + SIGTERM; RIP_MAX_REQUESTS / RIP_MAX_SECONDS.</td>
+      <td>No app-worker recycle; process supervision modules exist in ecosystem.</td>
+    </tr><tr>
+      <td><div class="cap">Hot pool swap on code reload</div><div class="cat">14. Workers / concurrency</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Atomic worker pool replace; forward to worker over Unix with timeouts.</td>
+      <td>Config reload zero-downtime; not Rip code workers.</td>
+    </tr><tr>
+      <td><div class="cap">Worker join/quit registry</div><div class="cat">14. Workers / concurrency</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Control POST /worker ops; WORKER_ID / SOCKET_PATH env on spawn.</td>
+      <td>N/A.</td>
+    </tr><tr>
+      <td><div class="cap">Control Unix socket</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>/tmp/&lt;prefix&gt;.ctl.sock; --socket-prefix (default rip_&lt;appName&gt;).</td>
+      <td>Admin API (default localhost:2019) — HTTP JSON, not Unix by default (configurable).</td>
+    </tr><tr>
+      <td><div class="cap">PID file + stop</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>/tmp/&lt;prefix&gt;.pid; -s/--stop SIGTERM (pkill fallback).</td>
+      <td>caddy stop / system service; PID via OS service managers.</td>
+    </tr><tr>
+      <td><div class="cap">Reload / hot restart</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>-r/--reload → POST /reload; --restart rebuilds workers/config keeping listeners; SIGHUP; file watch.</td>
+      <td>caddy reload; zero-downtime config changes; SIGUSR1.</td>
+    </tr><tr>
+      <td><div class="cap">Atomic config apply + verify + rollback</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Parse→validate→normalize→stage→activate→verify→rollback; requireHealthyProxies / requireReadyApps; reload history in diagnostics.</td>
+      <td>Atomic config load; failed adapt rejects; less app-worker verify semantics.</td>
+    </tr><tr>
+      <td><div class="cap">Runtime drain (HTTP + WS + streams)</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>In-flight HTTP/WS on retired runtimes; stream drain on reload.</td>
+      <td>Graceful config swap; connection draining practices.</td>
+    </tr><tr>
+      <td><div class="cap">Public /status</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Status/uptime/worker summary.</td>
+      <td>Custom respond /metrics or health handlers.</td>
+    </tr><tr>
+      <td><div class="cap">Public /diagnostics</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Metrics, hosts, streams, config, multiplexer, reload history, realtime — in-process JSON.</td>
+      <td>Admin API + /metrics; different shape.</td>
+    </tr><tr>
+      <td><div class="cap">Public /server UI + rip.local landing</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Serves server.html; rip.local special host.</td>
+      <td>No equivalent dashboard; admin UI via third parties.</td>
+    </tr><tr>
+      <td><div class="cap">Control /registry /watch /reload /restart</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>List hosts; register SSE watch dirs; apply reload; hot restart.</td>
+      <td>Admin API config GET/POST/PATCH/DELETE.</td>
+    </tr><tr>
+      <td><div class="cap">CLI operator commands</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>-h/-v; -f serve.rip; -c check; -i info; -l list; -r reload; --restart; -s stop; --nginx; --caddy; token grammar w: c: r: http/https.</td>
+      <td>caddy run/start/stop/reload/fmt/validate/adapt/list-modules/…</td>
+    </tr><tr>
+      <td><div class="cap">Environment overrides</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>RIP_WORKER_CONCURRENCY, RIP_MAX_REQUESTS/SECONDS, RIP_STATIC, RIP_MAX_QUEUE, RIP_QUEUE_TIMEOUT_MS, RIP_CONNECT/READ_TIMEOUT_MS, RIP_PUBLISH_SECRET, RIP_DEBUG, RIP_LOG_JSON, APP_BASE_DIR, worker spawn env.</td>
+      <td>Env in Caddyfile {$VAR}; limited vs Rip's process knobs.</td>
+    </tr><tr>
+      <td><div class="cap">Startup URL banner / event logging</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Prints local/LAN/ripdev URLs; structured startup events; --quiet; --debug; --env=; --json-logging.</td>
+      <td>Logs to stdout; less 'dev URL banner' productization.</td>
+    </tr><tr>
+      <td><div class="cap">Online config API (JSON)</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Control socket is custom HTTP over Unix — not a full JSON config API.</td>
+      <td>Native admin JSON API — dynamic config without restart.</td>
+    </tr><tr>
+      <td><div class="cap">Config adapters (JSON / nginx / …)</div><div class="cat">15. Control plane / ops</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Native serve.rip (Rip module export). Exports TO nginx/Caddy; doesn't ingest nginx.</td>
+      <td>JSON native + Caddyfile + adapters (nginx, etc.).</td>
+    </tr><tr>
+      <td><div class="cap">Code file watching</div><div class="cat">16. Hot reload / watch</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Glob --watch (default *.rip); ignore node_modules/.git/dist; atomic-save rename quirks; --static disables.</td>
+      <td>caddy reload on config change (file watcher optional); not app source HMR.</td>
+    </tr><tr>
+      <td><div class="cap">SSE /_rip/watch (browser live reload)</div><div class="cat">16. Hot reload / watch</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>EventSource reload + 20s keepalive; workers POST watch dirs to control socket.</td>
+      <td>No built-in app live-reload SSE — custom or reverse_proxy to Rip.</td>
+    </tr><tr>
+      <td><div class="cap">serve.rip multi-host config</div><div class="cat">17. Config model</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>ssl, hsts, acme, sites, apps, version, server; unknown keys rejected; four modes: static / Rip app / HTTP proxy / TCP.</td>
+      <td>Caddyfile or JSON apps.http.servers / tls.</td>
+    </tr><tr>
+      <td><div class="cap">sites aliases + wildcard hosts</div><div class="cat">17. Config model</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Name → hostname; uniqueness; *.example.com supported.</td>
+      <td>Site addresses; wildcards; On-Demand for dynamic names.</td>
+    </tr><tr>
+      <td><div class="cap">apps string specs (browse / spa flags)</div><div class="cat">17. Config model</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Target + sites + flags; kind from prefix (path / http(s) / tcp).</td>
+      <td>Per-site handler blocks.</td>
+    </tr><tr>
+      <td><div class="cap">Check-config printer</div><div class="cat">17. Config model</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>-c/--check-config human-readable validation.</td>
+      <td>caddy validate / adapt.</td>
+    </tr><tr>
+      <td><div class="cap">Verify policy after activate</div><div class="cat">17. Config model</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>requireHealthyProxies, requireReadyApps, minHealthyTargetsPerProxy, includeUnroutedManagedApps.</td>
+      <td>Health checks continuous; no identical post-reload app-ready gate.</td>
+    </tr><tr>
+      <td><div class="cap">Export nginx.conf</div><div class="cat">18. Compat export</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>--nginx → hardened nginx (TLS, HSTS, rate limits, WS, stream ssl_preread, multi-path, HTTP→HTTPS, 421). Managed Rip apps emit # TODO proxy_pass.</td>
+      <td>N/A — Caddy is the target, not nginx exporter. (Adapters go the other way.)</td>
+    </tr><tr>
+      <td><div class="cap">Export Caddyfile</div><div class="cat">18. Compat export</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>--caddy → reverse_proxy / file_server / SPA / layer4. TCP needs caddy-l4 custom build; managed apps TODO + :3000 placeholder.</td>
+      <td>Is the Caddyfile — native.</td>
+    </tr><tr>
+      <td><div class="cap">In-process metrics (p50/p95/p99)</div><div class="cat">19. Observability</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Counters, gauges, latency window (1000) in /diagnostics. No Prometheus/OTel export (roadmap).</td>
+      <td>metrics Prometheus endpoint (standard/optional).</td>
+    </tr><tr>
+      <td><div class="cap">Access log (human + JSON)</div><div class="cat">19. Observability</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>Colored human lines; JSON schema with ip + optional mark; --no-access-log; CrowdSec-oriented.</td>
+      <td>Structured logs; encoders; multiple sinks.</td>
+    </tr><tr>
+      <td><div class="cap">OpenTelemetry / distributed tracing</div><div class="cat">19. Observability</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking (roadmap).</td>
+      <td>Tracing modules / ecosystem integrations.</td>
+    </tr><tr>
+      <td><div class="cap">.local mDNS advertisement</div><div class="cat">20. LAN / mDNS</div></td>
+      <td><span class="pill" style="color:#0969da;border-color:#0969da33">Rip only</span></td>
+      <td>Spawns dns-sd -P for .local hosts; LAN IPv4 detection skips link-local. macOS/dns-sd oriented.</td>
+      <td>No built-in mDNS product; OS/Avahi or custom.</td>
+    </tr><tr>
+      <td><div class="cap">Package exports (api / middleware / server)</div><div class="cat">21. Misc / packaging</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>api.rip, middleware subpath, server.rip orchestration; dep @rip-lang/validate only.</td>
+      <td>Single binary + modules; xcaddy for custom builds.</td>
+    </tr><tr>
+      <td><div class="cap">rip-server / rip server CLI bin</div><div class="cat">21. Misc / packaging</div></td>
+      <td><span class="pill" style="color:#1a7f37;border-color:#1a7f3733">Both</span></td>
+      <td>bin/rip-server wraps server.rip; token grammar not conventional --flags for w/c/r/ports.</td>
+      <td>caddy CLI.</td>
+    </tr><tr>
+      <td><div class="cap">Low-port bind guidance / systemd example</div><div class="cat">21. Misc / packaging</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>Documented setcap on Bun; systemd unit template in README (not automated).</td>
+      <td>Official packages + systemd units common.</td>
+    </tr><tr>
+      <td><div class="cap">Bench harness + test suite</div><div class="cat">21. Misc / packaging</div></td>
+      <td><span class="pill" style="color:#656d76;border-color:#656d7633">Partial</span></td>
+      <td>bench/ (oha + diagnostics); tests/runner.rip suite.</td>
+      <td>Upstream benchmarks + community; different.</td>
+    </tr><tr>
+      <td><div class="cap">Binary size / edge posture</div><div class="cat">21. Misc / packaging</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Bun runtime ~60–90MB class — heavy as a public edge; security surface of custom TLS/proxy stack is the scare factor.</td>
+      <td>Small static Go binary; memory-safe; battle-tested public edge. Modules compiled in via xcaddy.</td>
+    </tr><tr>
+      <td><div class="cap">CLI -o/--output flag</div><div class="cat">22. Rip stubs / incomplete</div></td>
+      <td><span class="pill" style="color:#cf222e;border-color:#cf222e33">Rip gap</span></td>
+      <td>Listed in VALUE_FLAGS but unused in parseFlags — stub.</td>
+      <td>N/A.</td>
+    </tr><tr>
+      <td><div class="cap">Inline edge handlers</div><div class="cat">22. Rip stubs / incomplete</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Roadmap — not implemented.</td>
+      <td>respond / templates / custom modules — yes.</td>
+    </tr><tr>
+      <td><div class="cap">Managed-app nginx/Caddy export completeness</div><div class="cat">22. Rip stubs / incomplete</div></td>
+      <td><span class="pill" style="color:#cf222e;border-color:#cf222e33">Rip gap</span></td>
+      <td>Emits # TODO + dummy upstream port for managed Rip apps.</td>
+      <td>You write reverse_proxy to the real upstream.</td>
+    </tr><tr>
+      <td><div class="cap">Modular plugin architecture (xcaddy)</div><div class="cat">23. Caddy-only (Rip holes)</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Monolithic Bun package; no compile-in module system.</td>
+      <td>Modules register into config namespaces; xcaddy builds custom binaries.</td>
+    </tr><tr>
+      <td><div class="cap">gRPC / gRPC-Web proxying</div><div class="cat">23. Caddy-only (Rip holes)</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking.</td>
+      <td>reverse_proxy supports h2/gRPC; gRPC-Web bridge modules.</td>
+    </tr><tr>
+      <td><div class="cap">FastCGI / PHP</div><div class="cat">23. Caddy-only (Rip holes)</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking.</td>
+      <td>php_fastcgi / FrankenPHP ecosystem.</td>
+    </tr><tr>
+      <td><div class="cap">Cluster certificate coordination</div><div class="cat">23. Caddy-only (Rip holes)</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Single-node cert store.</td>
+      <td>Shared storage coordinates certs across instances.</td>
+    </tr><tr>
+      <td><div class="cap">Dynamic DNS</div><div class="cat">23. Caddy-only (Rip holes)</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking.</td>
+      <td>caddy-dynamicdns module.</td>
+    </tr><tr>
+      <td><div class="cap">Header / request map / rewrite engine</div><div class="cat">23. Caddy-only (Rip holes)</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Limited proxy header overwrite; no general rewrite/map DSL.</td>
+      <td>header, map, rewrite, uri — rich.</td>
+    </tr><tr>
+      <td><div class="cap">Templates / static responses</div><div class="cat">23. Caddy-only (Rip holes)</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>browse HTML only; no general templates.</td>
+      <td>templates + respond.</td>
+    </tr><tr>
+      <td><div class="cap">Image filtering / vanity Go paths / niche handlers</div><div class="cat">23. Caddy-only (Rip holes)</div></td>
+      <td><span class="pill" style="color:#9a6700;border-color:#9a670033">Caddy only</span></td>
+      <td>Lacking.</td>
+      <td>Ecosystem modules (image filter, vanity, …).</td>
+    </tr></tbody>
+    </table>
+  </div>
+
+  <div class="split">
+    <h2>Suggested split</h2>
+    <ul>
+      <li><strong>Caddy at the public edge:</strong> TLS/ACME (incl. DNS-01/wildcards), HTTP/3, L7 proxy+WS upgrade, optional caddy-l4, rate limits, trusted proxies, metrics, admin API.</li>
+      <li><strong>Rip behind Caddy:</strong> Sinatra API, read()/OpenAPI, sessions/CSRF, serve() bundler, worker pool, SSE watch, and the WS hub / bam-style HTTP bridge if you still want that product.</li>
+      <li><strong>Custom Caddy modules</strong> fill anything Rip uniquely had at the edge that you still want in-process with Caddy (e.g. a slim realtime hub).</li>
+    </ul>
+  </div>
+
+  <footer>
+    Source: rip-lang/packages/server + bam/src · Caddy from caddyserver.com/features ·
+    Exported from Cursor canvas rip-server-vs-caddy · 142 rows
+  </footer>
+
+<script>
+const ROWS = [{"cat": "1. Core HTTP", "name": "Serve HTTP", "rip": "Bun.serve listener; port tokens http / http:N / bare port; default intent HTTPS.", "caddy": "http app; HTTP/1.1+2+3; listeners per site or global.", "cov": "both"}, {"cat": "1. Core HTTP", "name": "Serve HTTPS", "rip": "TLS listeners; https / https:N; --https-port; shipped *.ripdev.io cert for local.", "caddy": "HTTPS by default; automatic or manual certs.", "cov": "both"}, {"cat": "1. Core HTTP", "name": "HTTP/2", "rip": "Via Bun/TLS stack (host-dependent).", "caddy": "Native HTTP/2.", "cov": "partial"}, {"cat": "1. Core HTTP", "name": "HTTP/3 (QUIC)", "rip": "Lacking \u2014 not exposed as a first-class server feature.", "caddy": "Native HTTP/3 by default.", "cov": "caddy"}, {"cat": "1. Core HTTP", "name": "Port bind / EADDRINUSE walk", "rip": "Preferred port, then walk a window; EACCES on privileged \u2192 3000/3443.", "caddy": "Bind failures are loud; no auto port walk (you pick ports).", "cov": "partial"}, {"cat": "1. Core HTTP", "name": "Idle connection timeout", "rip": "--idle-timeout-sec (default 30; 0 disables); Bun idleTimeout. Documented: does not stop trickle slow-loris.", "caddy": "Configurable read/write/idle timeouts on servers.", "cov": "both"}, {"cat": "1. Core HTTP", "name": "Max request body size", "rip": "--max-body-mb (default 10) \u2192 Bun maxRequestBodySize; separate app bodyLimit() middleware.", "caddy": "request_body max_size; streaming-aware.", "cov": "both"}, {"cat": "1. Core HTTP", "name": "Host / path / method routing", "rip": "Multi-host registry; exact + wildcard hosts; prefix/exact path scoring; longest mount wins.", "caddy": "Site blocks + matchers (host, path, method, header, \u2026); matcher composition.", "cov": "both"}, {"cat": "1. Core HTTP", "name": "Path mounts (multi-app per host)", "rip": "site@/path mounts; static strips prefix; proxy forwards full path (no rewrite yet).", "caddy": "handle /path/* + rewrite /uri strip_prefix \u2014 first-class.", "cov": "partial"}, {"cat": "1. Core HTTP", "name": "Redirect routes", "rip": "Config/runtime redirect responses; HTTP\u2192HTTPS redirect on :80.", "caddy": "redir / redir * https://\u2026; auto HTTP\u2192HTTPS with Automatic HTTPS.", "cov": "both"}, {"cat": "1. Core HTTP", "name": "Error / 404 / status pages", "rip": "App: onError / notFound / errorEnvelope (masks 5xx). Edge: status responses from gates.", "caddy": "handle_errors; status; templates for custom error pages.", "cov": "both"}, {"cat": "2. TLS", "name": "TLS termination", "rip": "Terminates TLS at the edge; SNI cert selection including wildcards.", "caddy": "Core strength; terminates TLS with modern defaults.", "cov": "both"}, {"cat": "2. TLS", "name": "SNI certificate selection", "rip": "buildTlsArray / matchCertForHost; ssl-dir SAN scan maps certs to hosts.", "caddy": "Automatic per-hostname cert selection from managed store.", "cov": "both"}, {"cat": "2. TLS", "name": "Manual cert / key", "rip": "--cert/--key; serve.rip server.cert/key; ssl directory of .crt/.key pairs.", "caddy": "tls /path/cert /path/key or tls internal / custom issuers.", "cov": "both"}, {"cat": "2. TLS", "name": "Shipped local/dev cert (*.ripdev.io)", "rip": "Bundled certs/ripdev.io.{crt,key}; auto *.ripdev.io host aliases.", "caddy": "tls internal + local trust; no ripdev.io product, but localhost/internal HTTPS is automatic.", "cov": "partial"}, {"cat": "2. TLS", "name": "HSTS", "rip": "--hsts or serve.rip hsts / server.hsts on HTTPS responses.", "caddy": "header Strict-Transport-Security; often paired with Automatic HTTPS.", "cov": "both"}, {"cat": "2. TLS", "name": "HTTP \u2192 HTTPS redirect", "rip": "Port-80 redirect listener; --no-redirect-http; ACME challenge short-circuit. Bind failure \u2192 warn only.", "caddy": "Automatic with Automatic HTTPS; configurable.", "cov": "both"}, {"cat": "2. TLS", "name": "OCSP stapling / Must-Staple", "rip": "Lacking as an explicit ops surface.", "caddy": "OCSP stapling, Must-Staple, revocation handling built in.", "cov": "caddy"}, {"cat": "2. TLS", "name": "TLS session ticket hardening / key types", "rip": "Relies on Bun/BoringSSL defaults; little operator surface.", "caddy": "Configurable key types, ticket keys, lifetimes, cluster coordination.", "cov": "caddy"}, {"cat": "2. TLS", "name": "On-demand TLS", "rip": "Lacking \u2014 certs provisioned for known hosts only.", "caddy": "On-Demand TLS: obtain cert at first handshake for dynamic names (with ask policy).", "cov": "caddy"}, {"cat": "2. TLS", "name": "Encrypted Client Hello (ECH)", "rip": "Lacking.", "caddy": "ECH support in modern Caddy TLS stack.", "cov": "caddy"}, {"cat": "2. TLS", "name": "mTLS / client certificates", "rip": "Lacking as a first-class edge feature.", "caddy": "tls client_auth; internal PKI + ACME server for mTLS fleets.", "cov": "caddy"}, {"cat": "3. ACME", "name": "ACME / Let's Encrypt client", "rip": "RFC 8555 client (acme/*); LE + staging; --acme / --acme-staging / --no-acme.", "caddy": "CertMagic; LE + ZeroSSL by default; any ACME CA.", "cov": "both"}, {"cat": "3. ACME", "name": "HTTP-01 challenge", "rip": "Yes \u2014 challenge store on :80 before redirect.", "caddy": "Yes (default challenge set).", "cov": "both"}, {"cat": "3. ACME", "name": "TLS-ALPN-01 challenge", "rip": "Lacking \u2014 HTTP-01 only.", "caddy": "Yes.", "cov": "caddy"}, {"cat": "3. ACME", "name": "DNS-01 challenge / wildcards", "rip": "Wildcards rejected for ACME; manual certs required. No DNS-01.", "caddy": "DNS-01 via many dns provider modules; wildcards first-class.", "cov": "caddy"}, {"cat": "3. ACME", "name": "Cert store & renewal loop", "rip": "~/.rip/certs (or server.certDir); 30d renewal threshold; AcmeManager ~12h loop; renew/fail metrics.", "caddy": "Managed storage; smart renewal scheduling; cluster-shared storage.", "cov": "both"}, {"cat": "3. ACME", "name": "ACME account / P-256 / JWS / CSR crypto", "rip": "Custom crypto in acme/crypto.rip (account keys, thumbprint, CSR).", "caddy": "Handled inside CertMagic.", "cov": "both"}, {"cat": "3. ACME", "name": "ACME server (internal PKI)", "rip": "Lacking \u2014 client only.", "caddy": "Built-in ACME server (Smallstep) for internal mTLS PKI.", "cov": "caddy"}, {"cat": "3. ACME", "name": "Multi-CA fallback / EAB / preferred chains", "rip": "LE + staging only; no ZeroSSL/EAB/chain prefs.", "caddy": "Multi-issuer fallback, EAB, preferred chains, staging backoff.", "cov": "caddy"}, {"cat": "4. Layer-7 proxy", "name": "HTTP reverse proxy", "rip": "http(s):// targets in serve.rip; hop-header strip; Via: 1.1 rip.", "caddy": "reverse_proxy \u2014 flagship feature.", "cov": "both"}, {"cat": "4. Layer-7 proxy", "name": "X-Forwarded-* handling", "rip": "Overwrites For/Proto/Host from real peer (anti-spoof). No X-Real-IP in Rip proxy (nginx export has it).", "caddy": "header_up / trusted_proxies; sophisticated client IP trust.", "cov": "partial"}, {"cat": "4. Layer-7 proxy", "name": "Trusted proxies (client IP from XFF)", "rip": "server.trustedProxies parsed/validated in config but NEVER applied \u2014 client IP = Bun requestIP only. Hole.", "caddy": "trusted_proxies first-class for real client IP / rate limits / logs.", "cov": "gap"}, {"cat": "4. Layer-7 proxy", "name": "Proxy path rewrite", "rip": "Documented future \u2014 full path forwarded today.", "caddy": "rewrite / uri strip_prefix / handle_path \u2014 standard.", "cov": "caddy"}, {"cat": "4. Layer-7 proxy", "name": "Upstream pools / load balancing", "rip": "Multi-target selection; busy accounting; strategies in upstream module.", "caddy": "lb_policy (round_robin, least_conn, ip_hash, random, weighted, \u2026).", "cov": "both"}, {"cat": "4. Layer-7 proxy", "name": "Active health checks", "rip": "Periodic GET /health (configurable path); thresholds.", "caddy": "Active + passive health checks; rich status matching.", "cov": "both"}, {"cat": "4. Layer-7 proxy", "name": "Retry policy", "rip": "Attempts, status/method filters, backoff (defaults: 2 tries; 502/503/504; GET/HEAD/OPTIONS).", "caddy": "lb_retries / retry_match; transport dial retries.", "cov": "both"}, {"cat": "4. Layer-7 proxy", "name": "Circuit breaker", "rip": "Error-rate open + cooldown jitter on upstreams.", "caddy": "fail / circuit breaker style passive health + modules.", "cov": "both"}, {"cat": "4. Layer-7 proxy", "name": "Proxy connect / read timeouts", "rip": "--connect-timeout-ms / --read-timeout-ms (+ RIP_* env); per-route/upstream overrides.", "caddy": "transport http { dial_timeout; response_header_timeout; \u2026 }.", "cov": "both"}, {"cat": "4. Layer-7 proxy", "name": "Request / route identity headers", "rip": "X-Request-Id, X-Rip-Route on proxy responses; rip-mark correlation (stripped from clients).", "caddy": "header_up/down; {http.request.uuid} placeholders; tracing modules.", "cov": "both"}, {"cat": "4. Layer-7 proxy", "name": "Dynamic upstreams (SRV / A / \u2026)", "rip": "Lacking \u2014 static target lists.", "caddy": "dynamic_upstreams (SRV, A, multi, \u2026).", "cov": "caddy"}, {"cat": "4. Layer-7 proxy", "name": "Response buffering / streaming control", "rip": "Basic Bun fetch proxy; limited streaming/buffer knobs.", "caddy": "flush_interval, buffer responses, streaming controls.", "cov": "caddy"}, {"cat": "5. Layer-4 / streams", "name": "TCP / TLS passthrough (L4)", "rip": "tcp://host:port apps; streams/* router + pipe; shared-port HTTPS mux.", "caddy": "Standard binary is L7; L4 via community caddy-l4 module (xcaddy).", "cov": "partial"}, {"cat": "5. Layer-4 / streams", "name": "ClientHello SNI peek (ssl_preread)", "rip": "Strict bounded ClientHello parse (16KB cap); structured fail codes; nginx-like topology.", "caddy": "caddy-l4 TLS matcher peeks SNI; listener_wrappers for shared-port mux.", "cov": "partial"}, {"cat": "5. Layer-4 / streams", "name": "Shared-port HTTPS multiplexer", "rip": "Matching SNI \u2192 TCP backend; else internal HTTPS; buffered handshake fallback.", "caddy": "caddy-l4 + http app together (OPNsense docs cover this pattern).", "cov": "partial"}, {"cat": "5. Layer-4 / streams", "name": "Backpressure-safe byte pipe", "rip": "Bidirectional pause/drain pipe; idle/connect/handshake timers (~300s idle default).", "caddy": "caddy-l4 proxy with connection handling; Go net semantics.", "cov": "partial"}, {"cat": "5. Layer-4 / streams", "name": "Stream upstream accounting / diagnostics", "rip": "Active/total connections; /diagnostics streams section; drain on reload.", "caddy": "Depends on l4 module + admin/metrics; less turnkey than Rip's built-in.", "cov": "partial"}, {"cat": "5. Layer-4 / streams", "name": "UDP proxying", "rip": "Lacking.", "caddy": "caddy-l4 supports UDP routes.", "cov": "caddy"}, {"cat": "6. WebSocket / realtime", "name": "WebSocket reverse proxy (upgrade)", "rip": "Automatic Upgrade passthrough to upstream WS URL; drain-aware with runtime retention.", "caddy": "reverse_proxy upgrades automatically \u2014 no extra config.", "cov": "both"}, {"cat": "6. WebSocket / realtime", "name": "Built-in WebSocket hub (pub/sub)", "rip": "serving/realtime.rip: groups, fan-out, protocol keys @ + - > *; binary broadcast; --realtime-path (default /realtime).", "caddy": "No built-in room hub. Closest: Mercure module (SSE pub/sub) or custom Go module. Bam-like hub = custom module opportunity.", "cov": "rip"}, {"cat": "6. WebSocket / realtime", "name": "WS \u2192 HTTP backend bridge (bam-style)", "rip": "WS frames \u2192 POST /v1/realtime over worker Unix socket with frame semantics; app stays HTTP. Mirrors bam's Sec-WebSocket-Frame open/text/close pattern.", "caddy": "Lacking natively. Custom module (or keep a small Rip/bam process behind reverse_proxy) fills this.", "cov": "rip"}, {"cat": "6. WebSocket / realtime", "name": "External publish endpoint", "rip": "POST /publish into hub; --publish-secret / RIP_PUBLISH_SECRET Bearer gate. Bam had bampub CLI \u2192 /publish.", "caddy": "Lacking natively (Mercure has publisher auth; different protocol).", "cov": "rip"}, {"cat": "6. WebSocket / realtime", "name": "WS idle timeout / pings", "rip": "120s idle, sendPings on hub.", "caddy": "Transport-level keepalive via Go; proxy has no room-hub pings.", "cov": "partial"}, {"cat": "6. WebSocket / realtime", "name": "Realtime stats in diagnostics", "rip": "Clients/groups/messages under /diagnostics.", "caddy": "N/A for hub; proxy metrics via Prometheus module.", "cov": "rip"}, {"cat": "6. WebSocket / realtime", "name": "Mercure / SSE pub/sub (standard)", "rip": "SSE used for /watch reload only \u2014 not a general Mercure hub.", "caddy": "Mercure module for SSE-based pub/sub (different model than Rip/bam WS hub).", "cov": "caddy"}, {"cat": "7. Static / SPA", "name": "Static file serving", "rip": "MIME, traversal checks, mount-prefix strip; security path checks.", "caddy": "file_server \u2014 production-hardened.", "cov": "both"}, {"cat": "7. Static / SPA", "name": "Directory browse / listing", "rip": "browse flag + HTML listing UI; browse.rip fallback when no index.rip/ts.", "caddy": "file_server browse.", "cov": "both"}, {"cat": "7. Static / SPA", "name": "SPA fallback to index.html", "rip": "spa flag: missing path \u2192 index.html for HTML Accept.", "caddy": "try_files {path} /index.html pattern.", "cov": "both"}, {"cat": "7. Static / SPA", "name": "Markdown \u2192 HTML rendering", "rip": ".md via Bun.markdown in static/browse.", "caddy": "templates / markdown modules or prebuild; not core default.", "cov": "rip"}, {"cat": "7. Static / SPA", "name": "Syntax-highlighted text view", "rip": "highlight.js + Rip grammar at /_rip/hljs-rip.js (CDN styles).", "caddy": "Lacking \u2014 would be a custom handler/module.", "cov": "rip"}, {"cat": "7. Static / SPA", "name": "ETag / 304 revalidation", "rip": "@send / Bun.file weak ETag; serve() Brotli+ETag for bundles.", "caddy": "file_server etag / cache headers.", "cov": "both"}, {"cat": "7. Static / SPA", "name": "HTTP response caching at edge", "rip": "Roadmap only \u2014 not implemented. App @cache sets Cache-Control.", "caddy": "cache module (Souin etc.) / Cache-Control honoring varies by build.", "cov": "caddy"}, {"cat": "8. Edge security", "name": "Request validation / hardening", "rip": "URL length 8KB; CL+TE conflict; multi-Host; null bytes; multi-decode path traversal.", "caddy": "Go HTTP stack + matchers; request body controls; security headers modules.", "cov": "both"}, {"cat": "8. Edge security", "name": "Per-IP rate limiting", "rip": "Token bucket + LRU (100k); --rate-limit / --rate-limit-window (default 300/min); 429 + Retry-After. Uses direct TCP IP (not XFF).", "caddy": "rate_limit module (zone keys, cluster storage); enterprise-grade sliding window.", "cov": "both"}, {"cat": "8. Edge security", "name": "Internal header stripping", "rip": "Strips rip-worker-*, rip-no-log, rip-mark from clients.", "caddy": "header_down / request_header delete.", "cov": "both"}, {"cat": "8. Edge security", "name": "Secure response headers (app middleware)", "rip": "secureHeaders(): nosniff, frameOptions, XSS, Referrer-Policy, optional CSP/HSTS.", "caddy": "header directive; security modules; Authelia integrations.", "cov": "both"}, {"cat": "8. Edge security", "name": "Basic / advanced auth at edge", "rip": "No edge basic-auth gate; app-level sessions/bail!.", "caddy": "basicauth; JWT/OAuth/OIDC via modules; Authelia.", "cov": "caddy"}, {"cat": "8. Edge security", "name": "WAF / bot / CrowdSec integration", "rip": "JSON access log schema designed for CrowdSec-style parsers; no WAF engine.", "caddy": "CrowdSec / WAF modules in ecosystem; richer security app modules.", "cov": "partial"}, {"cat": "9. Compression", "name": "Response compression (app)", "rip": "compress() middleware: gzip/deflate via CompressionStream after threshold; buffers as text (streams poorly).", "caddy": "encode gzip zstd \u2014 streaming, skip already-encoded.", "cov": "partial"}, {"cat": "9. Compression", "name": "Brotli for app bundles", "rip": "serve() middleware serves Brotli for compiled Rip browser assets.", "caddy": "encode zstd br gzip (build-dependent).", "cov": "both"}, {"cat": "10. App framework (Rip API)", "name": "Sinatra-style route verbs", "rip": "get/post/put/patch/del/all; :id, :name{regex}, /* wildcards; prefix groups.", "caddy": "Not an app framework \u2014 reverse_proxy to your app. (php_fastcgi etc. are different.)", "cov": "rip"}, {"cat": "10. App framework (Rip API)", "name": "Middleware pipeline (use / before / after / raw)", "rip": "Koa-style compose; path-scoped use; lifecycle filters.", "caddy": "Handler chains / route blocks \u2014 different model, not ALS request context.", "cov": "rip"}, {"cat": "10. App framework (Rip API)", "name": "Request context helpers", "rip": "@json/@text/@html/@redirect/@body/@send/@header/@cache; @req.*; AsyncLocalStorage ctx()/session/env.", "caddy": "N/A \u2014 app concern behind the proxy.", "cov": "rip"}, {"cat": "10. App framework (Rip API)", "name": "start / startHandler / App", "rip": "Listen, export fetch handler, or wrap route setup; worker mode skips listen when WORKER_ID/SOCKET_PATH set.", "caddy": "N/A.", "cov": "rip"}, {"cat": "10. App framework (Rip API)", "name": "error! / notice! / bail!", "rip": "Structured halt helpers; bail clears session \u2192 401; errorEnvelope JSON shape.", "caddy": "N/A \u2014 app concern.", "cov": "rip"}, {"cat": "10. App framework (Rip API)", "name": "mark() / @mark correlation", "rip": "Sets internal rip-mark; stripped from client response; kept in access log.", "caddy": "Approx: custom log fields / tracing IDs.", "cov": "rip"}, {"cat": "10. App framework (Rip API)", "name": "subrequest()", "rip": "Nested ALS store with override data for internal calls.", "caddy": "N/A.", "cov": "rip"}, {"cat": "10. App framework (Rip API)", "name": "Schema input: on routes + OpenAPI 3.1", "rip": "Validates JSON body \u2192 @input; auto GET /openapi.json; openapi(info).", "caddy": "N/A at edge; API gateways exist as modules but not Rip schemas.", "cov": "rip"}, {"cat": "10. App framework (Rip API)", "name": "CORS preflight policy hook", "rip": "setCorsPreflightPolicy; cors() middleware. enableCorsPreflight export is a no-op stub.", "caddy": "header Access-Control-* or cors modules.", "cov": "partial"}, {"cat": "11. Validation", "name": "read() param/query/body validators", "rip": "Re-exports @rip-lang/validate; required !, defaults, ranges, enums, regex.", "caddy": "N/A \u2014 app concern.", "cov": "rip"}, {"cat": "11. Validation", "name": "Built-in validator vocabulary (~37)", "rip": "id,int,money,email,phone,ssn,uuid,slug,json, \u2026 plus registerValidator / ~:name coercers on import.", "caddy": "N/A.", "cov": "rip"}, {"cat": "11. Validation", "name": "Helpers (isBlank, toName, toPhone, formatMoney)", "rip": "Exported from server API surface.", "caddy": "N/A.", "cov": "rip"}, {"cat": "12. App middleware", "name": "cors()", "rip": "Origins/methods/headers/credentials/maxAge/expose; optional early preflight; unified with OPTIONS policy.", "caddy": "header or community cors modules.", "cov": "partial"}, {"cat": "12. App middleware", "name": "logger() (app access log)", "rip": "Formats (dev/tiny), skip, stream \u2014 distinct from process access log.", "caddy": "log / access logs at edge.", "cov": "partial"}, {"cat": "12. App middleware", "name": "sessions() (signed / encrypted cookies)", "rip": "HMAC signed or AES-256-GCM encrypt: true cookie sessions.", "caddy": "No general session store; auth modules differ.", "cov": "rip"}, {"cat": "12. App middleware", "name": "csrf()", "rip": "Double-submit + optional HMAC; c.csrfToken. Form-field _csrf incomplete (header path works).", "caddy": "N/A built-in; app or security modules.", "cov": "rip"}, {"cat": "12. App middleware", "name": "timeout() / bodyLimit() middleware", "rip": "Per-handler timeout; max parsed body for app layer.", "caddy": "timeouts / request_body at edge.", "cov": "partial"}, {"cat": "12. App middleware", "name": "htmlJson (iOS Safari JSON-as-HTML)", "rip": "UA+Accept heuristic so Safari doesn't download JSON.", "caddy": "Lacking \u2014 niche app middleware.", "cov": "rip"}, {"cat": "13. Rip app delivery", "name": "serve() browser bundler middleware", "rip": "Bundles Rip apps: rip.min.js, named bundles, routes, Brotli, ETag, watch registration, @rip-lang/* browser packages, schema projections. Requires rip.browser: true.", "caddy": "Lacking \u2014 would reverse_proxy to Rip app process that does this.", "cov": "rip"}, {"cat": "13. Rip app delivery", "name": "Managed Rip app workers (index.rip)", "rip": "Local index.rip \u2192 process workers on Unix sockets; static otherwise.", "caddy": "reverse_proxy to external process; no Rip worker manager.", "cov": "rip"}, {"cat": "13. Rip app delivery", "name": "App aliases / ripdev hosts", "rip": "path@alias1,alias2; auto *.ripdev.io host.", "caddy": "Site addresses are hostnames you configure; no ripdev product.", "cov": "rip"}, {"cat": "13. Rip app delivery", "name": "Default entry resolution", "rip": "index.rip / index.ts / cwd; else browse.rip static browser.", "caddy": "file_server root or reverse_proxy target you name.", "cov": "rip"}, {"cat": "14. Workers / concurrency", "name": "Multi-worker process pool", "rip": "Bun.spawn workers; w:N / w:auto (default cores/2); Unix sockets.", "caddy": "Single process event loop; scale via OS processes / containers. FrankenPHP/process modules exist separately.", "cov": "rip"}, {"cat": "14. Workers / concurrency", "name": "Per-worker concurrency gate", "rip": "c:N (default 1); inflight gate; busy \u2192 503 Rip-Worker-Busy. ALS required for per-request state.", "caddy": "N/A \u2014 Go goroutines multiplex freely.", "cov": "rip"}, {"cat": "14. Workers / concurrency", "name": "Request queue + shed", "rip": "--max-queue / --queue-timeout-ms; full queue 503; stale wait 504; capacity = w\u00d7c before queue.", "caddy": "No identical queue; can 503 via rate_limit / custom handlers.", "cov": "rip"}, {"cat": "14. Workers / concurrency", "name": "Retry clone for busy workers", "rip": "Clone body \u226410MB for retry when worker busy.", "caddy": "lb_try_duration / retries to other upstreams \u2014 different model.", "cov": "partial"}, {"cat": "14. Workers / concurrency", "name": "Rolling recycle (max requests / seconds)", "rip": "r:N,Ss policy; drain + SIGTERM; RIP_MAX_REQUESTS / RIP_MAX_SECONDS.", "caddy": "No app-worker recycle; process supervision modules exist in ecosystem.", "cov": "rip"}, {"cat": "14. Workers / concurrency", "name": "Hot pool swap on code reload", "rip": "Atomic worker pool replace; forward to worker over Unix with timeouts.", "caddy": "Config reload zero-downtime; not Rip code workers.", "cov": "rip"}, {"cat": "14. Workers / concurrency", "name": "Worker join/quit registry", "rip": "Control POST /worker ops; WORKER_ID / SOCKET_PATH env on spawn.", "caddy": "N/A.", "cov": "rip"}, {"cat": "15. Control plane / ops", "name": "Control Unix socket", "rip": "/tmp/<prefix>.ctl.sock; --socket-prefix (default rip_<appName>).", "caddy": "Admin API (default localhost:2019) \u2014 HTTP JSON, not Unix by default (configurable).", "cov": "partial"}, {"cat": "15. Control plane / ops", "name": "PID file + stop", "rip": "/tmp/<prefix>.pid; -s/--stop SIGTERM (pkill fallback).", "caddy": "caddy stop / system service; PID via OS service managers.", "cov": "both"}, {"cat": "15. Control plane / ops", "name": "Reload / hot restart", "rip": "-r/--reload \u2192 POST /reload; --restart rebuilds workers/config keeping listeners; SIGHUP; file watch.", "caddy": "caddy reload; zero-downtime config changes; SIGUSR1.", "cov": "both"}, {"cat": "15. Control plane / ops", "name": "Atomic config apply + verify + rollback", "rip": "Parse\u2192validate\u2192normalize\u2192stage\u2192activate\u2192verify\u2192rollback; requireHealthyProxies / requireReadyApps; reload history in diagnostics.", "caddy": "Atomic config load; failed adapt rejects; less app-worker verify semantics.", "cov": "partial"}, {"cat": "15. Control plane / ops", "name": "Runtime drain (HTTP + WS + streams)", "rip": "In-flight HTTP/WS on retired runtimes; stream drain on reload.", "caddy": "Graceful config swap; connection draining practices.", "cov": "both"}, {"cat": "15. Control plane / ops", "name": "Public /status", "rip": "Status/uptime/worker summary.", "caddy": "Custom respond /metrics or health handlers.", "cov": "partial"}, {"cat": "15. Control plane / ops", "name": "Public /diagnostics", "rip": "Metrics, hosts, streams, config, multiplexer, reload history, realtime \u2014 in-process JSON.", "caddy": "Admin API + /metrics; different shape.", "cov": "partial"}, {"cat": "15. Control plane / ops", "name": "Public /server UI + rip.local landing", "rip": "Serves server.html; rip.local special host.", "caddy": "No equivalent dashboard; admin UI via third parties.", "cov": "rip"}, {"cat": "15. Control plane / ops", "name": "Control /registry /watch /reload /restart", "rip": "List hosts; register SSE watch dirs; apply reload; hot restart.", "caddy": "Admin API config GET/POST/PATCH/DELETE.", "cov": "partial"}, {"cat": "15. Control plane / ops", "name": "CLI operator commands", "rip": "-h/-v; -f serve.rip; -c check; -i info; -l list; -r reload; --restart; -s stop; --nginx; --caddy; token grammar w: c: r: http/https.", "caddy": "caddy run/start/stop/reload/fmt/validate/adapt/list-modules/\u2026", "cov": "both"}, {"cat": "15. Control plane / ops", "name": "Environment overrides", "rip": "RIP_WORKER_CONCURRENCY, RIP_MAX_REQUESTS/SECONDS, RIP_STATIC, RIP_MAX_QUEUE, RIP_QUEUE_TIMEOUT_MS, RIP_CONNECT/READ_TIMEOUT_MS, RIP_PUBLISH_SECRET, RIP_DEBUG, RIP_LOG_JSON, APP_BASE_DIR, worker spawn env.", "caddy": "Env in Caddyfile {$VAR}; limited vs Rip's process knobs.", "cov": "partial"}, {"cat": "15. Control plane / ops", "name": "Startup URL banner / event logging", "rip": "Prints local/LAN/ripdev URLs; structured startup events; --quiet; --debug; --env=; --json-logging.", "caddy": "Logs to stdout; less 'dev URL banner' productization.", "cov": "partial"}, {"cat": "15. Control plane / ops", "name": "Online config API (JSON)", "rip": "Control socket is custom HTTP over Unix \u2014 not a full JSON config API.", "caddy": "Native admin JSON API \u2014 dynamic config without restart.", "cov": "caddy"}, {"cat": "15. Control plane / ops", "name": "Config adapters (JSON / nginx / \u2026)", "rip": "Native serve.rip (Rip module export). Exports TO nginx/Caddy; doesn't ingest nginx.", "caddy": "JSON native + Caddyfile + adapters (nginx, etc.).", "cov": "partial"}, {"cat": "16. Hot reload / watch", "name": "Code file watching", "rip": "Glob --watch (default *.rip); ignore node_modules/.git/dist; atomic-save rename quirks; --static disables.", "caddy": "caddy reload on config change (file watcher optional); not app source HMR.", "cov": "partial"}, {"cat": "16. Hot reload / watch", "name": "SSE /_rip/watch (browser live reload)", "rip": "EventSource reload + 20s keepalive; workers POST watch dirs to control socket.", "caddy": "No built-in app live-reload SSE \u2014 custom or reverse_proxy to Rip.", "cov": "rip"}, {"cat": "17. Config model", "name": "serve.rip multi-host config", "rip": "ssl, hsts, acme, sites, apps, version, server; unknown keys rejected; four modes: static / Rip app / HTTP proxy / TCP.", "caddy": "Caddyfile or JSON apps.http.servers / tls.", "cov": "both"}, {"cat": "17. Config model", "name": "sites aliases + wildcard hosts", "rip": "Name \u2192 hostname; uniqueness; *.example.com supported.", "caddy": "Site addresses; wildcards; On-Demand for dynamic names.", "cov": "both"}, {"cat": "17. Config model", "name": "apps string specs (browse / spa flags)", "rip": "Target + sites + flags; kind from prefix (path / http(s) / tcp).", "caddy": "Per-site handler blocks.", "cov": "both"}, {"cat": "17. Config model", "name": "Check-config printer", "rip": "-c/--check-config human-readable validation.", "caddy": "caddy validate / adapt.", "cov": "both"}, {"cat": "17. Config model", "name": "Verify policy after activate", "rip": "requireHealthyProxies, requireReadyApps, minHealthyTargetsPerProxy, includeUnroutedManagedApps.", "caddy": "Health checks continuous; no identical post-reload app-ready gate.", "cov": "rip"}, {"cat": "18. Compat export", "name": "Export nginx.conf", "rip": "--nginx \u2192 hardened nginx (TLS, HSTS, rate limits, WS, stream ssl_preread, multi-path, HTTP\u2192HTTPS, 421). Managed Rip apps emit # TODO proxy_pass.", "caddy": "N/A \u2014 Caddy is the target, not nginx exporter. (Adapters go the other way.)", "cov": "rip"}, {"cat": "18. Compat export", "name": "Export Caddyfile", "rip": "--caddy \u2192 reverse_proxy / file_server / SPA / layer4. TCP needs caddy-l4 custom build; managed apps TODO + :3000 placeholder.", "caddy": "Is the Caddyfile \u2014 native.", "cov": "partial"}, {"cat": "19. Observability", "name": "In-process metrics (p50/p95/p99)", "rip": "Counters, gauges, latency window (1000) in /diagnostics. No Prometheus/OTel export (roadmap).", "caddy": "metrics Prometheus endpoint (standard/optional).", "cov": "partial"}, {"cat": "19. Observability", "name": "Access log (human + JSON)", "rip": "Colored human lines; JSON schema with ip + optional mark; --no-access-log; CrowdSec-oriented.", "caddy": "Structured logs; encoders; multiple sinks.", "cov": "both"}, {"cat": "19. Observability", "name": "OpenTelemetry / distributed tracing", "rip": "Lacking (roadmap).", "caddy": "Tracing modules / ecosystem integrations.", "cov": "caddy"}, {"cat": "20. LAN / mDNS", "name": ".local mDNS advertisement", "rip": "Spawns dns-sd -P for .local hosts; LAN IPv4 detection skips link-local. macOS/dns-sd oriented.", "caddy": "No built-in mDNS product; OS/Avahi or custom.", "cov": "rip"}, {"cat": "21. Misc / packaging", "name": "Package exports (api / middleware / server)", "rip": "api.rip, middleware subpath, server.rip orchestration; dep @rip-lang/validate only.", "caddy": "Single binary + modules; xcaddy for custom builds.", "cov": "partial"}, {"cat": "21. Misc / packaging", "name": "rip-server / rip server CLI bin", "rip": "bin/rip-server wraps server.rip; token grammar not conventional --flags for w/c/r/ports.", "caddy": "caddy CLI.", "cov": "both"}, {"cat": "21. Misc / packaging", "name": "Low-port bind guidance / systemd example", "rip": "Documented setcap on Bun; systemd unit template in README (not automated).", "caddy": "Official packages + systemd units common.", "cov": "partial"}, {"cat": "21. Misc / packaging", "name": "Bench harness + test suite", "rip": "bench/ (oha + diagnostics); tests/runner.rip suite.", "caddy": "Upstream benchmarks + community; different.", "cov": "partial"}, {"cat": "21. Misc / packaging", "name": "Binary size / edge posture", "rip": "Bun runtime ~60\u201390MB class \u2014 heavy as a public edge; security surface of custom TLS/proxy stack is the scare factor.", "caddy": "Small static Go binary; memory-safe; battle-tested public edge. Modules compiled in via xcaddy.", "cov": "caddy"}, {"cat": "22. Rip stubs / incomplete", "name": "CLI -o/--output flag", "rip": "Listed in VALUE_FLAGS but unused in parseFlags \u2014 stub.", "caddy": "N/A.", "cov": "gap"}, {"cat": "22. Rip stubs / incomplete", "name": "Inline edge handlers", "rip": "Roadmap \u2014 not implemented.", "caddy": "respond / templates / custom modules \u2014 yes.", "cov": "caddy"}, {"cat": "22. Rip stubs / incomplete", "name": "Managed-app nginx/Caddy export completeness", "rip": "Emits # TODO + dummy upstream port for managed Rip apps.", "caddy": "You write reverse_proxy to the real upstream.", "cov": "gap"}, {"cat": "23. Caddy-only (Rip holes)", "name": "Modular plugin architecture (xcaddy)", "rip": "Monolithic Bun package; no compile-in module system.", "caddy": "Modules register into config namespaces; xcaddy builds custom binaries.", "cov": "caddy"}, {"cat": "23. Caddy-only (Rip holes)", "name": "gRPC / gRPC-Web proxying", "rip": "Lacking.", "caddy": "reverse_proxy supports h2/gRPC; gRPC-Web bridge modules.", "cov": "caddy"}, {"cat": "23. Caddy-only (Rip holes)", "name": "FastCGI / PHP", "rip": "Lacking.", "caddy": "php_fastcgi / FrankenPHP ecosystem.", "cov": "caddy"}, {"cat": "23. Caddy-only (Rip holes)", "name": "Cluster certificate coordination", "rip": "Single-node cert store.", "caddy": "Shared storage coordinates certs across instances.", "cov": "caddy"}, {"cat": "23. Caddy-only (Rip holes)", "name": "Dynamic DNS", "rip": "Lacking.", "caddy": "caddy-dynamicdns module.", "cov": "caddy"}, {"cat": "23. Caddy-only (Rip holes)", "name": "Header / request map / rewrite engine", "rip": "Limited proxy header overwrite; no general rewrite/map DSL.", "caddy": "header, map, rewrite, uri \u2014 rich.", "cov": "caddy"}, {"cat": "23. Caddy-only (Rip holes)", "name": "Templates / static responses", "rip": "browse HTML only; no general templates.", "caddy": "templates + respond.", "cov": "caddy"}, {"cat": "23. Caddy-only (Rip holes)", "name": "Image filtering / vanity Go paths / niche handlers", "rip": "Lacking.", "caddy": "Ecosystem modules (image filter, vanity, \u2026).", "cov": "caddy"}];
+const COV = {
+  both: ["Both", "#1a7f37"],
+  rip: ["Rip only", "#0969da"],
+  caddy: ["Caddy only", "#9a6700"],
+  partial: ["Partial", "#656d76"],
+  gap: ["Rip gap", "#cf222e"],
+};
+const tbody = document.getElementById("tbody");
+const q = document.getElementById("q");
+const cat = document.getElementById("cat");
+const cov = document.getElementById("cov");
+const showing = document.getElementById("showing");
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function render() {
+  const qs = q.value.trim().toLowerCase();
+  const filtered = ROWS.filter(r => {
+    if (cat.value && r.cat !== cat.value) return false;
+    if (cov.value && r.cov !== cov.value) return false;
+    if (!qs) return true;
+    return (r.name + " " + r.cat + " " + r.rip + " " + r.caddy).toLowerCase().includes(qs);
+  });
+  showing.textContent = "Showing " + filtered.length + " / " + ROWS.length;
+  tbody.innerHTML = filtered.map(r => {
+    const [label, color] = COV[r.cov] || ["?", "#656d76"];
+    return `<tr>
+      <td><div class="cap">${esc(r.name)}</div><div class="cat">${esc(r.cat)}</div></td>
+      <td><span class="pill" style="color:${color};border-color:${color}33">${esc(label)}</span></td>
+      <td>${esc(r.rip)}</td>
+      <td>${esc(r.caddy)}</td>
+    </tr>`;
+  }).join("");
+}
+q.addEventListener("input", render);
+cat.addEventListener("change", render);
+cov.addEventListener("change", render);
+render();
+</script>
+
+
+</body></html>
