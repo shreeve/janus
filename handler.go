@@ -21,6 +21,7 @@ type Handler struct {
 	Ping *bool `json:"ping,omitempty"`
 
 	app    *App
+	dp     *dataPlane
 	logger *zap.Logger
 }
 
@@ -45,6 +46,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 			return fmt.Errorf("janus handler: app is unexpected type %T", appI)
 		}
 		h.app = app
+		h.dp = app.dp
 	}
 	h.logger.Info("janus handler ready",
 		zap.Bool("ping", h.pingEnabled()),
@@ -60,7 +62,9 @@ func (h *Handler) pingEnabled() bool {
 	return resolveBool(h.Ping, global, false)
 }
 
-// ServeHTTP handles admitted requests.
+// ServeHTTP handles admitted requests: site-scoped /ping answers first when
+// enabled; everything else routes through the data plane (registry hosts →
+// upstreams; unknown hosts → 404).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.Handler) error {
 	if h.pingEnabled() && (r.URL.Path == "/ping" || r.URL.Path == "/ping/") {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -68,6 +72,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte("pong\n"))
 		return err
+	}
+	if h.dp != nil {
+		return h.dp.serve(w, r)
 	}
 	return caddyhttp.Error(http.StatusNotFound, nil)
 }

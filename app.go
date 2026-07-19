@@ -26,6 +26,9 @@ type App struct {
 
 	// appsReg is the memory-only apps registry (hot /1.0/apps).
 	appsReg *appRegistry
+
+	// dp routes admitted data-plane requests (host → upstream, ring).
+	dp *dataPlane
 }
 
 // CaddyModule returns the Caddy module information.
@@ -40,6 +43,7 @@ func (App) CaddyModule() caddy.ModuleInfo {
 func (a *App) Provision(ctx caddy.Context) error {
 	a.logger = ctx.Logger()
 	a.appsReg = newAppRegistry()
+	a.dp = newDataPlane(a.appsReg, a.logger)
 	if len(a.Control) == 0 {
 		a.Control = []Control{{Mode: "internal"}}
 	}

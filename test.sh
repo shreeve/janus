@@ -128,10 +128,8 @@ test() {
 	local start end elapsed rc err
 	start=$(now_ns)
 	err="$(
-		set +e
+		set -e # every assertion in the case body gates; first failure wins
 		"$@" 2>&1
-		rc=$?
-		exit $rc
 	)"
 	rc=$?
 	end=$(now_ns)
@@ -247,31 +245,33 @@ stop_caddy() {
 
 cleanup() {
 	stop_caddy
-	rm -f "$ROOT/.test-app-id"
+	stop_data_fixtures
+	rm -f "$ROOT/.test-app-id" "$ROOT/.test-fixtures.log"
 }
 
 trap cleanup EXIT INT TERM
 
 # --- cases: ping ----------------------------------------------------------
 
+# $( ) strips trailing newlines, so bodies compare without the final \n.
 case_ping_catchall_foo() {
-	eq "$(http_body https://foo.ripdev.io/ping)" $'pong\n'
+	eq "$(http_body https://foo.ripdev.io/ping)" "pong"
 	eq "$(http_code https://foo.ripdev.io/ping)" "200"
 }
 
 case_ping_catchall_bar() {
-	eq "$(http_body https://bar.ripdev.io/ping)" $'pong\n'
+	eq "$(http_body https://bar.ripdev.io/ping)" "pong"
 	eq "$(http_code https://bar.ripdev.io/ping)" "200"
 }
 
 case_ping_on_explicit() {
-	eq "$(http_body https://on.ripdev.io/ping)" $'pong\n'
+	eq "$(http_body https://on.ripdev.io/ping)" "pong"
 	eq "$(http_code https://on.ripdev.io/ping)" "200"
 }
 
 case_ping_off_explicit() {
 	eq "$(http_code https://off.ripdev.io/ping)" "404"
-	ne "$(http_body https://off.ripdev.io/ping)" $'pong\n'
+	ne "$(http_body https://off.ripdev.io/ping)" "pong"
 }
 
 case_ping_tls_trusted() {
@@ -454,6 +454,202 @@ case_apps_empty_after_restart() {
 	eq "$(printf '%s' "$REPLY_BODY" | tr -d '[:space:]')" "[]"
 }
 
+# --- cases: data ------------------------------------------------------------
+
+DATA_APP_FILE="$ROOT/.test-data-app-id"
+DATA_PIDS=()
+DATA_SOCKS=()
+DATA_FILES=()
+
+data_app_id() {
+	cat "$DATA_APP_FILE"
+}
+
+# start_data_upstream SOCK NAME HITFILE — HTTP/1.1 echo server on a unix socket.
+# GET / → "upstream:NAME"; POST → append body to HITFILE, echo "received:BODY".
+start_data_upstream() {
+	local sock=$1 name=$2 hitfile=$3
+	rm -f "$sock"
+	: >"$hitfile"
+	DATA_SOCKS+=("$sock")
+	DATA_FILES+=("$hitfile")
+	# detach stdout/stderr: the runner captures case output via $( ) and
+	# would otherwise wait for this background server to exit
+	python3 - "$sock" "$name" "$hitfile" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
+import http.server, socketserver, sys
+
+sock, name, hitfile = sys.argv[1], sys.argv[2], sys.argv[3]
+
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def _send(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        self._send(200, f"upstream:{name}\n".encode())
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        data = self.rfile.read(n)
+        with open(hitfile, "ab") as f:
+            f.write(data + b"\n")
+        self._send(200, b"received:" + data + b"\n")
+    def log_message(self, *args): pass
+    def address_string(self): return "unix"
+
+class S(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+
+S(sock, H).serve_forever()
+PY
+	DATA_PIDS+=($!)
+	local i
+	for i in $(seq 1 50); do
+		[[ -S "$sock" ]] && return 0
+		sleep 0.1
+	done
+	echo "upstream socket $sock never appeared" >&2
+	return 1
+}
+
+# start_data_doorbell SOCK APPID NEWSOCK RINGFILE — on GET /ring, PUT NEWSOCK
+# as the app's real upstream via /1.0 (awaits the 200), then answer 204.
+start_data_doorbell() {
+	local sock=$1 appid=$2 newsock=$3 ringfile=$4
+	rm -f "$sock"
+	: >"$ringfile"
+	DATA_SOCKS+=("$sock")
+	DATA_FILES+=("$ringfile")
+	python3 - "$sock" "$appid" "$newsock" "$ringfile" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
+import http.server, socketserver, json, sys, urllib.request
+
+sock, appid, newsock, ringfile = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        if self.path != "/ring":
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        with open(ringfile, "ab") as f:
+            f.write(b"ring\n")
+        body = json.dumps({"upstreams": [{"path": newsock}]}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:7600/1.0/apps/{appid}/upstreams",
+            data=body, method="PUT",
+            headers={"Content-Type": "application/json"})
+        resp = urllib.request.urlopen(req, timeout=5)
+        assert resp.status == 200, f"PUT upstreams -> {resp.status}"
+        self.send_response(204)
+        self.end_headers()
+    def log_message(self, *args): pass
+    def address_string(self): return "unix"
+
+class S(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+
+S(sock, H).serve_forever()
+PY
+	DATA_PIDS+=($!)
+	local i
+	for i in $(seq 1 50); do
+		[[ -S "$sock" ]] && return 0
+		sleep 0.1
+	done
+	echo "doorbell socket $sock never appeared" >&2
+	return 1
+}
+
+stop_data_fixtures() {
+	local pid f
+	for pid in ${DATA_PIDS[@]+"${DATA_PIDS[@]}"}; do
+		kill "$pid" 2>/dev/null || true
+	done
+	DATA_PIDS=()
+	for f in ${DATA_SOCKS[@]+"${DATA_SOCKS[@]}"} ${DATA_FILES[@]+"${DATA_FILES[@]}"}; do
+		rm -f "$f"
+	done
+	DATA_SOCKS=()
+	DATA_FILES=()
+	rm -f "$DATA_APP_FILE"
+}
+
+case_data_register_with_upstream() {
+	start_data_upstream "$ROOT/run/u1.sock" u1 "$ROOT/.test-u1.hits" || return 1
+	capi POST /1.0/apps '{"name":"web","hosts":["app.ripdev.io"]}'
+	eq "$REPLY_CODE" "201"
+	local id
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	ok "-n \"$id\"" "no id in $REPLY_BODY"
+	printf '%s' "$id" >"$DATA_APP_FILE"
+	capi PUT "/1.0/apps/$id/upstreams" "{\"upstreams\":[{\"path\":\"$ROOT/run/u1.sock\"}]}"
+	eq "$REPLY_CODE" "200"
+}
+
+case_data_proxy_get() {
+	eq "$(http_code https://app.ripdev.io/)" "200"
+	eq "$(http_body https://app.ripdev.io/)" "upstream:u1"
+}
+
+case_data_proxy_post_body() {
+	local body
+	body="$(curl -sS --max-time 5 -X POST --data 'alpha' https://app.ripdev.io/submit)"
+	eq "$body" "received:alpha"
+	eq "$(wc -l <"$ROOT/.test-u1.hits" | tr -d ' ')" "1"
+}
+
+case_data_unknown_host() {
+	eq "$(http_code https://nowhere.ripdev.io/)" "404"
+}
+
+case_data_empty_upstreams_503() {
+	capi PUT "/1.0/apps/$(data_app_id)/upstreams" '{"upstreams":[]}'
+	eq "$REPLY_CODE" "200"
+	eq "$(http_code https://app.ripdev.io/)" "503"
+	local ra
+	ra="$(curl -sS -o /dev/null -D - --max-time 5 https://app.ripdev.io/ |
+		tr -d '\r' | awk -F': ' 'tolower($1)=="retry-after" {print $2}')"
+	eq "$ra" "1"
+}
+
+case_data_doorbell_ring() {
+	start_data_upstream "$ROOT/run/u2.sock" u2 "$ROOT/.test-u2.hits" || return 1
+	start_data_doorbell "$ROOT/run/bell.sock" "$(data_app_id)" "$ROOT/run/u2.sock" "$ROOT/.test-bell.rings" || return 1
+	capi PUT "/1.0/apps/$(data_app_id)/upstreams" \
+		"{\"upstreams\":[{\"path\":\"$ROOT/run/bell.sock\",\"doorbell\":true}]}"
+	eq "$REPLY_CODE" "200"
+
+	# Client POST with a body while only the doorbell is published:
+	# the ring swaps in u2 and the body arrives there intact, exactly once,
+	# with no visible redirect.
+	local resp code body
+	resp="$(curl -sS --max-time 20 -X POST --data 'door-payload' \
+		-w $'\n%{http_code} %{num_redirects}' https://app.ripdev.io/submit)"
+	code="${resp##*$'\n'}"
+	body="${resp%$'\n'*}"
+	eq "$code" "200 0"
+	eq "$body" $'received:door-payload\n'
+	eq "$(wc -l <"$ROOT/.test-u2.hits" | tr -d ' ')" "1"
+	eq "$(cat "$ROOT/.test-u2.hits")" "door-payload"
+	eq "$(wc -l <"$ROOT/.test-bell.rings" | tr -d ' ')" "1"
+	eq "$(wc -l <"$ROOT/.test-u1.hits" | tr -d ' ')" "1" # old upstream got nothing new
+}
+
+case_data_after_ring_steady_state() {
+	# The doorbell is retired; traffic flows to u2 without ringing again.
+	eq "$(http_body https://app.ripdev.io/)" "upstream:u2"
+	eq "$(wc -l <"$ROOT/.test-bell.rings" | tr -d ' ')" "1"
+}
+
+case_data_ping_still_answers() {
+	# Site-scoped ping (global on) answers ahead of routing for this host.
+	eq "$(http_body https://app.ripdev.io/ping)" "pong"
+}
+
 # --- main -----------------------------------------------------------------
 
 SUITE_START_NS=$(now_ns)
@@ -504,6 +700,16 @@ printf '%s\n' "$(paint "$DIM" "restarting caddy …")"
 stop_caddy
 start_caddy || exit 1
 test "restart → registry empty" case_apps_empty_after_restart
+
+group "data"
+test "register app + real unix upstream" case_data_register_with_upstream
+test "GET routes to upstream over unix" case_data_proxy_get
+test "POST body arrives at upstream" case_data_proxy_post_body
+test "unknown host → 404" case_data_unknown_host
+test "PUT upstreams [] → 503 + Retry-After" case_data_empty_upstreams_503
+test "doorbell ring → body delivered once, no redirect" case_data_doorbell_ring
+test "after ring: steady state on new upstream" case_data_after_ring_steady_state
+test "registered host still answers /ping" case_data_ping_still_answers
 
 report
 exit $?

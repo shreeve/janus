@@ -220,6 +220,17 @@ func (r *appRegistry) list() []AppRecord {
 	return out
 }
 
+// resolveHost maps a public host to its app record (data-plane lookup).
+func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.hosts[host]
+	if !ok {
+		return AppRecord{}, false
+	}
+	return r.apps[id].clone(), true
+}
+
 func (r *appRegistry) get(id string) (AppRecord, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

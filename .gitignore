@@ -2,7 +2,7 @@
 /run/
 /buildenv_*/
 *.log
-.test-caddy.log
+.test-*
 
 # certs/: ignore everything except the intentional ripdev.io wildcard pair (+ README)
 /certs/*
