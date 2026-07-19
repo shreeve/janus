@@ -39,35 +39,36 @@ go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 xcaddy version
 ```
 
-## Ping proof (current tree)
+## Capability order
 
-**ping** is a cascading cold capability (default off). The working `Caddyfile` turns it **on** globally, uses a `*.ripdev.io` catchall (inherit on), `on.ripdev.io` (explicit on), and `off.ripdev.io` (explicit off). Hosts use the trusted wildcard cert (→ `127.0.0.1`) from [`certs/`](certs/). See [`docs/20260718-204255-capability-ping.md`](docs/20260718-204255-capability-ping.md).
+Cold capabilities land in order. Each step stands alone before the next is added.
+
+| # | Capability | Needs | Doc |
+| --- | --- | --- | --- |
+| 1 | **ping** | Nothing else — module load, TLS, site admission, cascade | [`capability-ping`](docs/20260718-204255-capability-ping.md) |
+| 2 | **control** | ping chassis already proven; opens `/1.0` listeners | [`capability-control`](docs/20260718-203749-capability-control.md) |
+| 3+ | next | Builds on control’s hot API (apps, upstreams, …) | [build SPEC](docs/20260718-191425-janus-build-spec.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
 
-# Resolve module deps (first time / after Caddy bumps)
 go mod tidy
-
-# Build caddy + janus into ./bin/caddy
 mkdir -p bin
 xcaddy build \
   --with github.com/shreeve/janus=. \
   --output ./bin/caddy
 
-./bin/caddy list-modules | grep janus
-# → http.handlers.janus
+go test ./...
+./test.sh   # ping group first, then control
 ```
 
-### HTTPS on *.ripdev.io:443
+### 1. ping (data plane)
 
-`Caddyfile` serves `*.ripdev.io` / `on.ripdev.io` / `off.ripdev.io` on **:443** with the signed cert in `certs/`. DNS always returns `127.0.0.1`; Caddy picks the site by SNI / Host.
+Trusted wildcard cert in [`certs/`](certs/); DNS → `127.0.0.1`; SNI picks the site. No control plane required.
 
 ```bash
 ./bin/caddy run
 ```
-
-In another terminal:
 
 ```bash
 curl -s https://foo.ripdev.io/ping          # catchall → pong
@@ -77,6 +78,16 @@ curl -s -o /dev/null -w '%{http_code}\n' https://off.ripdev.io/ping
 ```
 
 On some systems binding :443 needs elevated privileges (`sudo ./bin/caddy run …`). On current macOS it often works without sudo.
+
+### 2. control (`/1.0`)
+
+Same process. Loopback HTTP and a unix socket serve the control API.
+
+```bash
+curl -s http://127.0.0.1:7600/1.0
+curl -s http://127.0.0.1:7600/1.0/health
+curl -s --unix-socket run/janus.sock http://janus/1.0
+```
 
 ## Build and run
 

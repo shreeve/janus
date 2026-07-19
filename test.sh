@@ -4,6 +4,8 @@
 # For operators/users: prove cold capabilities behave end-to-end.
 # Developers still use idiomatic `go test ./...` while building.
 #
+# Groups run in capability order: ping (1), then control (2), then …
+#
 #   ./test.sh
 #   NO_COLOR=1 ./test.sh
 #
@@ -199,14 +201,21 @@ build_caddy() {
 	xcaddy build --with github.com/shreeve/janus=. --output "$CADDY_BIN"
 }
 
-start_caddy() {
-	# clear stale listeners from prior runs
-	if lsof -nP -iTCP:443 -sTCP:LISTEN >/dev/null 2>&1; then
-		lsof -nP -iTCP:443 -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | while read -r pid; do
+kill_listeners() {
+	local port=$1
+	if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+		lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | while read -r pid; do
 			kill "$pid" 2>/dev/null || true
 		done
-		sleep 1
 	fi
+}
+
+start_caddy() {
+	# clear stale listeners from prior runs
+	kill_listeners 443
+	kill_listeners 7600
+	rm -f "$ROOT/run/janus.sock"
+	sleep 0.5
 	"$CADDY_BIN" run --config "$ROOT/Caddyfile" >"$CADDY_LOG" 2>&1 &
 	CADDY_PID=$!
 	local i
@@ -217,7 +226,8 @@ start_caddy() {
 			CADDY_PID=""
 			return 1
 		fi
-		if curl -sS -o /dev/null --max-time 1 https://on.ripdev.io/ping 2>/dev/null; then
+		if curl -sS -o /dev/null --max-time 1 https://on.ripdev.io/ping 2>/dev/null \
+			&& curl -sS -o /dev/null --max-time 1 http://127.0.0.1:7600/1.0/health 2>/dev/null; then
 			return 0
 		fi
 		sleep 0.1
@@ -270,6 +280,48 @@ case_ping_tls_trusted() {
 	eq "$v" "0"
 }
 
+# --- cases: control -------------------------------------------------------
+
+json_has() {
+	local body=$1 needle=$2
+	if ! printf '%s' "$body" | grep -qF "$needle"; then
+		printf 'missing %q in %q' "$needle" "$body" >&2
+		return 1
+	fi
+}
+
+case_control_local_root() {
+	local body
+	body="$(http_body http://127.0.0.1:7600/1.0)"
+	eq "$(http_code http://127.0.0.1:7600/1.0)" "200"
+	json_has "$body" '"api_version":"1.0"'
+	json_has "$body" '"type":"janus"'
+}
+
+case_control_local_health() {
+	local body
+	body="$(http_body http://127.0.0.1:7600/1.0/health)"
+	eq "$(http_code http://127.0.0.1:7600/1.0/health)" "200"
+	json_has "$body" '"status":"ok"'
+}
+
+case_control_unix_root() {
+	ok "-S \"$ROOT/run/janus.sock\"" "missing unix socket"
+	local body code
+	body="$(curl -sS --max-time 5 --unix-socket "$ROOT/run/janus.sock" http://janus/1.0)"
+	code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --unix-socket "$ROOT/run/janus.sock" http://janus/1.0)"
+	eq "$code" "200"
+	json_has "$body" '"type":"janus"'
+}
+
+case_control_unix_health() {
+	local body code
+	body="$(curl -sS --max-time 5 --unix-socket "$ROOT/run/janus.sock" http://janus/1.0/health)"
+	code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --unix-socket "$ROOT/run/janus.sock" http://janus/1.0/health)"
+	eq "$code" "200"
+	json_has "$body" '"status":"ok"'
+}
+
 # --- main -----------------------------------------------------------------
 
 SUITE_START_NS=$(now_ns)
@@ -295,6 +347,12 @@ test "catchall bar.ripdev.io → pong" case_ping_catchall_bar
 test "on.ripdev.io explicit on → pong" case_ping_on_explicit
 test "off.ripdev.io explicit off → 404" case_ping_off_explicit
 test "TLS verify trusted (no -k)" case_ping_tls_trusted
+
+group "control"
+test "local GET /1.0 → janus meta" case_control_local_root
+test "local GET /1.0/health → ok" case_control_local_health
+test "unix GET /1.0 → janus meta" case_control_unix_root
+test "unix GET /1.0/health → ok" case_control_unix_health
 
 report
 exit $?

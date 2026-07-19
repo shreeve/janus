@@ -2,6 +2,7 @@ package janus
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -15,14 +16,6 @@ func init() {
 	httpcaddyfile.RegisterDirectiveOrder("janus", httpcaddyfile.Before, "respond")
 }
 
-// parseGlobalJanus configures the process-wide Janus app from the global options block.
-//
-//	{
-//	    janus {
-//	        control local
-//	        ping
-//	    }
-//	}
 func parseGlobalJanus(d *caddyfile.Dispenser, existing any) (any, error) {
 	app := new(App)
 	if existing != nil {
@@ -63,6 +56,8 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("ping: %v", err)
 				}
 				a.Ping = &on
+			case "token":
+				return d.Err("token belongs on the control line as token:… (per-listener), not as its own directive")
 			default:
 				return d.Errf("unrecognized janus subdirective: %s", d.Val())
 			}
@@ -71,13 +66,16 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-// parseControl parses:
+// parseControl parses a self-contained control line:
 //
 //	control internal
-//	control internal <path>
+//	control internal <socket-path>
 //	control local
-//	control local <host:port>
-//	control public <host:port>
+//	control local http://127.0.0.1:7600/
+//	control local http://127.0.0.1:7600/ token:ENV
+//	control public
+//	control public https://0.0.0.0:7601/ token:JANUS_TOKEN
+//	control public token:./secrets/janus.auth
 func parseControl(d *caddyfile.Dispenser) (Control, error) {
 	var c Control
 	if !d.NextArg() {
@@ -85,26 +83,34 @@ func parseControl(d *caddyfile.Dispenser) (Control, error) {
 	}
 	c.Mode = d.Val()
 	switch c.Mode {
-	case "internal", "local":
-		if d.NextArg() {
-			c.Listen = d.Val()
-		}
-		if d.NextArg() {
-			return c, d.ArgErr()
-		}
-	case "public":
-		if !d.NextArg() {
-			return c, d.Err("control public requires exactly one host:port")
-		}
-		c.Listen = d.Val()
-		if d.NextArg() {
-			return c, d.ArgErr()
-		}
+	case "internal", "local", "public":
 	default:
 		return c, d.Errf("unknown control mode %q (want internal, local, or public)", c.Mode)
 	}
+
+	for d.NextArg() {
+		tok := d.Token()
+		val := tok.Text
+		quoted := tok.Quoted()
+		if strings.HasPrefix(val, "token:") {
+			kind, ref, err := parseTokenArg(val, quoted)
+			if err != nil {
+				return c, d.Err(err.Error())
+			}
+			if c.TokenKind != "" {
+				return c, d.Err("control line has more than one token:…")
+			}
+			c.TokenKind = kind
+			c.Token = ref
+			continue
+		}
+		if c.Listen != "" {
+			return c, d.Errf("unexpected control argument %q", val)
+		}
+		c.Listen = val
+	}
 	if d.NextBlock(d.Nesting()) {
-		return c, d.Err("control does not support a nested block")
+		return c, d.Err("control does not support a nested block; keep it on one line")
 	}
 	return c, nil
 }

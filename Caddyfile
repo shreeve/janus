@@ -1,10 +1,11 @@
-# Janus — control + cascading ping on *.ripdev.io
+# Janus — capability order: (1) ping, (2) control, …
 #
 # *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
 #
 #   ./bin/caddy run
 #
-# Global ping ON.
+# 1) ping — primordial; needs nothing else
+#   Global ping ON.
 #   catchall  *.ripdev.io     → inherit on  → pong
 #   on.ripdev.io              → explicit on → pong
 #   off.ripdev.io             → explicit off → 404
@@ -13,12 +14,21 @@
 #   curl -s https://on.ripdev.io/ping                                    → pong
 #   curl -s https://off.ripdev.io/ping -o /dev/null -w '%{http_code}\n'  → 404
 #
+# 2) control — process-wide /1.0 (after ping chassis)
+#   internal → unix  run/janus.sock
+#   local    → http  127.0.0.1:7600
+#
+#   curl -s http://127.0.0.1:7600/1.0
+#   curl -s http://127.0.0.1:7600/1.0/health
+#   curl -s --unix-socket run/janus.sock http://janus/1.0
+#
 {
 	auto_https disable_redirects
 
 	janus {
+		ping # 1) site-scoped default: on
+		control internal # 2) process-wide
 		control local
-		ping # site-scoped default: on
 	}
 }
 

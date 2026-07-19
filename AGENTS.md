@@ -26,8 +26,9 @@ Permanent docs:
 
 4. **Capabilities are the unit of cold work.** Adding behavior means:
    implement → document → wire into root `Caddyfile` → test → validate.
-   Each capability doc covers what/why, scope, cascade yes/no, syntax,
-   examples, hard errors, non-goals.
+   Each capability doc covers order #, what/why, scope, cascade yes/no,
+   syntax, examples, hard errors, non-goals. Keep the story ordered:
+   **ping** (1, primordial) → **control** (2) → whatever is next.
 
 5. **Cascade is explicit.**
    - **Process-wide** (e.g. **control**): global `janus { }` only; never in a site block.
@@ -54,12 +55,24 @@ Permanent docs:
    outside the intentional `certs/ripdev.io.*` pair (see certs/README.md and
    `.github/secret_scanning.yml`).
 
+## Capability order
+
+Cold capabilities are numbered by landing order. Do not reorder the story in docs or `test.sh`.
+
+| # | Capability | Standalone meaning |
+| --- | --- | --- |
+| 1 | **ping** | Primordial. Proves the module, TLS, site admission, and cascade. Needs nothing else. |
+| 2 | **control** | Process-wide `/1.0` listeners. Assumes the ping chassis already works. |
+| 3+ | next | Hot work on `/1.0` (apps, upstreams, …) and any later cold capabilities. |
+
+`./test.sh` runs groups in this order (ping, then control, then …).
+
 ## Architecture (short)
 
 | Plane | Config | Role |
 | --- | --- | --- |
+| **data** | Site `janus` [block] | Admit this host into Janus; site-scoped overrides (**ping**, …) |
 | **control** | Global `janus { control … }` | Where `/1.0` listens: `internal` / `local` / `public` |
-| **data** | Site `janus` [block] | Admit this host into Janus; site-scoped overrides |
 
 Unknown public hosts → **404**. Registry is memory-only; tenants re-register after restart.
 

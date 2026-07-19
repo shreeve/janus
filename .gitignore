@@ -1,4 +1,5 @@
 /bin/
+/run/
 /buildenv_*/
 *.log
 .test-caddy.log

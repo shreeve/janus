@@ -1,21 +1,24 @@
 # Capability: control
 
-Cold Caddyfile capability. Configures **where** Janus’s control plane (`/1.0` JSON API) is reachable.
+Cold Caddyfile capability. Configures **where** Janus’s control plane (`/1.0` JSON API) is reachable, and **how** each listener authenticates.
 
 | | |
 | --- | --- |
+| **Order** | **2** (after primordial **ping**) |
 | **Surface** | Cold config only (Caddyfile) |
 | **Cascades** | No — process-wide only |
-| **Module** | `janus` app (`app.go`) |
+| **Module** | `janus` app (`app.go`, `control.go`, `control_api.go`) |
 | **Directive** | Global options: `janus { control … }` |
-| **Pairs with** | Site handler `janus` (data-plane admission) |
-| **Status** | Config parsed, validated, logged — `/1.0` serving is Phase 2 |
+| **Pairs with** | Site handler `janus` (data-plane admission; **ping** already proven) |
+| **Status** | Listeners serve `GET /1.0` and `GET /1.0/health` |
 
 ## Why it exists
 
-Public traffic hits Caddy → site `janus` → data plane. Tenants and operators need a separate door for registry CRUD, heartbeats, and hub publish. That door is the **control plane**.
+**ping** proved the chassis. **control** is next: open the process-wide door for registry CRUD, heartbeats, and hub publish.
 
-**control** answers only: *how do you reach `/1.0`?* Not which apps are registered (that is hot `/1.0`).
+Public traffic still hits Caddy → site `janus` → data plane. Tenants and operators use this separate door for the hot API.
+
+**control** answers: *how do you reach `/1.0`, and with what auth?* Not which apps are registered (that is hot `/1.0` CRUD).
 
 ## Scope
 
@@ -26,17 +29,28 @@ Public traffic hits Caddy → site `janus` → data plane. Tenants and operators
 
 One process, one registry. Do **not** nest `control` under a site `janus` block — that would fake per-site control planes.
 
+## Listen model
+
+| Config | Result |
+| --- | --- |
+| No `control` lines | Default: one implicit `control internal` (`run/janus.sock`) |
+| One or more explicit lines | **Exactly** those listeners (e.g. only `local` ⇒ no UDS) |
+
+Each line is self-contained: mode, optional listen target, optional `token:…` on the **same** line. There is no sibling `token` directive.
+
 ## Modes
 
-| Mode | Meaning | Listen |
-| --- | --- | --- |
-| `internal` | Unix domain socket | Optional path (default `run/janus.sock`) |
-| `local` | Loopback HTTP | Optional `host:port` (default `127.0.0.1:7600`; host must be loopback) |
-| `public` | Explicit network HTTP | **Required** `host:port` — no bare `public` |
+| Mode | Meaning | Default listen | Auth |
+| --- | --- | --- | --- |
+| `internal` | Unix domain socket | `run/janus.sock` | Optional `token:…` |
+| `local` | Loopback HTTP(S) | `http://127.0.0.1:7600/` | Optional `token:…` |
+| `public` | Network HTTPS | `https://0.0.0.0:7601/` | **Required** `token:…` (env or file only) |
 
 Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` + `local`). Duplicate modes are rejected.
 
-`public` without authentication is a footgun; auth is a separate concern (not this capability yet). Prefer `internal` or `local` until then.
+- **local** host must be loopback (`127.0.0.1`, `::1`, or `localhost`).
+- **public** must be `https://` (never bare `http://`).
+- **public** TLS uses `certs/ripdev.io.{crt,key}` (same material as the data-plane demo).
 
 ## Syntax
 
@@ -45,16 +59,18 @@ Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` +
 	auto_https disable_redirects
 
 	janus {
+		control internal
 		control local
-		# control internal
 		# control internal /var/run/janus/control.sock
-		# control local 127.0.0.1:7600
-		# control public 192.168.1.10:7600
+		# control local http://127.0.0.1:7600/
+		# control local http://127.0.0.1:7600/ token:JANUS_TOKEN
+		# control public token:JANUS_TOKEN
+		# control public https://0.0.0.0:7601/ token:./secrets/janus.auth
 	}
 }
 
-https://localhost {
-	tls internal
+*.ripdev.io {
+	tls certs/ripdev.io.crt certs/ripdev.io.key
 	janus
 }
 ```
@@ -65,93 +81,112 @@ https://localhost {
 control internal
 control internal <socket-path>
 control local
-control local <host:port>    # host ∈ {127.0.0.1, ::1, localhost}
-control public <host:port>   # address required
+control local <http(s)://host:port[/path]>
+control local … token:ENV
+control local … "token:literal-secret"
+control public
+control public <https://host:port[/path]>
+control public … token:ENV
+control public … token:./path/to/file
 ```
+
+### `token:…` rules
+
+| Form | Meaning |
+| --- | --- |
+| `token:NAME` (unquoted, no `/`) | Read secret from environment variable `NAME` |
+| `token:…/…` (unquoted, contains `/`) | Read secret from file (trailing newline stripped) |
+| `"token:…"` (entire arg quoted) | Literal secret — **not allowed on `public`** |
+
+Prefer env names without `$` (avoids clashing with Caddy `{$VAR}` expansion). Auth is HTTP `Authorization: Bearer <secret>` when a token is configured.
 
 ### Defaults
 
 | Mode | Default listen |
 | --- | --- |
 | `internal` | `run/janus.sock` |
-| `local` | `127.0.0.1:7600` |
-| `public` | — (must supply address) |
+| `local` | `http://127.0.0.1:7600/` |
+| `public` | `https://0.0.0.0:7601/` |
+
+Port **7601** for public avoids clashing with local **7600**.
 
 ### Hard errors
 
-- No `control` lines
 - Unknown mode
 - Duplicate mode
-- `control public` without `host:port`
-- `control local` with a non-loopback host
 - Nested block under `control`
-- Site-level `janus { … }` block (control is global only)
+- Sibling `token` directive (must be `token:…` on the control line)
+- `control local` with a non-loopback host
+- `control public` without `token:…`
+- `control public` with a quoted literal token
+- `control public` with `http://` (https required)
+- Unset/empty env or empty token file at provision time
+- Site-level `janus { control … }` (control is global only)
+
+## API surface (served today)
+
+| Method | Path | Body |
+| --- | --- | --- |
+| `GET` | `{base}/1.0` | `{ "api_version":"1.0", "type":"janus", "ping":…, "control":[…] }` |
+| `GET` | `{base}/1.0/health` | `{ "status":"ok" }` |
+
+`{base}` is the path from the listen URL (empty for defaults and for `internal`).
 
 ## Examples
 
-### Local curl (dev)
+### Local + internal (working root Caddyfile)
 
 ```caddyfile
 {
 	janus {
+		control internal
 		control local
+		ping
 	}
 }
 ```
-
-After Phase 2 serves `/1.0`:
 
 ```bash
 curl -s http://127.0.0.1:7600/1.0
 curl -s http://127.0.0.1:7600/1.0/health
-```
-
-### Internal only (prod-shaped)
-
-```caddyfile
-{
-	janus {
-		control internal
-	}
-}
-```
-
-```bash
 curl -s --unix-socket run/janus.sock http://janus/1.0
+curl -s --unix-socket run/janus.sock http://janus/1.0/health
 ```
 
-### Internal + local (socket for Rip, loopback for humans)
+### Public (token from env)
 
 ```caddyfile
 {
 	janus {
-		control internal
-		control local
+		control public token:JANUS_TOKEN
 	}
 }
 ```
 
-## Verify (today)
+```bash
+export JANUS_TOKEN=…
+curl -sk -H "Authorization: Bearer $JANUS_TOKEN" https://127.0.0.1:7601/1.0
+```
 
-Config is live even before `/1.0` is served:
+## Verify
 
 ```bash
+go test ./...
+./test.sh
+
 ./bin/caddy adapt --config Caddyfile
-# → apps.janus.control includes {"mode":"local",…}
+# → apps.janus.control includes internal + local
 
 ./bin/caddy run
-# log: janus control configured  mode=local  listen=127.0.0.1:7600
-
-curl -sk https://localhost/ping
-# → pong  (data plane unchanged)
+# log: janus control listening  mode=local  listen=http://127.0.0.1:7600/
+# log: janus control listening  mode=internal  listen=run/janus.sock
 ```
 
 ## Non-goals
 
-- Hot registry / apps CRUD (that is `/1.0`)
-- TLS for control listeners (may come later; `local`/`internal` are plain HTTP/unix)
-- Authn/authz for `public`
+- Hot registry / apps CRUD (later `/1.0` routes)
 - Changing Caddyfile admission from `/1.0`
+- Per-site control planes
 
 ## Related
 
