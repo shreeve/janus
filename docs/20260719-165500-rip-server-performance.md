@@ -161,6 +161,10 @@ under load and contradicts the protocol as implemented:
 4. **Drain constants must order correctly**: worker in-flight wait ≤
    manager SIGKILL grace, and deliberate kills marked expected so
    crash/restart budgets stay honest.
+5. **`/ready` must carry truth in status codes**: 200 only when ready,
+   503 while booting or draining. v3 answered 200 in every state with
+   the truth only in the body — a trap for any `res.ok` consumer. The
+   v4 worker implements this correctly; keep it that way.
 
 ## Closed doors (do not spend time here)
 
@@ -175,7 +179,10 @@ under load and contradicts the protocol as implemented:
 - **Real COW would not hold anyway**: GC, inline caches, and JIT
   profiling counters dirty shared heap pages within minutes (Ruby's
   `GC.compact` saga). Fork-COW's durable value was load-once, which
-  prebuild-once recovers without fork.
+  prebuild-once recovers without fork. The memory multiplier is
+  **RSS ≈ w × (JSC baseline ~30–50MB + app retained heap)**; the
+  honest levers are keeping the compiler out of workers (#3), small
+  `w` with higher `c` (#1), and maxRequests/maxSeconds recycling.
 - **worker_threads as the default pool**: each Bun Worker is its own
   JSC isolate (shared scaffolding, not heap), and it trades away the
   pool's crash-isolation: one segfault/OOM kills every "worker,"
@@ -195,6 +202,9 @@ under load and contradicts the protocol as implemented:
   exactly `reload: eager`, which already exists. No separate mechanism.
 - **103 Early Hints**: helps browser paint latency, not server
   throughput.
+- **Janus fast-path for `/ping`-class endpoints**: accelerates
+  endpoints users don't call; skip unless health-check volume is
+  measurably material.
 
 ## Measurement discipline
 
@@ -205,7 +215,9 @@ stress phase:
   worker), ping-class AND a DB-ish 1–5ms handler; `oha` or `wrk` with
   keep-alive; report p50/p99 alongside RPS.
 - Sweep `w` (2, 4, 8, 16, 32) at `c:1`, then fix best-`w` and sweep
-  `c` on the I/O-bound handler.
+  `c` on the I/O-bound handler. Record worker RSS and Janus CPU share
+  alongside RPS/p50/p99 — memory and attribution regressions hide
+  behind flat throughput numbers.
 - One change at a time, before/after numbers in the commit that lands
   the change; construction cost counts (e.g. prebuild time added to
   reload latency must be measured, not assumed).
