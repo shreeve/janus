@@ -43,12 +43,19 @@ throttle.
 
 ## Ranked levers
 
+**Remaining levers as of 2026-07-20, after the shipping spree below:
+#2 (micro-cache + coalescing — still the only 10x+ story) and
+#3 (prebuild-once + bytecode — reload latency and RSS, not RPS).**
+Everything else is shipped-with-measurement, measured-out (the lock
+collapse: throughput-neutral, landed on simplicity — see Measured
+results), deferred-for-cause, or fantasy.
+
 | # | Lever | Expected win | Cost | Verdict |
 | --- | --- | --- | --- | --- |
-| 1 | Raise `c` (8–32) for I/O-bound apps, watch off | 2–10x per worker | ~zero (protocol opt-in exists) | **Ship now** |
-| 2 | Janus micro-cache + request coalescing (anonymous GETs) | 10–100x on cacheable pages | Medium-high (correctness) | Measure-first, then build as a capability |
-| 3 | Manager prebuilds app once per dirty epoch; workers boot artifact (+`--bytecode`) | Reload/boot 2–4x; RSS drops | Low-medium | **Ship now** |
-| 4 | DSL fast path (context allocation, route buckets) | 1.3–2x per worker ping-class | Medium | Measure-first (profile, then cut) |
+| 1 | Raise `c` (8–32) for I/O-bound apps, watch off | 2–10x per worker | ~zero (protocol opt-in exists) | **Shipped 2026-07-20** (`-c` flag) — measured 7x clean 200s/s at c:8 on the 5ms handler, capacity-exact: 503s vanish when w×c ≥ conc (see Measured results) |
+| 2 | Janus micro-cache + request coalescing (anonymous GETs) | 10–100x on cacheable pages | Medium-high (correctness) | Measure-first, then build as a capability — **top remaining lever** |
+| 3 | Manager prebuilds app once per dirty epoch; workers boot artifact (+`--bytecode`) | Reload/boot 2–4x; RSS drops | Low-medium | **Ship next** — the other remaining lever |
+| 4 | DSL fast path (context allocation, route buckets) | 1.3–2x per worker ping-class | Medium | **Shipped 2026-07-20** (rip repo, 3 measured cuts) — in-process hot loop ~2404 → ~1690 ns/req (~−30% worker CPU per request; cross-session endpoints, per-cut interleaved ratios); route index adds −12–15% at 40 routes, parity at 1 route. Full-stack RPS unchanged (Janus-bound, as predicted) |
 | 5 | `ReverseProxy.BufferPool` + proxy-struct reuse + idle conns scaled with `c` | 5–15% of Janus CPU | Trivial (~20 lines) | **Shipped 2026-07-19** — measured +20–37% RPS (see Measured results), far above the estimate |
 | 6 | Static file bypass at Janus (registration declares static roots) | Large for asset-heavy tenants; zero for APIs | Medium (protocol extension) | Later (need a real tenant) |
 | 7 | GOMAXPROCS split / core pinning (Janus 2–4 procs, workers own the rest) | 5–15%, mostly tail latency | Low | Measure-first |
