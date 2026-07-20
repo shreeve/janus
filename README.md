@@ -48,7 +48,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 1 | **ping** | Nothing else — module load, TLS, site admission, cascade | [`capability-ping`](docs/20260718-204255-capability-ping.md) |
 | 2 | **control** | ping chassis already proven; opens `/1.0` listeners | [`capability-control`](docs/20260718-203749-capability-control.md) |
 | 3 | **cache** | The Phase 4 data plane; micro-cache + request coalescing | [`capability-microcache`](docs/20260720-033201-capability-microcache.md) |
-| 4+ | next | Builds on control’s hot API (apps, upstreams, …) | [build SPEC](docs/20260718-191425-janus-build-spec.md) |
+| 4 | **hub** (design) | Phase 7 per-app WebSocket fan-out; targeted re-review precedes implementation | [`hub design`](docs/20260720-162350-hub-design.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
