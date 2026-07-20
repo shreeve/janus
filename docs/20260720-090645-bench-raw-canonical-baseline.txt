@@ -1,0 +1,56 @@
+=== canonical cold-machine baseline Mon Jul 20 09:06:45 MDT 2026 ===
+load:  9:06  up 16 mins, 2 users, load averages: 2.33 3.21 3.71
+rig: Apple M5, 10 cores, 32GB, 26.5.2
+bun 1.3.14, go1.26.5, caddy v2.11.4, oha 1.14.0
+ulimit -n 1048575; 15s legs, 5s warmups discarded; HTTPS full stack; RIP_ENV=production
+
+== A) w sweep, ping-class, cache off (api), c:1 ==
+A ping w:2 c:1 conc:2: rps 32,347 200s/s 32,349 non200 0 p50 0.06ms p99 0.17ms
+A ping w:2 c:1 conc:64: rps 104,739 200s/s 104,767 non200 0 p50 0.46ms p99 2.63ms
+A rss w:2: workers 2 rss min 69.5MB max 70.9MB
+A ping w:4 c:1 conc:4: rps 41,197 200s/s 41,202 non200 0 p50 0.09ms p99 0.24ms
+A ping w:4 c:1 conc:64: rps 99,550 200s/s 99,573 non200 0 p50 0.49ms p99 2.84ms
+A rss w:4: workers 4 rss min 62.5MB max 64.6MB
+A ping w:8 c:1 conc:8: rps 58,598 200s/s 58,604 non200 0 p50 0.12ms p99 0.36ms
+A ping w:8 c:1 conc:64: rps 94,146 200s/s 94,163 non200 0 p50 0.50ms p99 3.02ms
+A rss w:8: workers 8 rss min 59.9MB max 61.0MB
+A ping w:16 c:1 conc:16: rps 70,190 200s/s 70,205 non200 0 p50 0.18ms p99 0.91ms
+A ping w:16 c:1 conc:64: rps 85,548 200s/s 85,567 non200 0 p50 0.52ms p99 3.84ms
+A rss w:16: workers 16 rss min 57.6MB max 61.2MB
+A ping w:32 c:1 conc:32: rps 74,890 200s/s 74,906 non200 0 p50 0.32ms p99 2.09ms
+A ping w:32 c:1 conc:64: rps 78,082 200s/s 78,096 non200 0 p50 0.58ms p99 4.02ms
+A rss w:32: workers 32 rss min 52.5MB max 54.0MB
+load after A: load averages: 17.40 10.28 6.59
+
+== B) c sweep on /io (5ms), w:8, cache off (api), conc:64 (+128 at c>=16) ==
+B io w:8 c:1 conc:64: rps 9,941 200s/s 1,536 non200 126042 p50 6.15ms p99 12.65ms
+B io w:8 c:4 conc:64: rps 12,489 200s/s 6,152 non200 95026 p50 5.26ms p99 9.98ms
+B io w:8 c:8 conc:64: rps 10,253 200s/s 10,251 non200 0 p50 6.13ms p99 8.60ms
+B io w:8 c:16 conc:64: rps 10,303 200s/s 10,302 non200 0 p50 6.10ms p99 8.59ms
+B io w:8 c:16 conc:128: rps 21,087 200s/s 21,086 non200 0 p50 5.92ms p99 8.29ms
+load after B: load averages: 9.45 10.00 6.97
+
+== C) cache off/on interleaved pairs, w:2 c:1, conc:64 ==
+C io off pair-A: rps 32,211 200s/s 386 non200 477347 p50 1.77ms p99 6.11ms
+C io on  pair-A: rps 159,887 200s/s 159,919 non200 0 p50 0.27ms p99 2.27ms
+C io on  pair-A counters: dMiss 15 dCoal 945 dHit 2397883 dBypass 0 dOverflow 0
+C io on  pair-B: rps 157,955 200s/s 158,013 non200 0 p50 0.28ms p99 2.23ms
+C io on  pair-B counters: dMiss 15 dCoal 945 dHit 2369295 dBypass 0 dOverflow 0
+C io off pair-B: rps 31,994 200s/s 387 non200 474122 p50 1.78ms p99 6.14ms
+C ping off pair-A: rps 92,955 200s/s 92,972 non200 0 p50 0.51ms p99 3.14ms
+C ping on  pair-A: rps 160,417 200s/s 160,450 non200 0 p50 0.27ms p99 2.29ms
+C ping on  pair-A counters: dMiss 23 dCoal 729 dHit 2406065 dBypass 0 dOverflow 0
+C ping on  pair-B: rps 167,956 200s/s 168,010 non200 0 p50 0.27ms p99 2.01ms
+C ping on  pair-B counters: dMiss 22 dCoal 764 dHit 2519423 dBypass 0 dOverflow 0
+C ping off pair-B: rps 98,612 200s/s 98,630 non200 0 p50 0.49ms p99 2.78ms
+load after C: load averages: 16.58 12.95 8.65
+
+== D) attribution: direct worker UDS vs Janus (w:2 pool from C) ==
+worker socket: /var/folders/m6/r38k2kq16y1415rzs4jzbmnh0000gn/T/rip-srv-Gs3w8x/p1w1.sock
+D uds direct conc:1: rps 69,043 200s/s 69,053 non200 0 p50 0.01ms p99 0.02ms
+D uds direct conc:2: rps 112,682 200s/s 112,699 non200 0 p50 0.02ms p99 0.04ms
+D janus tls conc:1: rps 18,380 200s/s 18,382 non200 0 p50 0.05ms p99 0.12ms
+
+DONE Mon Jul 20 09:15:31 MDT 2026
+final load: load averages: 8.43 11.28 8.30
+

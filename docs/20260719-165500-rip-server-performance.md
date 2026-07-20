@@ -238,11 +238,12 @@ stress phase:
 
 ## Measured results (2026-07-19)
 
-**Baseline caveat, applying to every section below:** the canonical
-cold-machine baseline is pending a reboot — sessions ran on a warm,
-multi-day-uptime rig with background load, so absolute numbers drift
-(identical-config legs measured ±10–24% apart); interleaved ratios are
-the comparisons to trust.
+**Baseline caveat, applying to every section below except the canonical
+baseline:** these sessions ran on a warm, multi-day-uptime rig with
+background load, so absolute numbers drift (identical-config legs
+measured ±10–24% apart); interleaved ratios are the comparisons to
+trust. The **canonical cold-machine baseline** (2026-07-20, below)
+supersedes every warm-machine absolute and anchors future A/Bs.
 
 Phase 8 stress run. Machine: Apple M5, 10 cores, 32GB, macOS Darwin 25.
 Bun 1.3.14, Go 1.26.5, Caddy v2.11.4, oha 1.14.0. `ulimit -n` 65536 on
@@ -595,6 +596,93 @@ on capacity-bound routes** (measured ~320–380x on the 5ms route at
 conc:64 — the multiplier is the handler-cost-to-ceiling gap, so slower
 handlers measure higher), **~1.6–2.5x on ping-class (Janus-bound)
 routes**, **zero by design** on Cookie/auth traffic.
+
+### Canonical cold-machine baseline (2026-07-20)
+
+**This section supersedes all warm-machine absolutes above and anchors
+every future A/B.** Raw legs:
+[20260720-090645-bench-raw-canonical-baseline.txt](20260720-090645-bench-raw-canonical-baseline.txt).
+
+Rig: Apple M5, 10 cores, 32GB, macOS 26.5.2, **rebooted 16 minutes
+before the run** — load 2.3 at start, no browser or build activity.
+Bun 1.3.14, Go 1.26.5, Caddy v2.11.4 (rebuilt at `c8e7e67`), oha
+1.14.0, `ulimit -n` 1,048,575. Full stack over HTTPS with keep-alive:
+oha → Janus (TLS, `*.ripdev.io` certs) → UDS → Bun worker
+(`RIP_ENV=production`, prebuilt artifact). Tenant: one app claiming
+`bench.ripdev.io` (site cache **on**, ttl 1s) and `api.ripdev.io`
+(site cache **off**); ping-class `/` returns `{"ok":true}`, `/io`
+sleeps 5ms. 15s legs, 5s warmups discarded. Cold-machine payoff:
+identical-config drift collapsed from the warm sessions' ±10–24% to
+**±3%** (ping-off 92,955 vs 98,612 seven minutes apart; io-off clean
+386 vs 387).
+
+**A) w sweep, ping-class, cache off, c:1:**
+
+| w | conc=w RPS | p50 | p99 | conc:64 RPS | p50 | p99 | worker RSS |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | 32,347 | 0.06ms | 0.17ms | **104,739** | 0.46ms | 2.63ms | 69–71MB |
+| 4 | 41,197 | 0.09ms | 0.24ms | 99,550 | 0.49ms | 2.84ms | 62–65MB |
+| 8 | 58,598 | 0.12ms | 0.36ms | 94,146 | 0.50ms | 3.02ms | 60–61MB |
+| 16 | 70,190 | 0.18ms | 0.91ms | 85,548 | 0.52ms | 3.84ms | 58–61MB |
+| 32 | 74,890 | 0.32ms | 2.09ms | 78,082 | 0.58ms | 4.02ms | 52–54MB |
+
+All legs zero non-200s. **The canonical proxied ceiling is ~105k RPS
+(w:2 conc:64)** — the warm sessions' ~99k peak was thermal, not
+structural; cold and freshly booted, the same config clears 100k. At
+conc:64 the curve now falls monotonically with w (104.7k → 78.1k):
+extra workers cost, they never pay, confirming ping-class is
+Janus-bound. RSS is measured *after* ~1.5M requests per pool, so it
+sits above the prebuild doc's at-boot 33–40MB — sustained-load heap,
+not a regression (w:32 workers, each seeing fewer requests, sit lower
+than w:2's).
+
+**B) c sweep on `/io` (5ms), w:8, cache off, conc:64:**
+
+| c | 200s/s | non-200 (15s) | p50 | p99 |
+| --- | --- | --- | --- | --- |
+| 1 | 1,536 | 126,042 | 6.15ms | 12.65ms |
+| 4 | 6,152 | 95,026 | 5.26ms | 9.98ms |
+| 8 | 10,251 | 0 | 6.13ms | 8.60ms |
+| 16 | 10,302 | 0 | 6.10ms | 8.59ms |
+| 16 (conc:128) | 21,086 | 0 | 5.92ms | 8.29ms |
+
+Capacity-exact, byte-for-byte with the warm sweep: 503s vanish at
+w×c ≥ conc, clean throughput ≈ conc/(5ms + overhead), extra c past
+saturation is free but buys nothing. The c:1 clean floor reproduced
+exactly (1,536 both sessions).
+
+**C) cache off/on, w:2 c:1, conc:64, interleaved pairs:**
+
+| Leg | RPS (200s/s where ≠) | p50 | p99 | worker req/s |
+| --- | --- | --- | --- | --- |
+| io off pair-A | 32,211 (clean 386) | 1.77ms | 6.11ms | ~390 |
+| io on pair-A | 159,887 | 0.27ms | 2.27ms | ~1 (15 misses/15s) |
+| io on pair-B | 157,955 | 0.28ms | 2.23ms | ~1 (15 misses/15s) |
+| io off pair-B | 31,994 (clean 387) | 1.78ms | 6.14ms | ~390 |
+| ping off pair-A | 92,955 | 0.51ms | 3.14ms | — |
+| ping on pair-A | 160,417 | 0.27ms | 2.29ms | ~1.5 |
+| ping on pair-B | 167,956 | 0.27ms | 2.01ms | ~1.5 |
+| ping off pair-B | 98,612 | 0.49ms | 2.78ms | — |
+
+**The canonical cache-HIT ceiling is ~160–168k RPS** (warm sessions
+read 118–144k). Capacity-bound ratio: **~410x** clean-200s
+(386→159,919; 387→158,013) — the warm ~320–380x stands, cold sharpens
+it. Ping-class floor: **1.6–1.8x**, inside the warm 1.6–2.5x band.
+Coalescing held: 15 misses per 2.4M-request leg, ~1 fill/s at ttl 1s.
+
+**D) attribution (w:2 pool, one worker socket):**
+
+| Path | conc | RPS | p50 | p99 |
+| --- | --- | --- | --- | --- |
+| oha → worker UDS directly | 1 | 69,043 | 0.01ms | 0.02ms |
+| oha → worker UDS directly | 2 | 112,682 | 0.02ms | 0.04ms |
+| oha → Janus (TLS) → UDS | 1 | 18,380 | 0.05ms | 0.12ms |
+
+A worker answers in ~14µs; through Janus, ~54µs — Janus (TLS + proxy +
+routing) is **~73%** of per-request latency, reproducing the warm
+session's ~75% within noise. The attribution story is unchanged: the
+path past ~105k proxied is Janus-side cost, and the cache already
+routes around it (160k+ on HITs).
 
 ### Next-best lever
 
