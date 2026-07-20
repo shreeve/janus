@@ -394,6 +394,10 @@ the only 10x+ story.
 
 ### Hot-path lock collapse (2026-07-20)
 
+Raw per-leg data (every run, warmups, one failed leg, and the load
+averages that explain the variance):
+[20260720-030700-bench-raw-lock-collapse.txt](20260720-030700-bench-raw-lock-collapse.txt).
+
 The data plane's per-request cost included three `dp.mu` acquisitions
 (selection, proxy lookup, release) plus a fourth on failure (health
 marking).
