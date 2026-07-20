@@ -1,0 +1,71 @@
+janus lock-collapse A/B scratch log Mon Jul 20 02:20:13 MDT 2026
+=== sweep start Mon Jul 20 02:28:58 MDT 2026 ===
+w:2 conc:64 pair-A before: 102,331 RPS p50 0.48ms p99 2.63ms non200 0 (warmup 98,830 discarded)
+w:2 conc:64 pair-A after: 98,048 RPS p50 0.49ms p99 2.80ms non200 0 (warmup 99,901 discarded)
+w:2 conc:64 pair-B before: 94,485 RPS p50 0.51ms p99 2.94ms non200 0 (warmup 88,974 discarded)
+w:2 conc:64 pair-B after: 88,178 RPS p50 0.53ms p99 3.12ms non200 0 (warmup 99,637 discarded)
+LEG FAILED (w:16 conc:64 pair-A before) rc=1
+=== sweep resume Mon Jul 20 02:33:10 MDT 2026 ===
+w:2 conc:64 pair-C after: 97,971 RPS p50 0.49ms p99 2.82ms non200 0 (warmup 102,196 discarded)
+w:2 conc:64 pair-C before: 87,370 RPS p50 0.54ms p99 3.35ms non200 0 (warmup 86,945 discarded)
+w:2 conc:64 pair-D after: 74,616 RPS p50 0.51ms p99 3.75ms non200 0 (warmup 101,670 discarded)
+w:2 conc:64 pair-D before: 101,277 RPS p50 0.48ms p99 2.68ms non200 0 (warmup 95,211 discarded)
+w:16 conc:64 pair-A before: 85,042 RPS p50 0.56ms p99 3.19ms non200 0 (warmup 84,563 discarded)
+w:16 conc:64 pair-A after: 86,157 RPS p50 0.55ms p99 3.23ms non200 0 (warmup 88,953 discarded)
+w:16 conc:64 pair-B after: 65,657 RPS p50 0.63ms p99 4.83ms non200 0 (warmup 79,374 discarded)
+w:16 conc:64 pair-B before: 78,001 RPS p50 0.61ms p99 3.54ms non200 0 (warmup 68,867 discarded)
+w:16 conc:128 pair-A before: 78,820 RPS p50 1.12ms p99 7.40ms non200 0 (warmup 82,501 discarded)
+w:16 conc:128 pair-A after: 93,067 RPS p50 1.00ms p99 6.06ms non200 0 (warmup 91,172 discarded)
+w:16 conc:128 pair-B after: 90,985 RPS p50 1.00ms p99 6.41ms non200 0 (warmup 89,205 discarded)
+w:16 conc:128 pair-B before: 58,326 RPS p50 1.37ms p99 11.55ms non200 0 (warmup 77,336 discarded)
+=== sweep done Mon Jul 20 02:40:12 MDT 2026 ===
+=== sweep round2 Mon Jul 20 02:41:56 MDT 2026 ===
+w:2 conc:64 r2-E before: 97,323 RPS p50 0.50ms p99 2.82ms non200 0 (warmup 98,335 discarded)
+  load:  2:42  up 2 days, 23:18, 1 user, load averages: 9.51 10.78 8.33
+w:2 conc:64 r2-E after: 81,522 RPS p50 0.54ms p99 3.86ms non200 0 (warmup 75,057 discarded)
+  load:  2:43  up 2 days, 23:19, 1 user, load averages: 11.01 10.90 8.49
+w:2 conc:64 r2-F after: 93,666 RPS p50 0.50ms p99 3.02ms non200 0 (warmup 102,249 discarded)
+  load:  2:44  up 2 days, 23:20, 1 user, load averages: 13.06 11.31 8.76
+w:2 conc:64 r2-F before: 33,150 RPS p50 0.77ms p99 21.72ms non200 0 (warmup 68,667 discarded)
+  load:  2:44  up 2 days, 23:21, 1 user, load averages: 18.80 12.79 9.42
+w:2 conc:64 r2-G before: 97,110 RPS p50 0.50ms p99 2.82ms non200 0 (warmup 97,979 discarded)
+  load:  2:45  up 2 days, 23:21, 1 user, load averages: 16.66 13.01 9.67
+w:2 conc:64 r2-G after: 94,147 RPS p50 0.51ms p99 2.95ms non200 0 (warmup 101,674 discarded)
+  load:  2:46  up 2 days, 23:22, 1 user, load averages: 15.51 13.09 9.84
+w:2 conc:64 r2-H after: 97,837 RPS p50 0.49ms p99 2.81ms non200 0 (warmup 88,153 discarded)
+  load:  2:47  up 2 days, 23:23, 1 user, load averages: 17.26 13.57 10.17
+w:2 conc:64 r2-H before: 76,951 RPS p50 0.54ms p99 4.34ms non200 0 (warmup 102,834 discarded)
+  load:  2:47  up 2 days, 23:24, 1 user, load averages: 14.82 13.29 10.23
+w:16 conc:64 r2-E before: 80,619 RPS p50 0.59ms p99 3.43ms non200 0 (warmup 72,308 discarded)
+  load:  2:48  up 2 days, 23:24, 1 user, load averages: 17.06 13.87 10.58
+w:16 conc:64 r2-E after: 88,512 RPS p50 0.54ms p99 3.15ms non200 0 (warmup 81,276 discarded)
+  load:  2:49  up 2 days, 23:25, 1 user, load averages: 23.74 15.53 11.33
+w:16 conc:64 r2-F after: 78,986 RPS p50 0.57ms p99 3.58ms non200 0 (warmup 74,613 discarded)
+  load:  2:49  up 2 days, 23:26, 1 user, load averages: 19.15 15.29 11.45
+w:16 conc:64 r2-F before: 87,633 RPS p50 0.55ms p99 3.06ms non200 0 (warmup 83,535 discarded)
+  load:  2:50  up 2 days, 23:27, 1 user, load averages: 17.48 15.27 11.63
+w:16 conc:64 r2-G before: 68,973 RPS p50 0.70ms p99 3.99ms non200 0 (warmup 74,729 discarded)
+  load:  2:51  up 2 days, 23:27, 1 user, load averages: 15.90 15.08 11.74
+w:16 conc:64 r2-G after: 89,360 RPS p50 0.54ms p99 3.13ms non200 0 (warmup 84,287 discarded)
+  load:  2:52  up 2 days, 23:28, 1 user, load averages: 15.53 14.94 11.85
+w:16 conc:64 r2-H after: 89,418 RPS p50 0.54ms p99 3.11ms non200 0 (warmup 80,727 discarded)
+  load:  2:52  up 2 days, 23:29, 1 user, load averages: 15.98 14.96 12.00
+w:16 conc:64 r2-H before: 87,412 RPS p50 0.55ms p99 3.06ms non200 0 (warmup 87,737 discarded)
+  load:  2:53  up 2 days, 23:30, 1 user, load averages: 14.31 14.51 11.98
+w:16 conc:128 r2-E before: 90,688 RPS p50 1.00ms p99 6.08ms non200 0 (warmup 91,287 discarded)
+  load:  2:54  up 2 days, 23:30, 1 user, load averages: 18.89 15.46 12.44
+w:16 conc:128 r2-E after: 93,461 RPS p50 0.98ms p99 6.05ms non200 0 (warmup 94,112 discarded)
+  load:  2:55  up 2 days, 23:31, 1 user, load averages: 18.05 15.51 12.60
+w:16 conc:128 r2-F after: 90,756 RPS p50 0.98ms p99 6.37ms non200 0 (warmup 95,548 discarded)
+  load:  2:55  up 2 days, 23:32, 1 user, load averages: 16.77 15.33 12.67
+w:16 conc:128 r2-F before: 90,770 RPS p50 1.02ms p99 5.99ms non200 0 (warmup 82,524 discarded)
+  load:  2:56  up 2 days, 23:33, 1 user, load averages: 15.30 15.01 12.68
+w:16 conc:128 r2-G before: 91,730 RPS p50 1.02ms p99 5.76ms non200 0 (warmup 91,631 discarded)
+  load:  2:57  up 2 days, 23:33, 1 user, load averages: 15.94 15.02 12.79
+w:16 conc:128 r2-G after: 91,574 RPS p50 1.00ms p99 6.17ms non200 0 (warmup 92,153 discarded)
+  load:  2:58  up 2 days, 23:34, 1 user, load averages: 15.14 14.81 12.82
+w:16 conc:128 r2-H after: 89,773 RPS p50 1.02ms p99 6.33ms non200 0 (warmup 92,440 discarded)
+  load:  2:58  up 2 days, 23:35, 1 user, load averages: 20.85 16.07 13.37
+w:16 conc:128 r2-H before: 87,773 RPS p50 1.03ms p99 6.28ms non200 0 (warmup 88,267 discarded)
+  load:  2:59  up 2 days, 23:36, 1 user, load averages: 18.94 16.04 13.48
+=== round2 done Mon Jul 20 02:59:54 MDT 2026 ===
