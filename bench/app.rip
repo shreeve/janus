@@ -1,0 +1,9 @@
+import { get, start } from '@rip-lang/server'
+
+get '/' -> { ok: true }
+
+get '/io' ->
+  sleep! 5
+  { ok: true, io: true }
+
+start()

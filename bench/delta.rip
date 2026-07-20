@@ -1,0 +1,13 @@
+#!/usr/bin/env rip
+# Two GET /1.0/cache snapshots -> one counter-delta line.
+# argv: label, before-JSON, after-JSON.
+
+label = process.argv[2]
+was = JSON.parse(process.argv[3])
+now = JSON.parse(process.argv[4])
+
+d = {}
+for k in ['hits', 'misses', 'coalesced', 'bypass', 'stores', 'waiter_overflow']
+  d[k] = now[k] - was[k]
+
+console.log "#{label}: dMiss #{d.misses} dCoal #{d.coalesced} dHit #{d.hits} dBypass #{d.bypass} dOverflow #{d.waiter_overflow}"

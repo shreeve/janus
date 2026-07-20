@@ -1,0 +1,11 @@
+#!/usr/bin/env rip
+# First worker socket path from the control plane.
+# argv: control base URL (default http://127.0.0.1:7600).
+
+control = process.argv[2] ?? 'http://127.0.0.1:7600'
+res = fetch!("#{control}/1.0/apps")
+apps = res.json!
+if apps.length is 0
+  console.error "sock.rip: no apps registered at #{control}"
+  process.exit 1
+console.log apps[0].upstreams[0].path

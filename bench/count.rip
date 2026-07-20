@@ -1,0 +1,11 @@
+#!/usr/bin/env rip
+# oha --output-format json (stdin) -> total request count
+# (sum of statusCodeDistribution values).
+
+text = Bun.stdin.text!
+d = JSON.parse(text)
+codes = d.statusCodeDistribution
+total = 0
+for code in Object.keys(codes)
+  total += codes[code]
+console.log total

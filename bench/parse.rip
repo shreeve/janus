@@ -1,0 +1,23 @@
+#!/usr/bin/env rip
+# oha --output-format json (stdin) -> one summary line.
+# argv: label, duration-seconds. The line format is stable — raw bench
+# files are diffed across sessions; do not change it.
+
+label = process.argv[2]
+dur = parseFloat(process.argv[3])
+
+text = Bun.stdin.text!
+d = JSON.parse(text)
+s = d.summary
+codes = d.statusCodeDistribution
+lat = d.latencyPercentiles
+
+okCount = codes['200'] ?? 0
+non200 = 0
+for code in Object.keys(codes)
+  non200 += codes[code] unless code is '200'
+
+n0 = (x) -> Math.round(x).toLocaleString('en-US')
+ms = (x) -> (x * 1000).toFixed(2)
+
+console.log "#{label}: rps #{n0(s.requestsPerSec)} 200s/s #{n0(okCount / dur)} non200 #{non200} p50 #{ms(lat.p50)}ms p99 #{ms(lat.p99)}ms"
