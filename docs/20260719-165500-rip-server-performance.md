@@ -43,9 +43,9 @@ throttle.
 
 ## Ranked levers
 
-**Remaining levers as of 2026-07-20, after the shipping spree below:
-#2 (micro-cache + coalescing — still the only 10x+ story) and
-#3 (prebuild-once + bytecode — reload latency and RSS, not RPS).**
+**Remaining lever as of 2026-07-20, after the shipping spree below:
+#2 (micro-cache + coalescing — still the only 10x+ story;
+implementation in progress).**
 Everything else is shipped-with-measurement, measured-out (the lock
 collapse: throughput-neutral, landed on simplicity — see Measured
 results), deferred-for-cause, or fantasy.
@@ -54,7 +54,7 @@ results), deferred-for-cause, or fantasy.
 | --- | --- | --- | --- | --- |
 | 1 | Raise `c` (8–32) for I/O-bound apps, watch off | 2–10x per worker | ~zero (protocol opt-in exists) | **Shipped 2026-07-20** (`-c` flag) — measured 7x clean 200s/s at c:8 on the 5ms handler, capacity-exact: 503s vanish when w×c ≥ conc (see Measured results) |
 | 2 | Janus micro-cache + request coalescing (anonymous GETs) | 10–100x on cacheable pages | Medium-high (correctness) | Measure-first, then build as a capability — **top remaining lever** |
-| 3 | Manager prebuilds app once per dirty epoch; workers boot artifact (+`--bytecode`) | Reload/boot 2–4x; RSS drops | Low-medium | **Ship next** — the other remaining lever |
+| 3 | Manager prebuilds app once per dirty epoch; workers boot artifact (+`--bytecode`) | Reload/boot 2–4x; RSS drops | Low-medium | **Shipped 2026-07-20** (rip `8333218`) — per-worker RSS ~137–145MB → 33–40MB (~3.7x, ~105MB/worker); reload w:8 ~470ms → ~170ms (~2.7x, no longer scales with w); boot-to-all-ready w:8 ~650ms → ~300ms (~2x). Bytecode half NOT viable on Bun 1.3.14 (ESM bytecode needs `compile:true`; CJS rejects top-level await) — revisit when Bun ships ESM bytecode (see Measured results) |
 | 4 | DSL fast path (context allocation, route buckets) | 1.3–2x per worker ping-class | Medium | **Shipped 2026-07-20** (rip repo, 3 measured cuts) — in-process hot loop ~2404 → ~1690 ns/req (~−30% worker CPU per request; cross-session endpoints, per-cut interleaved ratios); route index adds −12–15% at 40 routes, parity at 1 route. Full-stack RPS unchanged (Janus-bound, as predicted) |
 | 5 | `ReverseProxy.BufferPool` + proxy-struct reuse + idle conns scaled with `c` | 5–15% of Janus CPU | Trivial (~20 lines) | **Shipped 2026-07-19** — measured +20–37% RPS (see Measured results), far above the estimate |
 | 6 | Static file bypass at Janus (registration declares static roots) | Large for asset-heavy tenants; zero for APIs | Medium (protocol extension) | Later (need a real tenant) |
@@ -450,6 +450,59 @@ ceiling story unchanged. Best counted legs read 102.3k (before) and
 ~99k ceiling did not move, consistent with the attribution table —
 `dp.mu` was never the bottleneck at these RPS; TLS + proxy CPU is.
 The lever ranking is unchanged.
+
+### Prebuild-once (2026-07-20)
+
+Lever #3 shipped in the rip repo (`8333218`): the manager builds ONE
+ESM artifact per boot epoch (`Bun.build` + a `.rip` plugin over the
+compiler it already runs on, into the pool's run tmpdir), and workers
+— themselves prebuilt to plain JS at startup — boot it loader-free.
+Never-stale composes automatically (new epoch = new artifact, built
+inside the single-flight boot after the dirty check); a build failure
+takes the exact cached-boot-failure path; direct-entry `APP_ENTRY`
+workers keep the loader. Bundling freezes each module's `import.meta`
+path fields to its source location, so `import.meta.dir`-relative
+file serving is byte-identical to unbundled behavior.
+
+Rig: M5, 10 cores, 32GB, Bun 1.3.14, manager + stub Janus control
+socket over UDS, 3 interleaved before/after legs (background load —
+trust the ratios). Suite: 103/103 package tests (3 new pins:
+loader-free artifact boot, `import.meta.dir` preservation, loud build
+rejection); root 5425/0.
+
+Per-worker RSS (the compiler heap leaving workers):
+
+| | before | after |
+| --- | --- | --- |
+| at boot | ~137–145MB | 32.7MB |
+| after 1k requests | ~137–145MB | 37.7–40MB |
+
+~3.7x smaller, ~105MB less per worker — ~850MB recovered at w:8.
+
+Reload latency (save → fresh response), per-leg medians:
+
+| Config | before (3 legs) | after (3 legs) |
+| --- | --- | --- |
+| w:2 | 193 / 289 / 254ms | 156 / 141 / 163ms |
+| w:8 | 470 / 536 / 408ms | 150 / 178 / 175ms |
+
+~2.7x at w:8, and reload no longer scales with worker count — every
+worker used to recompile the app; now one build serves all `w`.
+
+Boot, spawn → all-ready at w:8 (artifact build included):
+
+| before (3 legs) | after (3 legs) |
+| --- | --- |
+| 627 / 650 / 671ms | 215 / 350 / 319ms |
+
+~2x faster to all-ready.
+
+**Bytecode verdict: NOT viable on Bun 1.3.14.** ESM bytecode requires
+`compile:true` (a standalone executable), and the one bundle format
+bytecode accepts (CJS) rejects top-level await — which idiomatic Rip
+(module-level dammit) produces routinely. The plain-JS artifact
+ships; revisit when Bun supports ESM bytecode, at which point the
+artifact is one flag away from kernel-shared read-only pages.
 
 ### Next-best lever
 
