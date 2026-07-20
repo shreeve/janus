@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, and a WebSocket hub, driven by a JSON control API.</strong>
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, and on-demand TLS asks, driven by a JSON control API.</strong>
 </p>
 
 ---
 
-Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Janus provides the inward face: a memory-resident registry and engines driven by the `/1.0` JSON API. Cold Caddyfile config sets capabilities (such as **control** reachability) and which sites admit traffic into Janus; hot `/1.0` calls decide how admitted hosts map to upstreams, health, hub, and certificate allowlisting.
+Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Janus provides the inward face: a memory-resident registry and engines driven by the `/1.0` JSON API. Cold Caddyfile config sets capabilities (such as **control** reachability) and which sites admit traffic into Janus; hot `/1.0` calls decide how admitted hosts map to upstreams, health, and certificate allowlisting.
 
 This repository is a Go module. Caddy is a dependency, not a git submodule. A Janus-enabled binary is produced with [xcaddy](https://github.com/caddyserver/xcaddy), which compiles stock Caddy together with this module into one static `caddy` binary.
 
@@ -59,7 +59,7 @@ xcaddy build \
   --output ./bin/caddy
 
 go test ./...
-./test.sh   # ping group first, then control
+./test.sh   # groups in capability order: ping, control, apps, data, heartbeat, tls, tenant
 ```
 
 ### 1. ping (data plane)
@@ -133,13 +133,18 @@ Confirm the module is linked:
 | `app.go` | Process-wide `janus` app (control, global defaults) |
 | `handler.go` | Site `http.handlers.janus` (admission + site overrides) |
 | `settings.go` | Cascade helpers (`ping on` / `ping off`) |
+| `control.go` | Control listener config (`control internal/local/public`, `token:…`) |
+| `control_api.go` | Control listeners + `/1.0` mux (meta, health, tls/ask) |
+| `apps.go` | Hot apps registry (CRUD, upstreams, heartbeats, TTL sweep) |
+| `dataplane.go` | Host → worker-socket proxying (least-conn, health, marked 503s) |
+| `ring.go` | Doorbell ring: single-flight wake-up for dirty apps |
 | `Caddyfile` | Working cold config (multi-site cascade demos) |
 | `test.sh` | High-level acceptance suite (self-contained; not a substitute for `go test`) |
 | `docs/` | Design notes, SPEC, capabilities (`YYYYMMDD-HHMMSS-` prefixed) |
 
 ## Design notes
 
-See [`docs/`](docs/) for the control-plane sketch and related material. The `/1.0` API follows an Incus-inspired style (envelopes, resource paths, ETag on config writes) while remaining Janus’s own protocol.
+See [`docs/`](docs/) for the control-plane sketch and related material. The `/1.0` API follows an Incus-inspired style (envelopes, resource paths) while remaining Janus’s own protocol; writes carry no fencing fields — the tenant serializes its own writes (see the [pool protocol](docs/20260719-002000-pool-protocol.md)).
 
 ## Name
 

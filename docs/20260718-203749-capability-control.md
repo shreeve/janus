@@ -10,7 +10,7 @@ Cold Caddyfile capability. Configures **where** Janus’s control plane (`/1.0` 
 | **Module** | `janus` app (`app.go`, `control.go`, `control_api.go`) |
 | **Directive** | Global options: `janus { control … }` |
 | **Pairs with** | Site handler `janus` (data-plane admission; **ping** already proven) |
-| **Status** | Listeners serve `GET /1.0` and `GET /1.0/health` |
+| **Status** | Listeners serve the full hot API: meta, health, apps CRUD, upstreams, heartbeats, tls/ask |
 
 ## Why it exists
 
@@ -129,8 +129,16 @@ Port **7601** for public avoids clashing with local **7600**.
 | --- | --- | --- |
 | `GET` | `{base}/1.0` | `{ "api_version":"1.0", "type":"janus", "ping":…, "control":[…] }` |
 | `GET` | `{base}/1.0/health` | `{ "status":"ok" }` |
+| `POST` | `{base}/1.0/apps` | register → `201 { "id":"name-xxxxxx" }` |
+| `GET` | `{base}/1.0/apps` | list registered apps |
+| `GET` | `{base}/1.0/apps/{id}` | one app record |
+| `PATCH` | `{base}/1.0/apps/{id}` | update name and/or hosts |
+| `DELETE` | `{base}/1.0/apps/{id}` | deregister → `204` |
+| `PUT` | `{base}/1.0/apps/{id}/upstreams` | atomic full-list swap |
+| `POST` | `{base}/1.0/apps/{id}/heartbeat` | stamp the heartbeat clock → `204` |
+| `GET` | `{base}/1.0/tls/ask?domain=…` | on-demand TLS allowance: 200 allow / 404 deny |
 
-`{base}` is the path from the listen URL (empty for defaults and for `internal`).
+`{base}` is the path from the listen URL (empty for defaults and for `internal`). Unknown paths under `{base}/1.0` are `404`; a known path with the wrong method is `405`.
 
 ## Examples
 
@@ -184,7 +192,6 @@ go test ./...
 
 ## Non-goals
 
-- Hot registry / apps CRUD (later `/1.0` routes)
 - Changing Caddyfile admission from `/1.0`
 - Per-site control planes
 

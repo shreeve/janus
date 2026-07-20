@@ -22,7 +22,7 @@
 #   curl -s http://127.0.0.1:7600/1.0/health
 #   curl -s --unix-socket run/janus.sock http://janus/1.0
 #
-# 6) tls — on-demand minting gated by the hot registry
+# on-demand tls (hot ask via /1.0) — minting gated by the registry
 #   Cold config owns the machinery (on_demand_tls global + per-site
 #   tls { on_demand }); the registry only answers "may we mint for
 #   this name?" via GET /1.0/tls/ask?domain=… (200 allow, 404 deny).
