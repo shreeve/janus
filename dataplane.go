@@ -12,6 +12,7 @@ import (
 	"net/http/httputil"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -47,11 +48,15 @@ const (
 	maxBootErrorBody = 64 << 10
 )
 
-// upstreamState is per-socket passive health and least-conn accounting.
-// Doorbell sockets never get an entry: they are excluded from health.
+// upstreamState is per-socket passive health, least-conn accounting, and the
+// socket's reusable proxy. Doorbell sockets never get an entry: they are
+// excluded from health. inflight and unhealthyUntil are atomics so release
+// and health marking never touch dp.mu — the request path acquires the
+// global mutex exactly once, in acquireUpstream.
 type upstreamState struct {
-	inflight       int
-	unhealthyUntil time.Time
+	inflight       atomic.Int64
+	unhealthyUntil atomic.Int64 // time.Time UnixNano; 0 = never marked
+	proxy          *httputil.ReverseProxy
 }
 
 // dataPlane routes admitted requests: host → registry → upstream unix socket.
@@ -74,20 +79,24 @@ type dataPlane struct {
 	buffers *bufferPool
 
 	mu      sync.Mutex
-	state   map[string]*upstreamState         // socket path → health + inflight
-	flights map[string]*ringFlight            // app id → the one outstanding ring
-	proxies map[string]*httputil.ReverseProxy // socket path → reusable proxy
+	state   map[string]*upstreamState // socket path → health + inflight + proxy
+	flights map[string]*ringFlight    // app id → the one outstanding ring
 }
 
-// bufferPool adapts sync.Pool to httputil.BufferPool.
+// proxyBufSize is the ReverseProxy copy-buffer size (the proxy's own default).
+const proxyBufSize = 32 << 10
+
+// bufferPool adapts sync.Pool to httputil.BufferPool. It stores fixed-size
+// array pointers, not slices: a []byte put into sync.Pool's `any` boxes the
+// slice header onto the heap — one allocation per response copy.
 type bufferPool struct{ p sync.Pool }
 
 func newBufferPool() *bufferPool {
-	return &bufferPool{p: sync.Pool{New: func() any { return make([]byte, 32<<10) }}}
+	return &bufferPool{p: sync.Pool{New: func() any { return new([proxyBufSize]byte) }}}
 }
 
-func (b *bufferPool) Get() []byte    { return b.p.Get().([]byte) }
-func (b *bufferPool) Put(buf []byte) { b.p.Put(buf) }
+func (b *bufferPool) Get() []byte    { return b.p.Get().(*[proxyBufSize]byte)[:] }
+func (b *bufferPool) Put(buf []byte) { b.p.Put((*[proxyBufSize]byte)(buf)) }
 
 func newDataPlane(reg *appRegistry, logger *zap.Logger) *dataPlane {
 	if logger == nil {
@@ -103,7 +112,6 @@ func newDataPlane(reg *appRegistry, logger *zap.Logger) *dataPlane {
 		buffers:         newBufferPool(),
 		state:           map[string]*upstreamState{},
 		flights:         map[string]*ringFlight{},
-		proxies:         map[string]*httputil.ReverseProxy{},
 	}
 	dp.transport = &http.Transport{
 		DialContext:         dp.dialUpstream,
@@ -174,10 +182,20 @@ func doorbellOf(rec AppRecord) (Upstream, bool) {
 }
 
 // normalizeHostHeader strips any port and lowercases for registry lookup.
+// The split is manual — net.SplitHostPort heap-allocates an *AddrError on
+// every portless Host, which is the common case — but keeps its semantics:
+// a bracketed IPv6 host loses brackets and port, an unbracketed host with
+// exactly one colon loses the port, anything else passes through whole.
 func normalizeHostHeader(hostport string) string {
 	host := hostport
-	if h, _, err := net.SplitHostPort(hostport); err == nil {
-		host = h
+	if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		if host[0] == '[' {
+			if j := strings.IndexByte(host, ']'); j == i-1 {
+				host = host[1:j] // "[::1]:8443" → "::1"
+			}
+		} else if strings.IndexByte(host, ':') == i {
+			host = host[:i] // "app.test:8443" → "app.test"
+		}
 	}
 	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
@@ -262,10 +280,10 @@ func (dp *dataPlane) dialUpstream(ctx context.Context, _, addr string) (net.Conn
 // unhealthy the answer is 503 + Retry-After. 502 is reserved for a dial that
 // succeeded followed by a misbehaving worker.
 func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, rec AppRecord) error {
-	tried := map[string]bool{}
+	var tried map[string]bool // allocated lazily: only a retry needs it
 	sawBusy := false
 	for {
-		path, ok := dp.acquireUpstream(rec.Upstreams, tried)
+		path, st, ok := dp.acquireUpstream(rec.Upstreams, tried)
 		if !ok {
 			if sawBusy {
 				// Every upstream bounced a marked 503 — capacity, not
@@ -279,75 +297,77 @@ func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, rec Ap
 			}
 			return dp.unavailable(w, rec.ID, "all upstreams unhealthy")
 		}
-		tried[path] = true
-		final, busy := dp.proxyOnce(w, r, path)
+		final, busy := dp.proxyOnce(w, r, path, st)
 		if final {
 			return nil
 		}
+		if tried == nil {
+			tried = make(map[string]bool, len(rec.Upstreams))
+		}
+		tried[path] = true
 		sawBusy = sawBusy || busy
 	}
 }
 
 // acquireUpstream picks the healthy, untried worker socket with the fewest
-// in-flight requests (random among ties) and charges it one in-flight.
-func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool) (string, bool) {
-	now := time.Now()
+// in-flight requests (uniform random among ties, via reservoir sampling so
+// no ties slice is built under the lock), charges it one in-flight, and
+// returns its state — the proxy, the lock-free release, and health marking
+// all ride the returned pointer, so this is the request's only dp.mu
+// acquisition.
+func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool) (string, *upstreamState, bool) {
+	now := time.Now().UnixNano()
 	dp.mu.Lock()
 	defer dp.mu.Unlock()
 
-	best := -1
-	var ties []string
-	for _, u := range ups {
+	var best int64
+	bestIdx := -1
+	ties := 0
+	for i := range ups {
+		u := &ups[i]
 		if u.Doorbell || tried[u.Path] {
 			continue
 		}
-		st := dp.state[u.Path]
-		if st != nil && now.Before(st.unhealthyUntil) {
-			continue
-		}
-		inflight := 0
-		if st != nil {
-			inflight = st.inflight
+		var inflight int64
+		if st := dp.state[u.Path]; st != nil {
+			if until := st.unhealthyUntil.Load(); until != 0 && now < until {
+				continue
+			}
+			inflight = st.inflight.Load()
 		}
 		switch {
-		case best == -1 || inflight < best:
+		case bestIdx == -1 || inflight < best:
 			best = inflight
-			ties = ties[:0]
-			ties = append(ties, u.Path)
+			bestIdx = i
+			ties = 1
 		case inflight == best:
-			ties = append(ties, u.Path)
+			ties++
+			if rand.IntN(ties) == 0 {
+				bestIdx = i
+			}
 		}
 	}
-	if len(ties) == 0 {
-		return "", false
+	if bestIdx == -1 {
+		return "", nil, false
 	}
-	path := ties[rand.IntN(len(ties))]
+	path := ups[bestIdx].Path
 	st := dp.state[path]
 	if st == nil {
 		st = &upstreamState{}
 		dp.state[path] = st
 	}
-	st.inflight++
-	return path, true
+	if st.proxy == nil {
+		st.proxy = dp.newProxy(path)
+	}
+	st.inflight.Add(1)
+	return path, st, true
 }
 
-func (dp *dataPlane) releaseUpstream(path string) {
-	dp.mu.Lock()
-	defer dp.mu.Unlock()
-	if st := dp.state[path]; st != nil && st.inflight > 0 {
-		st.inflight--
-	}
-}
-
-func (dp *dataPlane) markUnhealthy(path string) {
-	dp.mu.Lock()
-	defer dp.mu.Unlock()
-	st := dp.state[path]
-	if st == nil {
-		st = &upstreamState{}
-		dp.state[path] = st
-	}
-	st.unhealthyUntil = time.Now().Add(dp.unhealthyWindow)
+// markUnhealthy deselects the upstream for the unhealthy window. A plain
+// atomic store: concurrent markings all land inside the same window, so
+// last-writer-wins matches the previous mutex-serialized behavior.
+func (dp *dataPlane) markUnhealthy(st *upstreamState) {
+	st.unhealthyUntil.Store(time.Now().Add(dp.unhealthyWindow).UnixNano())
 }
 
 // attemptState is one proxy attempt's per-request state, carried on the
@@ -364,21 +384,17 @@ func attemptOf(ctx context.Context) *attemptState {
 	return st
 }
 
-// proxyFor returns the reusable ReverseProxy for one socket path. The struct
-// carries no per-request state (that lives in attemptState), so one instance
-// serves every request to that socket.
+// newProxy builds the reusable ReverseProxy for one socket path; it lives on
+// the socket's upstreamState (built once, under acquireUpstream's lock). The
+// struct carries no per-request state (that lives in attemptState), so one
+// instance serves every request to that socket.
 //
 // The proxy is a focused net/http/httputil.ReverseProxy over a unix-dialing
 // transport rather than Caddy's reverseproxy module: that module is built to
 // be provisioned cold with its own upstream/health state, while Janus selects
 // upstreams per request from the hot registry. ReverseProxy still gives us
 // streaming in both directions, flush-on-stream, trailers, and upgrades.
-func (dp *dataPlane) proxyFor(path string) *httputil.ReverseProxy {
-	dp.mu.Lock()
-	defer dp.mu.Unlock()
-	if rp := dp.proxies[path]; rp != nil {
-		return rp
-	}
+func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 	host := sockHost(path)
 	rp := &httputil.ReverseProxy{
 		Transport:  dp.transport,
@@ -415,7 +431,6 @@ func (dp *dataPlane) proxyFor(path string) *httputil.ReverseProxy {
 		},
 		ErrorLog: zap.NewStdLog(dp.logger),
 	}
-	dp.proxies[path] = rp
 	return rp
 }
 
@@ -424,24 +439,25 @@ func (dp *dataPlane) proxyFor(path string) *httputil.ReverseProxy {
 // and final=false when another upstream may be tried — either the dial
 // failed (body untouched) or a replayable request received a marked busy /
 // draining 503 (busy=true; never a health event).
-func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path string) (final, busy bool) {
-	defer dp.releaseUpstream(path)
+func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path string, st *upstreamState) (final, busy bool) {
+	defer st.inflight.Add(-1)
 
-	st := &attemptState{canReplay: replayable(r)}
+	at := &attemptState{canReplay: replayable(r)}
 
 	// The transport closes the outbound body even when the dial fails; hand
 	// it a wrapper so the client's body (guaranteed unread on a dial error)
 	// survives for a retry on another upstream. The server closes the real
-	// body itself after the handler returns.
-	attempt := r.WithContext(context.WithValue(r.Context(), attemptKey{}, st))
-	if r.Body != nil {
+	// body itself after the handler returns. http.NoBody needs no shield:
+	// closing it is a no-op and there is nothing to replay.
+	attempt := r.WithContext(context.WithValue(r.Context(), attemptKey{}, at))
+	if r.Body != nil && r.Body != http.NoBody {
 		attempt.Body = io.NopCloser(r.Body)
 	}
-	dp.proxyFor(path).ServeHTTP(w, attempt)
-	if st.err == nil {
+	st.proxy.ServeHTTP(w, attempt)
+	if at.err == nil {
 		return true, false
 	}
-	if errors.Is(st.err, errWorkerMarked503) {
+	if errors.Is(at.err, errWorkerMarked503) {
 		// Marked 503: flow control, not failure — no health accounting.
 		return false, true
 	}
@@ -450,20 +466,20 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	}
 
 	var de *dialError
-	if errors.As(st.err, &de) {
-		dp.markUnhealthy(path)
+	if errors.As(at.err, &de) {
+		dp.markUnhealthy(st)
 		dp.logger.Warn("janus upstream dial failed",
 			zap.String("upstream", path),
-			zap.Error(st.err),
+			zap.Error(at.err),
 		)
 		return false, false
 	}
 
 	// Dial succeeded and the worker misbehaved before a response landed.
-	dp.markUnhealthy(path)
+	dp.markUnhealthy(st)
 	dp.logger.Warn("janus upstream failed after dial",
 		zap.String("upstream", path),
-		zap.Error(st.err),
+		zap.Error(at.err),
 	)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, "bad gateway", http.StatusBadGateway)

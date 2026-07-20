@@ -101,6 +101,19 @@ func (dp *dataPlane) testHasState(path string) bool {
 	return ok
 }
 
+// stateWithInflight seeds an upstreamState carrying n in-flight requests.
+func stateWithInflight(n int64) *upstreamState {
+	st := &upstreamState{}
+	st.inflight.Store(n)
+	return st
+}
+
+// unhealthyNow reports whether the state is inside its unhealthy window.
+func (st *upstreamState) unhealthyNow() bool {
+	until := st.unhealthyUntil.Load()
+	return until != 0 && time.Now().UnixNano() < until
+}
+
 // echoUpstream answers GET / with its name and POST with received:<body>.
 func echoUpstream(name string, hits *atomic.Int32) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,7 +204,7 @@ func TestDataPlaneAllUnhealthy503(t *testing.T) {
 	dp.mu.Lock()
 	st := dp.state[dead]
 	dp.mu.Unlock()
-	if st == nil || !time.Now().Before(st.unhealthyUntil) {
+	if st == nil || !st.unhealthyNow() {
 		t.Fatal("failed dial did not mark upstream unhealthy")
 	}
 }
@@ -271,7 +284,7 @@ func TestMarkedBusy503TriesNextUpstream(t *testing.T) {
 	registerApp(t, reg, "app.test", Upstream{Path: busy}, Upstream{Path: free})
 
 	// Bias least_conn toward the busy worker so the bounce path runs.
-	dp.state[free] = &upstreamState{inflight: 1}
+	dp.state[free] = stateWithInflight(1)
 
 	rr, err := doServe(dp, "GET", "app.test", "/", "")
 	if err != nil {
@@ -287,7 +300,7 @@ func TestMarkedBusy503TriesNextUpstream(t *testing.T) {
 	dp.mu.Lock()
 	st := dp.state[busy]
 	dp.mu.Unlock()
-	if st != nil && time.Now().Before(st.unhealthyUntil) {
+	if st != nil && st.unhealthyNow() {
 		t.Fatal("marked busy 503 poisoned the worker's health")
 	}
 }
@@ -313,7 +326,7 @@ func TestAllWorkersBusy503RetryAfter(t *testing.T) {
 		dp.mu.Lock()
 		st := dp.state[p]
 		dp.mu.Unlock()
-		if st != nil && time.Now().Before(st.unhealthyUntil) {
+		if st != nil && st.unhealthyNow() {
 			t.Fatalf("busy bounce marked %s unhealthy", p)
 		}
 	}
@@ -367,7 +380,7 @@ func TestUnmarked503PassesThrough(t *testing.T) {
 	}))
 	other := startUnixHTTP(t, echoUpstream("w2", nil))
 	registerApp(t, reg, "app.test", Upstream{Path: app503}, Upstream{Path: other})
-	dp.state[other] = &upstreamState{inflight: 1} // bias selection to app503
+	dp.state[other] = stateWithInflight(1) // bias selection to app503
 
 	// An application 503 without the marker is a real response — no retry.
 	rr, err := doServe(dp, "GET", "app.test", "/", "")
@@ -382,28 +395,60 @@ func TestUnmarked503PassesThrough(t *testing.T) {
 func TestAcquireUpstreamLeastConn(t *testing.T) {
 	dp, _ := newTestDataPlane(t)
 	ups := []Upstream{{Path: "a"}, {Path: "b"}}
-	dp.state["a"] = &upstreamState{inflight: 2}
-	dp.state["b"] = &upstreamState{inflight: 1}
+	dp.state["a"] = stateWithInflight(2)
+	dp.state["b"] = stateWithInflight(1)
 
-	path, ok := dp.acquireUpstream(ups, map[string]bool{})
+	path, st, ok := dp.acquireUpstream(ups, nil)
 	if !ok || path != "b" {
 		t.Fatalf("want b (least conn), got %q ok=%v", path, ok)
 	}
-	if dp.state["b"].inflight != 2 {
-		t.Fatalf("want inflight charged to 2, got %d", dp.state["b"].inflight)
+	if st != dp.state["b"] {
+		t.Fatal("acquire returned a state other than the charged upstream's")
+	}
+	if got := dp.state["b"].inflight.Load(); got != 2 {
+		t.Fatalf("want inflight charged to 2, got %d", got)
+	}
+	if st.proxy == nil {
+		t.Fatal("acquire did not build the upstream's proxy")
 	}
 
 	// Unhealthy entries are skipped even when least loaded.
-	dp.state["b"].unhealthyUntil = time.Now().Add(time.Minute)
-	path, ok = dp.acquireUpstream(ups, map[string]bool{})
+	dp.markUnhealthy(dp.state["b"])
+	path, _, ok = dp.acquireUpstream(ups, nil)
 	if !ok || path != "a" {
 		t.Fatalf("want a (b unhealthy), got %q ok=%v", path, ok)
 	}
 
+	// Tried entries are skipped.
+	_, _, ok = dp.acquireUpstream(ups, map[string]bool{"a": true, "b": true})
+	if ok {
+		t.Fatal("acquired an already-tried upstream")
+	}
+
 	// Doorbells are never acquired.
-	_, ok = dp.acquireUpstream([]Upstream{{Path: "bell", Doorbell: true}}, map[string]bool{})
+	_, _, ok = dp.acquireUpstream([]Upstream{{Path: "bell", Doorbell: true}}, nil)
 	if ok {
 		t.Fatal("acquired a doorbell as a worker")
+	}
+}
+
+func TestAcquireUpstreamTieBreakUniform(t *testing.T) {
+	dp, _ := newTestDataPlane(t)
+	ups := []Upstream{{Path: "a"}, {Path: "b"}, {Path: "c"}}
+	picks := map[string]int{}
+	for range 300 {
+		path, st, ok := dp.acquireUpstream(ups, nil)
+		if !ok {
+			t.Fatal("acquire failed on all-healthy ties")
+		}
+		st.inflight.Add(-1) // release so every round stays a three-way tie
+		picks[path]++
+	}
+	for _, p := range []string{"a", "b", "c"} {
+		// Uniform expectation is 100 each; 300 rounds put ~5σ at ±41.
+		if picks[p] < 59 || picks[p] > 141 {
+			t.Fatalf("tie-break not uniform: picks=%v", picks)
+		}
 	}
 }
 
@@ -634,6 +679,10 @@ func TestNormalizeHostHeader(t *testing.T) {
 		"App.Example.COM":      "app.example.com",
 		"app.example.com:8443": "app.example.com",
 		"app.example.com.":     "app.example.com",
+		"[::1]:8443":           "::1",
+		"[::1]":                "[::1]", // no port: passes through whole
+		"::1":                  "::1",   // bare IPv6: no single colon to strip
+		"app.test:":            "app.test",
 	}
 	for in, want := range cases {
 		if got := normalizeHostHeader(in); got != want {

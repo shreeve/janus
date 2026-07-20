@@ -392,6 +392,54 @@ by killing bounce-retry churn, and the path past ~99k remains lever #4
 (DSL fast path) for the worker share and lever #2 (micro-cache) for
 the only 10x+ story.
 
+### Hot-path lock collapse (2026-07-20)
+
+The data plane's per-request cost included three `dp.mu` acquisitions
+(selection, proxy lookup, release) plus a fourth on failure (health
+marking).
+Shipped change: `acquireUpstream` returns the socket's `upstreamState`
+(now carrying the reusable per-socket proxy) under ONE acquisition;
+inflight counts and the unhealthy deadline are atomics, so release and
+health marking are lock-free. Selection semantics are unchanged
+(least_conn, uniform random tie-break — now reservoir sampling, pinned
+by a new uniformity test — unhealthy skip, doorbell exclusion). Also
+landed in the same change: manual host:port cut in
+`normalizeHostHeader` (SplitHostPort allocates an `*AddrError` on every
+portless Host), `resolveHost` returns a shallow snapshot instead of
+cloning both slices (registry writes replace slices wholesale, so
+published backing arrays are immutable), lazy `tried` map (allocated
+only on retry), BufferPool stores `*[32<<10]byte` to avoid boxing the
+slice header per response copy, and the NopCloser body shield skips
+bodyless requests.
+
+Interleaved A/B, same rig (M5, Bun 1.3.14, Go 1.26.5, Caddy v2.11.4,
+oha 1.14.0, `ulimit -n` 65536), HTTPS full stack, ping-class, c:1, 15s
+runs, warmups discarded. Legs alternated before/after in both orders
+within each config so thermal drift cannot favor one binary. All legs
+zero non-200s.
+
+| Config | pairs | median before | median after | median ratio | ratio range |
+| --- | --- | --- | --- | --- | --- |
+| w:2 conc:64 | 8 | 95,798 | 93,906 | 0.96 | 0.74–2.83 |
+| w:16 conc:64 | 6 | 82,830 | 87,334 | 1.02 | 0.84–1.30 |
+| w:16 conc:128 | 6 | 89,230 | 91,280 | 1.03 | 1.00–1.56 |
+
+**The honest verdict: throughput-neutral within noise.** The
+contention rows lean +2–3% at the median and the cleanest block of the
+session (the four cooled-down w:16 conc:128 pairs: before 87.8–91.7k,
+after 89.8–93.5k) reads +1–3%, but pair-to-pair variance on this rig
+this session (background load; two visibly disturbed legs with p99
+11–22ms) swamps any claim. w:2 is a statistical tie. The change lands
+on simplicity, not speed: one lock acquisition per request instead of
+three (four on a failure), two fewer lock-touching methods, the
+`proxies` map folded into
+`upstreamState`, and strictly less allocation per request — with the
+ceiling story unchanged. Best counted legs read 102.3k (before) and
+98.0k (after): both inside the established 95–102k cool-band, so the
+~99k ceiling did not move, consistent with the attribution table —
+`dp.mu` was never the bottleneck at these RPS; TLS + proxy CPU is.
+The lever ranking is unchanged.
+
 ### Next-best lever
 
 Lever #1 (raise `c` for I/O-bound apps, watch off) — the measured 4x

@@ -267,6 +267,10 @@ func (r *appRegistry) list() []AppRecord {
 }
 
 // resolveHost maps a public host to its app record (data-plane lookup).
+// The returned record is a shallow snapshot sharing the record's slice
+// backing arrays: every registry write replaces Hosts and Upstreams
+// wholesale (create, patch, setUpstreams — never an in-place append), so a
+// published backing array is immutable. Callers read, never mutate.
 func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -274,7 +278,7 @@ func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
 	if !ok {
 		return AppRecord{}, false
 	}
-	return r.apps[id].clone(), true
+	return *r.apps[id], true
 }
 
 func (r *appRegistry) get(id string) (AppRecord, error) {
