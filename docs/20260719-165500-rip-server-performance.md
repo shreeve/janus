@@ -58,12 +58,17 @@ throttle.
 
 ### 1. Raise `c` — the biggest lever hiding in plain sight
 
-Bun is an event-loop runtime; at `c:1` a worker sits idle for the full
-duration of every DB query or upstream fetch. For I/O-bound apps,
-`c:8–32` with the same worker count is a near-free 2–10x, and halves
-RSS versus scaling `w`. The pool protocol already defines higher `c` as
-an opt-in (watch off). Keep `c:1` for CPU-bound handlers and for watch
-mode. Capacity = `w × c`.
+> **Raise `c` when handlers wait; raise `w` when handlers work.**
+
+Concurrency is not parallelism: a worker is one JS thread, so `c`
+interleaves I/O waits (it cannot add CPU), while `w` adds processes
+across cores (real parallelism). Bun is an event-loop runtime; at
+`c:1` a worker sits idle for the full duration of every DB query or
+upstream fetch. For I/O-bound apps, `c:8–32` with the same worker
+count is a near-free 2–10x (measured: 4x on a 5ms handler, with busy
+bounces going to zero), and halves RSS versus scaling `w`. The pool
+protocol already defines higher `c` as an opt-in (watch off). Keep
+`c:1` for CPU-bound handlers and for watch mode. Capacity = `w × c`.
 
 ### 3. Prebuild-once + bytecode — the honest replacement for fork/COW
 
