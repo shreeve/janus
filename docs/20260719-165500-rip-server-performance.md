@@ -238,6 +238,12 @@ stress phase:
 
 ## Measured results (2026-07-19)
 
+**Baseline caveat, applying to every section below:** the canonical
+cold-machine baseline is pending a reboot — sessions ran on a warm,
+multi-day-uptime rig with background load, so absolute numbers drift
+(identical-config legs measured ±10–24% apart); interleaved ratios are
+the comparisons to trust.
+
 Phase 8 stress run. Machine: Apple M5, 10 cores, 32GB, macOS Darwin 25.
 Bun 1.3.14, Go 1.26.5, Caddy v2.11.4, oha 1.14.0. `ulimit -n` 65536 on
 Janus, the manager, and the bench shell. Full stack over HTTPS with

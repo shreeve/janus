@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, and on-demand TLS asks, driven by a JSON control API.</strong>
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, and a generation-fenced micro-cache with request coalescing, driven by a JSON control API.</strong>
 </p>
 
 ---
@@ -60,7 +60,7 @@ xcaddy build \
   --output ./bin/caddy
 
 go test ./...
-./test.sh   # groups in capability order: ping, control, apps, data, cache, heartbeat, tls, tenant
+./test.sh   # 8 groups, 77 cases, in capability order: ping, control, apps, data, cache, heartbeat, tls, tenant
 ```
 
 ### 1. ping (data plane)

@@ -10,7 +10,7 @@ Cold Caddyfile capability. Configures **where** Janus’s control plane (`/1.0` 
 | **Module** | `janus` app (`app.go`, `control.go`, `control_api.go`) |
 | **Directive** | Global options: `janus { control … }` |
 | **Pairs with** | Site handler `janus` (data-plane admission; **ping** already proven) |
-| **Status** | Listeners serve the full hot API: meta, health, apps CRUD, upstreams, heartbeats, tls/ask |
+| **Status** | Listeners serve the full hot API: meta, health, apps CRUD, upstreams, heartbeats, tls/ask, cache counters |
 
 ## Why it exists
 
@@ -137,6 +137,7 @@ Port **7601** for public avoids clashing with local **7600**.
 | `PUT` | `{base}/1.0/apps/{id}/upstreams` | atomic full-list swap |
 | `POST` | `{base}/1.0/apps/{id}/heartbeat` | stamp the heartbeat clock → `204` |
 | `GET` | `{base}/1.0/tls/ask?domain=…` | on-demand TLS allowance: 200 allow / 404 deny |
+| `GET` | `{base}/1.0/cache` | micro-cache counters: process totals + per-app breakdown ([cache capability](20260720-033201-capability-microcache.md)) |
 
 `{base}` is the path from the listen URL (empty for defaults and for `internal`). Unknown paths under `{base}/1.0` are `404`; a known path with the wrong method is `405`.
 

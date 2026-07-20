@@ -28,7 +28,8 @@ Permanent docs:
    implement → document → wire into root `Caddyfile` → test → validate.
    Each capability doc covers order #, what/why, scope, cascade yes/no,
    syntax, examples, hard errors, non-goals. Keep the story ordered:
-   **ping** (1, primordial) → **control** (2) → whatever is next.
+   **ping** (1, primordial) → **control** (2) → **cache** (3) →
+   whatever is next.
 
 5. **Cascade is explicit.**
    - **Process-wide** (e.g. **control**): global `janus { }` only; never in a site block.
@@ -63,9 +64,10 @@ Cold capabilities are numbered by landing order. Do not reorder the story in doc
 | --- | --- | --- |
 | 1 | **ping** | Primordial. Proves the module, TLS, site admission, and cascade. Needs nothing else. |
 | 2 | **control** | Process-wide `/1.0` listeners. Assumes the ping chassis already works. |
-| 3+ | next | Hot work on `/1.0` (apps, upstreams, …) and any later cold capabilities. |
+| 3 | **cache** | Site-scoped micro-cache + request coalescing (cascades: yes). Sits on the Phase 4 data plane. |
+| 4+ | next | Hot work on `/1.0` (apps, upstreams, …) and any later cold capabilities. |
 
-`./test.sh` runs groups in this order (ping, then control, then …).
+`./test.sh` runs groups in this order: ping, control, apps, data, cache, heartbeat, tls, tenant.
 
 ## Architecture (short)
 

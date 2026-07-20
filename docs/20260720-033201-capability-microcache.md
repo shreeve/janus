@@ -1,17 +1,19 @@
 # Capability: cache (micro-cache + request coalescing)
 
-> **Revision 2, adversarial review (2 reviewers) folded in —
-> IMPLEMENTED as specified.** Two independent adversarial reviews
-> (HTTP-caching correctness; systems / DoS / concurrency) attacked
-> revision 1. Both found the same purge race independently and
-> converged on the same fix (generation-fenced stores); their
-> CRITICALs, HIGHs, and MEDIUMs are folded in below, and the former
-> "Open questions for adversarial review" section is now a settled/open
-> ledger. Where the two reviews contradicted each other, the resolution
-> is recorded in place. The implementation lives in `cache.go`
-> (sharded store), `cache_serve.go` (decision table, coalescing, fill),
-> and `cache_config.go` (directive, cascade); tests in `cache_test.go`
-> and the `cache` group of `test.sh`.
+> **Shipped 2026-07-20 (`5b5d921` implementation, `40cd0b6`
+> measurements) — the capability doc for the shipped implementation,
+> built as specified with zero deviations.** The spec below is
+> revision 2: two independent adversarial reviews (HTTP-caching
+> correctness; systems / DoS / concurrency) attacked revision 1, both
+> found the same purge race independently and converged on the same
+> fix (generation-fenced stores); their CRITICALs, HIGHs, and MEDIUMs
+> are folded in, and the former "Open questions for adversarial
+> review" section is a settled/open ledger. Where the two reviews
+> contradicted each other, the resolution is recorded in place. The
+> implementation lives in `cache.go` (sharded store), `cache_serve.go`
+> (decision table, coalescing, fill), and `cache_config.go`
+> (directive, cascade); tests in `cache_test.go` and the `cache` group
+> of `test.sh`.
 
 Cold Caddyfile capability. When enabled for a site, Janus keeps a
 short-TTL in-memory copy of anonymous `GET` responses and answers
