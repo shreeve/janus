@@ -1,7 +1,9 @@
 package janus
 
 import (
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"go.uber.org/zap"
 )
 
 func TestParseTokenArg(t *testing.T) {
@@ -192,6 +196,38 @@ func TestAppDefaultInternalWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestStartUnwindsOnPartialFailure pins that a Start whose second listener
+// fails to bind closes the first listener and stops the TTL sweeper — a
+// rejected config must not leak a half-started app.
+func TestStartUnwindsOnPartialFailure(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.sock")
+	bad := filepath.Join(dir, strings.Repeat("x", 300)+".sock") // over the sun_path limit
+
+	app := &App{
+		Control: []Control{
+			{Mode: "internal", Network: "unix", Addr: good, Listen: good},
+			{Mode: "local", Network: "unix", Addr: bad, Listen: bad},
+		},
+		logger:  zap.NewNop(),
+		appsReg: newAppRegistry(),
+		ctx:     caddy.Context{Context: context.Background()},
+	}
+
+	if err := app.Start(); err == nil {
+		t.Fatal("want Start to fail on the unbindable listener")
+	}
+	if len(app.controlSrvs) != 0 {
+		t.Fatalf("want no leaked control servers, got %d", len(app.controlSrvs))
+	}
+	if app.appsReg.sweepStop != nil {
+		t.Fatal("TTL sweeper still running after failed Start")
+	}
+	if _, err := net.Dial("unix", good); err == nil {
+		t.Fatal("first listener still accepting after failed Start")
+	}
+}
+
 func TestBearerAuth(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -219,6 +255,44 @@ func TestBearerAuth(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("good auth: %d", rr.Code)
+	}
+}
+
+func TestControlMuxRejectsUnknownPaths(t *testing.T) {
+	app := &App{
+		Control: []Control{{Mode: "local", Listen: DefaultControlLocal}},
+	}
+	if err := app.Control[0].normalize(); err != nil {
+		t.Fatal(err)
+	}
+	mux := app.controlMux()
+
+	do := func(method, path string) int {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(method, path, nil))
+		return rr.Code
+	}
+
+	// Garbage under /1.0 must never answer 200.
+	if code := do(http.MethodGet, "/1.0/bogus"); code != http.StatusNotFound {
+		t.Fatalf("GET /1.0/bogus: want 404, got %d", code)
+	}
+	// A method bug (GET where the route is POST-only) must never look alive.
+	if code := do(http.MethodGet, "/1.0/apps/x/heartbeat"); code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /1.0/apps/x/heartbeat: want 405, got %d", code)
+	}
+	if code := do(http.MethodGet, "/1.0/health/bogus"); code != http.StatusNotFound {
+		t.Fatalf("GET /1.0/health/bogus: want 404, got %d", code)
+	}
+	// The root itself stays GET/HEAD-only, with and without the slash.
+	if code := do(http.MethodGet, "/1.0/"); code != http.StatusOK {
+		t.Fatalf("GET /1.0/: want 200, got %d", code)
+	}
+	if code := do(http.MethodHead, "/1.0"); code != http.StatusOK {
+		t.Fatalf("HEAD /1.0: want 200, got %d", code)
+	}
+	if code := do(http.MethodPost, "/1.0"); code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /1.0: want 405, got %d", code)
 	}
 }
 

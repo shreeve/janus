@@ -328,6 +328,68 @@ case_control_unix_health() {
 	json_has "$body" '"status":"ok"'
 }
 
+case_control_unknown_paths_404() {
+	# Typos and wrong-method calls must never look alive.
+	eq "$(http_code http://127.0.0.1:7600/1.0/bogus)" "404"
+	local code
+	code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -X GET \
+		http://127.0.0.1:7600/1.0/apps/nope-zzzzzz/heartbeat)"
+	eq "$code" "405"
+}
+
+# --- cases: reload -----------------------------------------------------------
+
+case_reload_no_split_brain() {
+	# A config reload swaps in a new Janus app while the old one still holds
+	# its sockets: listener pooling lets the new app bind, the reload
+	# succeeds, and afterward BOTH control listeners serve the same live
+	# registry. The registry itself is memory-only per config generation, so
+	# the pre-reload app is gone and the tenant re-registers (heartbeat →
+	# 404 → re-register, per the pool protocol).
+	capi POST /1.0/apps '{"name":"reload","hosts":["reload.example.com"]}'
+	eq "$REPLY_CODE" "201"
+	local old_id
+	old_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	ok "-n \"$old_id\"" "no id in $REPLY_BODY"
+
+	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
+		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		echo "caddy reload failed; see $CADDY_LOG" >&2
+		return 1
+	fi
+
+	# Both listeners answer, and both see the same (fresh) registry.
+	local i ready=""
+	for i in $(seq 1 50); do
+		if curl -sS -o /dev/null --max-time 1 http://127.0.0.1:7600/1.0/health 2>/dev/null &&
+			curl -sS -o /dev/null --max-time 1 --unix-socket "$ROOT/run/janus.sock" http://janus/1.0/health 2>/dev/null; then
+			ready=1
+			break
+		fi
+		sleep 0.1
+	done
+	ok "-n \"$ready\"" "control listeners never answered after reload"
+
+	capi POST /1.0/apps '{"name":"reload","hosts":["reload.example.com"]}'
+	eq "$REPLY_CODE" "201"
+	local new_id
+	new_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	capi GET /1.0/apps
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" "\"$new_id\""
+	capi_unix GET /1.0/apps
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" "\"$new_id\""
+	# No half-started app lingers behind either listener: the pre-reload
+	# registration is gone from BOTH (split-brain would show it on one).
+	if printf '%s' "$REPLY_BODY" | grep -qF "$old_id"; then
+		printf 'stale registry behind the unix listener: %q' "$REPLY_BODY" >&2
+		return 1
+	fi
+	capi DELETE "/1.0/apps/$new_id"
+	eq "$REPLY_CODE" "204"
+}
+
 # --- cases: apps -----------------------------------------------------------
 
 APP_ID_FILE="$ROOT/.test-app-id"
@@ -1066,6 +1128,8 @@ test "local GET /1.0 → janus meta" case_control_local_root
 test "local GET /1.0/health → ok" case_control_local_health
 test "unix GET /1.0 → janus meta" case_control_unix_root
 test "unix GET /1.0/health → ok" case_control_unix_health
+test "unknown /1.0 paths → 404, wrong method → 405" case_control_unknown_paths_404
+test "reload → both listeners serve one live registry" case_reload_no_split_brain
 
 group "apps"
 test "register shop → 201 shop-xxxxxx" case_apps_register

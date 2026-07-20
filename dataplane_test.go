@@ -338,6 +338,27 @@ func TestMarkedBusy503WithBodyForwardsToClient(t *testing.T) {
 	}
 }
 
+func TestRipMarkScrubbedFromClientResponses(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	marked := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(ripMarkHeader, "abc")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	registerApp(t, reg, "app.test", Upstream{Path: marked})
+
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	if got := rr.Header().Get(ripMarkHeader); got != "" {
+		t.Fatalf("rip-mark leaked to the client: %q", got)
+	}
+}
+
 func TestUnmarked503PassesThrough(t *testing.T) {
 	dp, reg := newTestDataPlane(t)
 	app503 := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -22,6 +22,7 @@ type App struct {
 	Ping *bool `json:"ping,omitempty"`
 
 	logger      *zap.Logger
+	ctx         caddy.Context
 	controlSrvs []*controlServer
 
 	// appsReg is the memory-only apps registry (hot /1.0/apps).
@@ -42,6 +43,7 @@ func (App) CaddyModule() caddy.ModuleInfo {
 // Provision sets up the app.
 func (a *App) Provision(ctx caddy.Context) error {
 	a.logger = ctx.Logger()
+	a.ctx = ctx
 	a.appsReg = newAppRegistry()
 	ttl, err := heartbeatTTLFromEnv()
 	if err != nil {
@@ -71,7 +73,16 @@ func (a *App) Start() error {
 		zap.Bool("enabled", resolveBool(nil, a.Ping, false)),
 	)
 	a.appsReg.startSweeper(a.logger)
-	return a.startControlListeners()
+	if err := a.startControlListeners(); err != nil {
+		// A partially started app never receives Stop: close whatever
+		// listeners came up and stop the sweeper before rejecting.
+		if serr := a.stopControlListeners(); serr != nil {
+			a.logger.Error("janus control unwind", zap.Error(serr))
+		}
+		a.appsReg.stopSweeper()
+		return err
+	}
+	return nil
 }
 
 // Stop stops the Janus app.

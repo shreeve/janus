@@ -205,8 +205,8 @@ type dialError struct {
 func (e *dialError) Error() string { return fmt.Sprintf("dial %s: %v", e.path, e.err) }
 func (e *dialError) Unwrap() error { return e.err }
 
-// Worker-marked 503s (docs/20260719-002000-pool-protocol.md "Passive
-// health"): a worker at its concurrency cap answers 503 with
+// Worker-marked 503s (docs/20260719-002000-pool-protocol.md "Data plane
+// decision table"): a worker at its concurrency cap answers 503 with
 // Rip-Worker-Busy: 1 (drains: Rip-Worker-Draining: 1). Those are protocol
 // flow control, not failures — they never count toward health, and when the
 // request is replayable (no body was sent) Janus immediately tries the next
@@ -214,6 +214,9 @@ func (e *dialError) Unwrap() error { return e.err }
 const (
 	workerBusyHeader     = "Rip-Worker-Busy"
 	workerDrainingHeader = "Rip-Worker-Draining"
+
+	// ripMarkHeader is the tenant's internal correlation id header.
+	ripMarkHeader = "Rip-Mark"
 )
 
 // errWorkerMarked503 aborts a proxy attempt on a marked 503 so the retry
@@ -387,6 +390,9 @@ func (dp *dataPlane) proxyFor(path string) *httputil.ReverseProxy {
 			pr.SetXForwarded()
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// Scrub the internal correlation id from every client response
+			// (surfacing it in the access log is future work).
+			resp.Header.Del(ripMarkHeader)
 			if !marked503(resp) {
 				return nil
 			}

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
 )
 
@@ -53,12 +54,23 @@ func (a *App) startControlListeners() error {
 			if err := os.MkdirAll(filepath.Dir(c.Addr), 0o755); err != nil {
 				return fmt.Errorf("control internal: %w", err)
 			}
-			_ = os.Remove(c.Addr)
 		}
 
-		ln, err := net.Listen(c.Network, c.Addr)
+		// Bind through Caddy's listener API so sockets pool across config
+		// swaps: on reload the new app shares the old app's socket instead
+		// of failing to bind while the old app still holds it. Caddy also
+		// unlinks unix sockets before binding and after the last close.
+		na, err := caddy.ParseNetworkAddress(c.Network + "/" + c.Addr)
+		if err != nil {
+			return fmt.Errorf("control %s address %s: %w", c.Mode, c.Listen, err)
+		}
+		lnAny, err := na.Listen(a.ctx, 0, net.ListenConfig{})
 		if err != nil {
 			return fmt.Errorf("control %s listen %s: %w", c.Mode, c.Listen, err)
+		}
+		ln, ok := lnAny.(net.Listener)
+		if !ok {
+			return fmt.Errorf("control %s listen %s: %T is not a stream listener", c.Mode, c.Listen, lnAny)
 		}
 		if c.UseTLS {
 			ln = tls.NewListener(ln, srv.TLSConfig)
@@ -92,6 +104,9 @@ func (a *App) stopControlListeners() error {
 	var mu sync.Mutex
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// Shutdown closes each pooled listener; Caddy unlinks a unix socket
+	// only when its last user closes, so a reload's overlapping app keeps
+	// the socket file.
 	for _, s := range a.controlSrvs {
 		wg.Add(1)
 		go func(s *controlServer) {
@@ -102,9 +117,6 @@ func (a *App) stopControlListeners() error {
 					first = err
 				}
 				mu.Unlock()
-			}
-			if s.ln != nil && s.ln.Addr().Network() == "unix" {
-				_ = os.Remove(s.ln.Addr().String())
 			}
 		}(s)
 	}
@@ -123,10 +135,14 @@ func (a *App) controlMux() *http.ServeMux {
 	for base := range paths {
 		p1 := base + "/1.0"
 		p2 := base + "/1.0/health"
+		// "/{$}" matches only the trailing-slash form — never a subtree.
+		// An unknown path under /1.0 gets the mux's 404 and a known path
+		// with the wrong method gets its 405; a typo'd or wrong-method
+		// call must never get a 200 that masks the mistake.
 		mux.HandleFunc(p1, a.handleControlRoot)
-		mux.HandleFunc(p1+"/", a.handleControlRoot)
+		mux.HandleFunc(p1+"/{$}", a.handleControlRoot)
 		mux.HandleFunc(p2, a.handleControlHealth)
-		mux.HandleFunc(p2+"/", a.handleControlHealth)
+		mux.HandleFunc(p2+"/{$}", a.handleControlHealth)
 
 		apps := base + "/1.0/apps"
 		mux.HandleFunc("POST "+apps, a.handleAppsCreate)
@@ -169,7 +185,7 @@ func (a *App) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -182,7 +198,7 @@ func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleControlHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
