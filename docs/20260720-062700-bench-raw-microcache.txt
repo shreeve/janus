@@ -1,0 +1,57 @@
+janus micro-cache A/B Mon Jul 20 06:27:27 MDT 2026
+load:  6:27  up 3 days,  3:03, 2 users, load averages: 5.45 8.48 6.28
+
+== 1) the 10x gate: 5ms handler (/io), w:2 c:1, conc:64, off(api)/on(bench) interleaved ==
+io off pair-A: rps 25,061 200s/s 366 non200 370461 p50 2.43ms p99 6.72ms | dMiss 0 dCoal 0 dHit 0
+io on  pair-A: rps 118,243 200s/s 118,265 non200 0 p50 0.37ms p99 3.22ms | dMiss 16 dCoal 925 dHit 1773094
+io on  pair-B: rps 137,335 200s/s 137,376 non200 0 p50 0.34ms p99 2.53ms | dMiss 15 dCoal 941 dHit 2059752
+io off pair-B: rps 23,094 200s/s 361 non200 341063 p50 2.57ms p99 7.58ms | dMiss 0 dCoal 0 dHit 0
+
+== 2) ping-class floor (/), conc:64, off/on interleaved (no gate) ==
+ping off pair-A: rps 58,432 200s/s 58,447 non200 0 p50 0.65ms p99 7.30ms | dMiss 0 dCoal 0 dHit 0
+ping on  pair-A: rps 143,981 200s/s 144,025 non200 0 p50 0.32ms p99 2.30ms | dMiss 21 dCoal 760 dHit 2159651
+ping on  pair-B: rps 118,375 200s/s 118,404 non200 0 p50 0.37ms p99 3.10ms | dMiss 19 dCoal 843 dHit 1775267
+ping off pair-B: rps 72,280 200s/s 72,297 non200 0 p50 0.60ms p99 5.11ms | dMiss 0 dCoal 0 dHit 0
+
+== 3) coalescing stampede: cold key bursts ==
+burst conc:64 cold key #1: worker requests 1, codes {'200': 64}, p99 34.96ms 
+burst conc:64 cold key #2: worker requests 1, codes {'200': 64}, p99 38.24ms 
+burst conc:64 cold key #3: worker requests 1, codes {'200': 64}, p99 35.05ms 
+burst conc:256 > waiter cap: worker requests 1, codes {'200': 10, '503': 246}, p99 66.22ms waiter_overflow 172
+
+== 4) the zero case: every request carries Cookie (bypass), conc:64 ==
+cookie off: rps 27,514 200s/s 373 non200 407132 p50 2.15ms p99 6.69ms | dMiss 0 dCoal 0 dHit 0
+cookie on : rps 24,843 200s/s 363 non200 367180 p50 2.35ms p99 7.39ms | dMiss 0 dCoal 0 dHit 0
+
+== 5) reload interaction: watch-mode save under load ==
+first post-save distinct response: {"ok":true,"v":2}
+post-save probes: purges delta 3, fenced_stores delta 2
+all post-cut responses are v2 (no stale body observed)
+
+final cache counters:
+{
+    "hits": 11232205,
+    "misses": 113,
+    "coalesced": 4911,
+    "bypass": 497226,
+    "stores": 108,
+    "purges": 11,
+    "evictions": 0,
+    "fenced_stores": 2,
+    "admission_rejects": 2,
+    "waiter_overflow": 172,
+    "waiter_expired": 0,
+    "entries": 1,
+    "stored_bytes": 646,
+    "apps": {
+        "bench-e2k3ks": {
+
+DONE Mon Jul 20 06:31:39 MDT 2026
+
+=== verification re-run (fresh caddy + tenant, cold counters) ===
+conc:256 single cold-key burst, arrivals staggered by TLS setup:
+codes {'200': 256}; counters delta: misses=1 coalesced=40 hits=215 waiter_overflow=0 stores=1
+(the earlier in-session conc:256 burst arrived harder: 1 fill + 172
+waiter_overflow fall-throughs; the fall-throughs exceeded w:2 c:1
+capacity on the 5ms handler and the data plane shed 246 as capacity
+503s + Retry-After — the cache manufactured none of them)

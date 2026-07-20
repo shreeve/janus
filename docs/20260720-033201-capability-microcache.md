@@ -987,6 +987,35 @@ crash-without-PUT health window (documented as a sharp edge), boot
 purge churn (documented as intentional), and the `encode`-handler
 ordering (specified). Nothing else is known-open.
 
+## Measured results (2026-07-20)
+
+Full tables and rig notes live in the performance doc's Measured
+results ("Micro-cache + coalescing", the house ledger:
+[`20260719-165500-rip-server-performance.md`](20260719-165500-rip-server-performance.md));
+raw legs in
+[`20260720-062700-bench-raw-microcache.txt`](20260720-062700-bench-raw-microcache.txt).
+The headline rows, against this doc's measurement plan:
+
+1. **10x gate — passed at ~320–380x** (clean 200s/s on the 5ms
+   handler, w:2 c:1 conc:64, interleaved off/on: 366 → 118,265 and
+   361 → 137,376). Worker-side: 15–16 requests per 15s leg — ~1 req/s
+   per key at ttl 1s, per the plan. Cache-on runs above the old ~99k
+   proxied ceiling: a HIT deletes the proxy + UDS hop, not just the
+   worker.
+2. **Ping-class floor: 1.6–2.5x** (predicted ~1.2–1.4x; the HIT also
+   deletes the proxy machinery the prediction had charged to "TLS +
+   routing"). No gate; reported as the floor of the win curve.
+3. **Stampede:** conc:64 cold key → **1** origin request, three
+   bursts out of three, all clients 200. conc:256 (past the cap):
+   hard-simultaneous arrivals → 1 fill + 172 overflow fall-throughs,
+   excess shed by the data plane as capacity 503s (none manufactured
+   by the cache); staggered arrivals → `{200: 256}`.
+4. **Zero case:** Cookie-carrying traffic off vs on = 27.5k vs 24.8k
+   RPS, inside the session's ±10–24% identical-leg drift — the bypass
+   tax is unmeasurable on this rig.
+5. **Reload under load:** first post-save response is the new code;
+   `fenced_stores` caught 2 straddling fills; no stale body observed.
+
 ## Related
 
 - Performance map, lever #2: [`20260719-165500-rip-server-performance.md`](20260719-165500-rip-server-performance.md)

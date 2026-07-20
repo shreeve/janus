@@ -43,17 +43,18 @@ throttle.
 
 ## Ranked levers
 
-**Remaining lever as of 2026-07-20, after the shipping spree below:
-#2 (micro-cache + coalescing — still the only 10x+ story;
-implementation in progress).**
-Everything else is shipped-with-measurement, measured-out (the lock
-collapse: throughput-neutral, landed on simplicity — see Measured
-results), deferred-for-cause, or fantasy.
+**No levers remain open as of 2026-07-20: the shipping spree below
+closed the list.** Everything is shipped-with-measurement, measured-out
+(the lock collapse: throughput-neutral, landed on simplicity — see
+Measured results), deferred-for-cause, or fantasy. The next candidates
+are the deferred rows (#6 static bypass, #7 GOMAXPROCS split, #8
+hand-rolled proxy, #9 kTLS) — all gated on a real tenant or new
+evidence.
 
 | # | Lever | Expected win | Cost | Verdict |
 | --- | --- | --- | --- | --- |
 | 1 | Raise `c` (8–32) for I/O-bound apps, watch off | 2–10x per worker | ~zero (protocol opt-in exists) | **Shipped 2026-07-20** (`-c` flag) — measured 7x clean 200s/s at c:8 on the 5ms handler, capacity-exact: 503s vanish when w×c ≥ conc (see Measured results) |
-| 2 | Janus micro-cache + request coalescing (anonymous GETs) | 10–100x on cacheable pages | Medium-high (correctness) | Measure-first, then build as a capability — **top remaining lever** |
+| 2 | Janus micro-cache + request coalescing (anonymous GETs) | 10–100x on cacheable pages | Medium-high (correctness) | **Shipped 2026-07-20** as the `cache` capability ([spec](20260720-033201-capability-microcache.md)) — measured **~320–380x clean-200 throughput** on the capacity-bound 5ms route (366→118k, 361→137k 200s/s, w:2 c:1 conc:64, interleaved; gate was 10x), worker sees ~1 req/s per key at ttl 1s; ping-class floor measured **1.6–2.5x** (above the ~1.3x prediction: a HIT also deletes the proxy+UDS hop); stampede conc:64 cold = **1** origin request; Cookie-bypass ≈ cache-off within session noise (see Measured results) |
 | 3 | Manager prebuilds app once per dirty epoch; workers boot artifact (+`--bytecode`) | Reload/boot 2–4x; RSS drops | Low-medium | **Shipped 2026-07-20** (rip `8333218`) — per-worker RSS ~137–145MB → 33–40MB (~3.7x, ~105MB/worker); reload w:8 ~470ms → ~170ms (~2.7x, no longer scales with w); boot-to-all-ready w:8 ~650ms → ~300ms (~2x). Bytecode half NOT viable on Bun 1.3.14 (ESM bytecode needs `compile:true`; CJS rejects top-level await) — revisit when Bun ships ESM bytecode (see Measured results) |
 | 4 | DSL fast path (context allocation, route buckets) | 1.3–2x per worker ping-class | Medium | **Shipped 2026-07-20** (rip repo, 3 measured cuts) — in-process hot loop ~2404 → ~1690 ns/req (~−30% worker CPU per request; cross-session endpoints, per-cut interleaved ratios); route index adds −12–15% at 40 routes, parity at 1 route. Full-stack RPS unchanged (Janus-bound, as predicted) |
 | 5 | `ReverseProxy.BufferPool` + proxy-struct reuse + idle conns scaled with `c` | 5–15% of Janus CPU | Trivial (~20 lines) | **Shipped 2026-07-19** — measured +20–37% RPS (see Measured results), far above the estimate |
@@ -504,12 +505,101 @@ bytecode accepts (CJS) rejects top-level await — which idiomatic Rip
 ships; revisit when Bun supports ESM bytecode, at which point the
 artifact is one flag away from kernel-shared read-only pages.
 
+### Micro-cache + coalescing (2026-07-20)
+
+Lever #2 shipped as the `cache` capability
+([spec](20260720-033201-capability-microcache.md) — revision 2,
+implemented as written; both test layers green: `go test -race` and a
+25-case `test.sh` cache group). Raw legs:
+[20260720-062700-bench-raw-microcache.txt](20260720-062700-bench-raw-microcache.txt).
+
+Rig: M5, Bun 1.3.14, Go 1.26.5, Caddy v2.11.4, oha 1.14.0, `ulimit -n`
+65536, HTTPS full stack, 15s runs, 5s warmups discarded, interleaved
+off/on legs. **Not the post-reboot canonical baseline**: 3-day uptime,
+background load 3–8 through the session — identical-config legs
+drifted ±10–24% (ping-off read 58.4k and 72.3k two minutes apart), so
+ratios, and only ratios spanning 10x+, are load-proof here. Tenant:
+the real rip manager (main, prebuild included), w:2 c:1,
+`RIP_ENV=production`; one app claiming `bench.ripdev.io` (site cache
+**on**, ttl 1s) and `api.ripdev.io` (site cache **off**) so off/on legs
+hit identical workers through identical TLS.
+
+**1) The 10x gate — capacity-bound route (5ms handler, conc:64):**
+
+| Leg | 200s/s | non-200 (15s) | p50 | p99 | worker req/s |
+| --- | --- | --- | --- | --- | --- |
+| off pair-A | 366 | 370,461 | 2.43ms | 6.72ms | ~390 |
+| on pair-A | 118,265 | 0 | 0.37ms | 3.22ms | **~1** (16 misses/15s) |
+| on pair-B | 137,376 | 0 | 0.34ms | 2.53ms | **~1** (15 misses/15s) |
+| off pair-B | 361 | 341,063 | 2.57ms | 7.58ms | ~390 |
+
+**Gate passed: ~320–380x on clean-200 throughput** (366→118,265;
+361→137,376), against the 10x bar. The off legs are the spec's
+arithmetic made flesh: w×c/5ms ≈ 400/s clean, everything else shed as
+capacity 503s (`Retry-After`), ~23–25k RPS counting the sheds — the
+cache-on legs beat even that raw-RPS number 4.7–5.9x while turning the
+error rate to zero. Cache-on rides **above** the old ~99k proxied
+ceiling (118–137k) because a HIT deletes the proxy + UDS hop
+entirely, not just the worker. Worker-side truth: 15–16 requests per
+15s leg — ~1 req/s per key at ttl 1s, regardless of the ~2M client
+requests, exactly the stampede-to-trickle contract.
+
+**2) Ping-class floor (honesty row, no gate):**
+
+| Leg | RPS | p50 | p99 |
+| --- | --- | --- | --- |
+| off pair-A | 58,432 | 0.65ms | 7.30ms |
+| on pair-A | 143,981 | 0.32ms | 2.30ms |
+| on pair-B | 118,375 | 0.37ms | 3.10ms |
+| off pair-B | 72,280 | 0.60ms | 5.11ms |
+
+Measured **1.6–2.5x** — above the predicted ~1.2–1.4x. The
+prediction modeled a HIT as "still pays TLS + routing"; it does, but
+it also deletes the ReverseProxy machinery and the UDS round trip,
+whose Janus-side share the attribution table had folded into "proxy."
+Still the floor of the win curve, and still nowhere near the
+capacity-bound story.
+
+**3) Coalescing stampede:** three cold-key bursts at conc:64 → worker
+requests **1, 1, 1**; all 64 clients 200 with identical bodies; p99
+35–38ms (TLS conn setup for 64 fresh oha connections plus one 5ms
+origin round trip — not 64× queueing). At conc:256 (past the 64-waiter
+cap) the shape depends on arrival hardness, both observed and both
+correct: a hard simultaneous burst produced 1 fill + 172
+`waiter_overflow` fall-throughs, whose excess over w:2 c:1 capacity
+the data plane shed as 246 capacity 503s + `Retry-After` (exactly
+no-cache behavior — the cache manufactured none of them); a
+staggered-arrival re-run produced `{200: 256}` — 1 miss + 40 coalesced
++ 215 hits, overflow 0.
+
+**4) The zero case:** every request carrying `Cookie: a=1`, off vs on:
+27,514 vs 24,843 RPS (clean 200s/s 373 vs 363 — capacity-identical).
+The −10% RPS delta is below this session's identical-leg drift
+(±10–24%), so: indistinguishable from noise, as required — the bypass
+path adds three header-map probes and two atomic adds.
+
+**5) Reload interaction:** watch-mode tenant under conc:32 load,
+save mid-run: the **first** post-save distinct response was the new
+code (`v:2`; no stale body observed in any post-cut probe), purge
+delta 3 (doorbell PUT + publishes), `fenced_stores` delta 2 — two
+straddling fills correctly refused to store across the cut.
+
+The lever table's claim is settled precisely as restated: **10–100x+
+on capacity-bound routes** (measured ~320–380x on the 5ms route at
+conc:64 — the multiplier is the handler-cost-to-ceiling gap, so slower
+handlers measure higher), **~1.6–2.5x on ping-class (Janus-bound)
+routes**, **zero by design** on Cookie/auth traffic.
+
 ### Next-best lever
 
-Lever #1 (raise `c` for I/O-bound apps, watch off) — the measured 4x
-with zero code risk beyond the knob itself. After that, lever #4 (DSL
-fast path) is what stands between the ~15µs worker answer and the
-~200k/s hello-world ceiling.
+The ranked list is closed: #1, #2, #3, #4, and #5 are shipped with
+measurements above. What remains is deferred-for-cause — #6 (static
+bypass) and #8 (hand-rolled proxy) want a real production tenant's
+traffic shape, #7 (GOMAXPROCS split) wants a profile showing scheduler
+pressure, #9 (kTLS) waits on golang/go#44506. Operationally, the
+biggest available wins are now configuration, not code: enable `cache`
+on public anonymous routes (10–100x+ where it applies) and raise `c`
+on I/O-bound apps (capacity-exact, measured 7x).
 
 ## Pointers
 
