@@ -634,7 +634,14 @@ extra workers cost, they never pay, confirming ping-class is
 Janus-bound. RSS is measured *after* ~1.5M requests per pool, so it
 sits above the prebuild doc's at-boot 33–40MB — sustained-load heap,
 not a regression (w:32 workers, each seeing fewer requests, sit lower
-than w:2's).
+than w:2's). Leak-checked 2026-07-20: one worker hammered direct-UDS
+measured 31.1MB at publish → 77.2MB after its first ~1.7M requests →
+**77.5MB after 13.7M** (+0.3MB over the following 12M, ~0.025
+bytes/request — page noise). A hard plateau, not a slope: JSC sizes
+its heap to allocation rate and keeps freed pages resident at the
+high-water mark, so steady-state RSS tracks request rate, not
+cumulative requests. `maxRequests`/`maxSeconds` recycling remains the
+knob if a deployment wants a lower cap.
 
 **B) c sweep on `/io` (5ms), w:8, cache off, conc:64:**
 
