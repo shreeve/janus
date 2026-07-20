@@ -523,10 +523,13 @@ case_apps_empty_after_restart() {
 
 # --- cases: data ------------------------------------------------------------
 
+# Case bodies run inside the runner's $( ) subshell, so fixture bookkeeping
+# must go through files (like APP_ID_FILE) — array appends in a subshell
+# never reach the parent, and the cleaner would leak every fixture server.
 DATA_APP_FILE="$ROOT/.test-data-app-id"
-DATA_PIDS=()
-DATA_SOCKS=()
-DATA_FILES=()
+DATA_PIDS_FILE="$ROOT/.test-data-pids"
+DATA_SOCKS_FILE="$ROOT/.test-data-socks"
+DATA_HITFILES_FILE="$ROOT/.test-data-files"
 
 data_app_id() {
 	cat "$DATA_APP_FILE"
@@ -538,8 +541,8 @@ start_data_upstream() {
 	local sock=$1 name=$2 hitfile=$3
 	rm -f "$sock"
 	: >"$hitfile"
-	DATA_SOCKS+=("$sock")
-	DATA_FILES+=("$hitfile")
+	printf '%s\n' "$sock" >>"$DATA_SOCKS_FILE"
+	printf '%s\n' "$hitfile" >>"$DATA_HITFILES_FILE"
 	# detach stdout/stderr: the runner captures case output via $( ) and
 	# would otherwise wait for this background server to exit
 	python3 - "$sock" "$name" "$hitfile" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
@@ -571,7 +574,7 @@ class S(socketserver.ThreadingUnixStreamServer):
 
 S(sock, H).serve_forever()
 PY
-	DATA_PIDS+=($!)
+	printf '%s\n' "$!" >>"$DATA_PIDS_FILE"
 	local i
 	for i in $(seq 1 50); do
 		[[ -S "$sock" ]] && return 0
@@ -587,8 +590,8 @@ start_data_doorbell() {
 	local sock=$1 appid=$2 newsock=$3 ringfile=$4
 	rm -f "$sock"
 	: >"$ringfile"
-	DATA_SOCKS+=("$sock")
-	DATA_FILES+=("$ringfile")
+	printf '%s\n' "$sock" >>"$DATA_SOCKS_FILE"
+	printf '%s\n' "$ringfile" >>"$DATA_HITFILES_FILE"
 	python3 - "$sock" "$appid" "$newsock" "$ringfile" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
 import http.server, socketserver, json, sys, urllib.request
 
@@ -621,7 +624,7 @@ class S(socketserver.ThreadingUnixStreamServer):
 
 S(sock, H).serve_forever()
 PY
-	DATA_PIDS+=($!)
+	printf '%s\n' "$!" >>"$DATA_PIDS_FILE"
 	local i
 	for i in $(seq 1 50); do
 		[[ -S "$sock" ]] && return 0
@@ -632,17 +635,20 @@ PY
 }
 
 stop_data_fixtures() {
-	local pid f
-	for pid in ${DATA_PIDS[@]+"${DATA_PIDS[@]}"}; do
-		kill "$pid" 2>/dev/null || true
+	local pid f path
+	if [[ -f "$DATA_PIDS_FILE" ]]; then
+		while read -r pid; do
+			kill "$pid" 2>/dev/null || true
+		done <"$DATA_PIDS_FILE"
+	fi
+	for f in "$DATA_SOCKS_FILE" "$DATA_HITFILES_FILE"; do
+		if [[ -f "$f" ]]; then
+			while read -r path; do
+				rm -f "$path"
+			done <"$f"
+		fi
 	done
-	DATA_PIDS=()
-	for f in ${DATA_SOCKS[@]+"${DATA_SOCKS[@]}"} ${DATA_FILES[@]+"${DATA_FILES[@]}"}; do
-		rm -f "$f"
-	done
-	DATA_SOCKS=()
-	DATA_FILES=()
-	rm -f "$DATA_APP_FILE"
+	rm -f "$DATA_PIDS_FILE" "$DATA_SOCKS_FILE" "$DATA_HITFILES_FILE" "$DATA_APP_FILE"
 }
 
 case_data_register_with_upstream() {
