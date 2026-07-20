@@ -313,6 +313,85 @@ and eliminated 503s entirely (capacity w×c = 64 = conc), confirming
 lever #1's headroom. Run with a temporary local worker edit; the
 shipped worker stays c:1 pending the protocol's opt-in knob.
 
+### c-knob sweep (2026-07-20)
+
+Re-run with the shipped `-c` knob (manager CLI `-c/--concurrency`,
+refused with watch on), same rig as Phase 8: M5, Bun 1.3.14, Go 1.26.5,
+Caddy v2.11.4, oha 1.14.0, `ulimit -n` 65536, HTTPS full stack, 15s
+runs, first warmup discarded. Caddy rebuilt at 18af04e (includes the
+reload split-brain fix). Manager run from a clean worktree of rip main.
+Rig sanity: ping w:2 c:1 conc:64 measured 97,013 RPS (warmup 100,049
+discarded) — top of the expected 70–100k band, rig equivalent to the
+Phase 8 runs.
+
+Ping-class, conc:64, interleaved A/B pairs (c:1 vs c:8 per w):
+
+| Config | RPS | p50 | p99 | non-200s |
+| --- | --- | --- | --- | --- |
+| w:2 c:1 (pair A) | 97,013 | 0.49ms | 2.78ms | 0 |
+| w:2 c:8 (pair A) | 97,107 | 0.50ms | 2.80ms | 0 |
+| w:2 c:1 (pair B) | 98,950 | 0.49ms | 2.75ms | 0 |
+| w:2 c:8 (pair B) | 81,451 | 0.54ms | 3.41ms | 0 |
+| w:16 c:1 (pair A) | 76,147 | 0.61ms | 3.67ms | 0 |
+| w:16 c:8 (pair A) | 87,252 | 0.55ms | 3.08ms | 0 |
+| w:16 c:1 (pair B) | 72,088 | 0.63ms | 3.83ms | 0 |
+| w:16 c:8 (pair B) | 81,970 | 0.57ms | 3.32ms | 0 |
+
+At w:2 the knob is invisible (ratios 1.00 and 0.82 — the second pair's
+c:8 leg ran hottest; noise, not signal). At w:16 c:8 beats c:1 by the
+same ratio in both pairs (1.15, 1.14) — with 16 workers at c:1,
+least_conn picks land on busy workers often enough that Janus's
+bounce-and-retry churn costs ~13%; c:8 absorbs arrivals without the
+retry hop.
+
+Client-concurrency escalation on the two best configs (capacity = w×c):
+
+| Config | conc:64 | conc:128 | conc:256 |
+| --- | --- | --- | --- |
+| w:2 c:8 (cap 16) | 97,107 | 98,834 (p50 0.94ms, p99 5.49ms) | 82,098 (p50 2.24ms, p99 14.36ms) |
+| w:16 c:8 (cap 128) | 87,252 | 84,890 (p50 1.08ms, p99 6.49ms) | 89,248 (p50 2.17ms, p99 11.39ms) |
+
+All rows zero non-200s. Higher conc buys latency, not throughput.
+
+`/io` (5ms sleep), w:8, successful-200s/s with bounced 503s separate:
+
+| c | conc | 200s/s | 503s (15s) | p50 | p99 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 64 | 1,536 | 132,953 | 5.80ms | 12.50ms |
+| 4 | 64 | 6,034 | 87,525 | 5.43ms | 12.27ms |
+| 8 | 64 | 10,695 | 0 | 5.91ms | 7.53ms |
+| 16 | 64 | 10,601 | 0 | 5.88ms | 8.13ms |
+| 32 | 64 | 10,655 | 0 | 5.89ms | 8.54ms |
+| 8 | 128 | 11,896 | 64,373 | 7.30ms | 16.38ms |
+| 16 | 128 | 22,252 | 0 | 5.62ms | 7.77ms |
+| 32 | 128 | 22,219 | 0 | 5.67ms | 7.25ms |
+
+The curve is capacity math: 200s/s ≈ conc/(5ms + overhead) once
+w×c ≥ conc, and 503s vanish at exactly that point (c:8 → cap 64 =
+conc:64 clean; conc:128 needs c:16). At c:8/conc:64 the shipped knob
+measures 10,695/s clean — 7.0x the c:1 baseline in the same session
+and well above the 6,083 temp-edit number recorded on 2026-07-19.
+Past saturation, extra c is free but buys nothing (c:16 ≈ c:32).
+
+Thermal note: absolutes sagged through the session (w:2 c:8 conc:64
+read 97.1k in the first pair and 81.5k twenty minutes later, −16%);
+the interleaved ratios stayed stable, so ratios are the comparisons
+to trust. A planned cool-machine repeat of the peak config was lost
+to a tooling failure at the end of the session; the numbers above are
+complete for every swept config.
+
+**Verdict: the 98,702 peak stands.** Best counted run was 98,950 RPS
+(w:2 c:1 conc:64) — +0.3%, a statistical tie, and the discarded warmup
+read 100,049 — so the machine reproduces the peak but `c` does not move
+it: ping-class is Janus-bound (the attribution table's ~75%), and no
+w×c×conc combination pushed past ~99k. The lever ranking is unchanged
+and sharpened: lever #1 is confirmed as capacity-exact for I/O-bound
+work (7x clean at saturation, 503s to zero, and now shipped rather
+than a temp edit), it additionally buys ~14% on ping-class at high w
+by killing bounce-retry churn, and the path past ~99k remains lever #4
+(DSL fast path) for the worker share and lever #2 (micro-cache) for
+the only 10x+ story.
+
 ### Next-best lever
 
 Lever #1 (raise `c` for I/O-bound apps, watch off) — the measured 4x
