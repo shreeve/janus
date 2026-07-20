@@ -47,7 +47,8 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | --- | --- | --- | --- |
 | 1 | **ping** | Nothing else — module load, TLS, site admission, cascade | [`capability-ping`](docs/20260718-204255-capability-ping.md) |
 | 2 | **control** | ping chassis already proven; opens `/1.0` listeners | [`capability-control`](docs/20260718-203749-capability-control.md) |
-| 3+ | next | Builds on control’s hot API (apps, upstreams, …) | [build SPEC](docs/20260718-191425-janus-build-spec.md) |
+| 3 | **cache** | The Phase 4 data plane; micro-cache + request coalescing | [`capability-microcache`](docs/20260720-033201-capability-microcache.md) |
+| 4+ | next | Builds on control’s hot API (apps, upstreams, …) | [build SPEC](docs/20260718-191425-janus-build-spec.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -59,7 +60,7 @@ xcaddy build \
   --output ./bin/caddy
 
 go test ./...
-./test.sh   # groups in capability order: ping, control, apps, data, heartbeat, tls, tenant
+./test.sh   # groups in capability order: ping, control, apps, data, cache, heartbeat, tls, tenant
 ```
 
 ### 1. ping (data plane)
@@ -138,6 +139,9 @@ Confirm the module is linked:
 | `apps.go` | Hot apps registry (CRUD, upstreams, heartbeats, TTL sweep) |
 | `dataplane.go` | Host → worker-socket proxying (least-conn, health, marked 503s) |
 | `ring.go` | Doorbell ring: single-flight wake-up for dirty apps |
+| `cache.go` | Micro-cache store: shards, doorkeeper, LRU, purge, counters |
+| `cache_serve.go` | Cache request path: decision table, coalescing, the fill |
+| `cache_config.go` | `cache` directive: parse, cascade, provision |
 | `Caddyfile` | Working cold config (multi-site cascade demos) |
 | `test.sh` | High-level acceptance suite (self-contained; not a substitute for `go test`) |
 | `docs/` | Design notes, SPEC, capabilities (`YYYYMMDD-HHMMSS-` prefixed) |

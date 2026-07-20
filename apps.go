@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -63,6 +64,21 @@ type AppRecord struct {
 	// (heartbeats begin immediately after registration, so a slow cold
 	// boot is never mistaken for dead); each POST …/heartbeat re-stamps.
 	heartbeatAt time.Time
+
+	// gen is the app's cache generation counter
+	// (docs/20260720-033201-capability-microcache.md "purge on swap,
+	// generation-fenced"). Every purge event — upstreams PUT, DELETE,
+	// heartbeat reap, host claim — bumps it inside the registry's
+	// critical section; cache fills snapshot it with host resolution and
+	// the store is rejected on mismatch. Pointer, so registry snapshots
+	// share the live counter.
+	gen *atomic.Uint64
+
+	// genSnap is the generation observed by resolveHost, read under the
+	// same RLock as the Upstreams snapshot so the two are mutually
+	// consistent — a fill's snapshot can never pair a post-swap
+	// generation with pre-swap sockets.
+	genSnap uint64
 }
 
 func (rec *AppRecord) clone() AppRecord {
@@ -200,6 +216,12 @@ type appRegistry struct {
 	apps  map[string]*AppRecord // id → record
 	hosts map[string]string     // host → holding app id (first-wins)
 
+	// purge is the cache's purge hook, invoked (outside the registry
+	// lock, after the generation bump inside it) on every purge event:
+	// upstreams PUT, DELETE, heartbeat reap, and host claim. nil when no
+	// cache store is wired (tests).
+	purge func(appID string)
+
 	// now is the heartbeat clock source; tests inject a fake.
 	now func() time.Time
 
@@ -229,9 +251,9 @@ func (r *appRegistry) create(name string, hosts []string) (AppRecord, error) {
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for _, h := range hosts {
 		if holder, taken := r.hosts[h]; taken {
+			r.mu.Unlock()
 			return AppRecord{}, errHostConflict(h, holder)
 		}
 	}
@@ -239,6 +261,7 @@ func (r *appRegistry) create(name string, hosts []string) (AppRecord, error) {
 	for {
 		suffix, err := mintIDSuffix()
 		if err != nil {
+			r.mu.Unlock()
 			return AppRecord{}, fmt.Errorf("minting app id: %w", err)
 		}
 		id = name + "-" + suffix
@@ -247,12 +270,21 @@ func (r *appRegistry) create(name string, hosts []string) (AppRecord, error) {
 		}
 	}
 	// Registration counts as the first heartbeat.
-	rec := &AppRecord{ID: id, Name: name, Hosts: hosts, Upstreams: []Upstream{}, heartbeatAt: r.now()}
+	rec := &AppRecord{ID: id, Name: name, Hosts: hosts, Upstreams: []Upstream{}, heartbeatAt: r.now(), gen: new(atomic.Uint64)}
+	// Host claim is a purge event (docs/20260720-033201-capability-microcache.md
+	// O5): bump the (fresh) generation in the same critical section as the
+	// registry write; the entry drop below runs after the lock releases.
+	rec.gen.Add(1)
 	r.apps[id] = rec
 	for _, h := range hosts {
 		r.hosts[h] = id
 	}
-	return rec.clone(), nil
+	out := rec.clone()
+	r.mu.Unlock()
+	if r.purge != nil {
+		r.purge(id)
+	}
+	return out, nil
 }
 
 func (r *appRegistry) list() []AppRecord {
@@ -278,7 +310,9 @@ func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
 	if !ok {
 		return AppRecord{}, false
 	}
-	return *r.apps[id], true
+	rec := *r.apps[id]
+	rec.genSnap = rec.gen.Load()
+	return rec, true
 }
 
 func (r *appRegistry) get(id string) (AppRecord, error) {
@@ -338,18 +372,31 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string) (AppRecord
 
 // setUpstreams replaces the entire upstream list atomically.
 // Empty list is legal: registered but not routable.
+//
+// Every upstreams PUT is a cache purge event: the generation bump shares
+// the registry write's critical section (the admission cut also cuts the
+// cache), and the entry drop follows outside the lock. With staggered
+// publishes a w:16 boot is 16 purges — the cache stays cold through
+// warmup, by design; any future scheme that diffs socket lists to skip
+// "redundant" purges must re-derive the spec's race analysis first.
 func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error) {
 	if err := validateUpstreams(ups); err != nil {
 		return AppRecord{}, err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	rec, ok := r.apps[id]
 	if !ok {
+		r.mu.Unlock()
 		return AppRecord{}, errUnknownApp(id)
 	}
 	rec.Upstreams = append([]Upstream{}, ups...)
-	return rec.clone(), nil
+	rec.gen.Add(1)
+	out := rec.clone()
+	r.mu.Unlock()
+	if r.purge != nil {
+		r.purge(id)
+	}
+	return out, nil
 }
 
 // heartbeat stamps the app's heartbeat clock.
@@ -372,7 +419,6 @@ func (r *appRegistry) heartbeat(id string) error {
 func (r *appRegistry) sweepExpired() []string {
 	now := r.now()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	var reaped []string
 	for id, rec := range r.apps {
 		if now.Sub(rec.heartbeatAt) > r.ttl {
@@ -380,7 +426,14 @@ func (r *appRegistry) sweepExpired() []string {
 				delete(r.hosts, h)
 			}
 			delete(r.apps, id)
+			rec.gen.Add(1) // reap is a purge event
 			reaped = append(reaped, id)
+		}
+	}
+	r.mu.Unlock()
+	if r.purge != nil {
+		for _, id := range reaped {
+			r.purge(id)
 		}
 	}
 	return reaped
@@ -425,15 +478,20 @@ func (r *appRegistry) stopSweeper() {
 
 func (r *appRegistry) delete(id string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	rec, ok := r.apps[id]
 	if !ok {
+		r.mu.Unlock()
 		return errUnknownApp(id)
 	}
 	for _, h := range rec.Hosts {
 		delete(r.hosts, h)
 	}
 	delete(r.apps, id)
+	rec.gen.Add(1) // delete is a purge event
+	r.mu.Unlock()
+	if r.purge != nil {
+		r.purge(id)
+	}
 	return nil
 }
 

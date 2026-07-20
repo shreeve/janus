@@ -31,6 +31,18 @@
 #
 #   curl -s 'http://127.0.0.1:7600/1.0/tls/ask?domain=some.host'  → 404 until registered
 #
+# 3) cache — micro-cache + request coalescing (site-scoped, cascades)
+#   Global cache ON (1s default TTL): anonymous GETs on registered hosts
+#   are answered from memory for one TTL; concurrent misses coalesce
+#   into one worker request. Purged on every upstreams PUT / DELETE /
+#   reap / host claim (generation-fenced).
+#   catchall  *.ripdev.io  → inherit on  (default tuning, no debug)
+#   api.ripdev.io          → explicit off (auth via custom headers must
+#                            never meet a shared cache)
+#   pages.ripdev.io        → ttl 5s override + X-Janus-Cache debug header
+#
+#   curl -s http://127.0.0.1:7600/1.0/cache        → hit/miss counters
+#
 {
 	auto_https disable_redirects
 	skip_install_trust
@@ -43,6 +55,13 @@
 		ping # 1) site-scoped default: on
 		control internal # 2) process-wide
 		control local
+		cache { # 3) site-scoped default: on, tuned
+			ttl 1s
+			ttl_max 10s
+			max_body 256kb
+			max_bytes 64mb # process-wide pool (GLOBAL ONLY)
+			max_app_share 50 # % of max_bytes one app may hold (GLOBAL ONLY)
+		}
 	}
 }
 
@@ -69,6 +88,26 @@ off.ripdev.io {
 	import ripdev_tls
 	janus {
 		ping off
+	}
+}
+
+# Cache: explicit off beats inherited on (custom-header auth and a shared
+# cache must never meet)
+api.ripdev.io {
+	import ripdev_tls
+	janus {
+		cache off
+	}
+}
+
+# Cache: per-key override — ttl 5s, debug header while developing
+pages.ripdev.io {
+	import ripdev_tls
+	janus {
+		cache {
+			ttl 5s
+			debug
+		}
 	}
 }
 

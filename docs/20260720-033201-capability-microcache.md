@@ -1,14 +1,17 @@
 # Capability: cache (micro-cache + request coalescing)
 
-> **DESIGN — revision 2 — adversarial review (2 reviewers) folded in;
-> pending implementation. Nothing below is implemented.** Two
-> independent adversarial reviews (HTTP-caching correctness; systems /
-> DoS / concurrency) attacked revision 1. Both found the same purge
-> race independently and converged on the same fix (generation-fenced
-> stores); their CRITICALs, HIGHs, and MEDIUMs are folded in below,
-> and the former "Open questions for adversarial review" section is
-> now a settled/open ledger. Where the two reviews contradicted each
-> other, the resolution is recorded in place.
+> **Revision 2, adversarial review (2 reviewers) folded in —
+> IMPLEMENTED as specified.** Two independent adversarial reviews
+> (HTTP-caching correctness; systems / DoS / concurrency) attacked
+> revision 1. Both found the same purge race independently and
+> converged on the same fix (generation-fenced stores); their
+> CRITICALs, HIGHs, and MEDIUMs are folded in below, and the former
+> "Open questions for adversarial review" section is now a settled/open
+> ledger. Where the two reviews contradicted each other, the resolution
+> is recorded in place. The implementation lives in `cache.go`
+> (sharded store), `cache_serve.go` (decision table, coalescing, fill),
+> and `cache_config.go` (directive, cascade); tests in `cache_test.go`
+> and the `cache` group of `test.sh`.
 
 Cold Caddyfile capability. When enabled for a site, Janus keeps a
 short-TTL in-memory copy of anonymous `GET` responses and answers
@@ -23,7 +26,7 @@ wait for the fill.
 | **Cascades** | Yes — global default → site override (process-wide exceptions: `max_bytes`, `max_app_share`) |
 | **Built-in default** | off (when unset at every level) |
 | **Module** | Site handler (data plane), between ping and upstream selection |
-| **Status** | **Design revision 2** — review-hardened, no implementation, no tests |
+| **Status** | **Shipped** — implemented per revision 2; both test layers green; measured (see Measured results) |
 
 ## Why it exists
 
@@ -875,11 +878,10 @@ lever framing ("the only remaining 10x+ story") survives — restated
 precisely as **10–100x on capacity-bound routes; ~1.3x on ping-class
 (Janus-bound) routes**.
 
-## Protocol doc delta (do not apply until implementation lands)
+## Protocol doc delta (applied)
 
 [`20260719-002000-pool-protocol.md`](20260719-002000-pool-protocol.md)
-gains three touches when this capability ships — noted here, **not**
-edited there while this is a design:
+carries three touches from this capability:
 
 1. **Data plane decision table** gains one row, second position
    (after "Unknown host → 404", before everything that consults

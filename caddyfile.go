@@ -56,6 +56,15 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("ping: %v", err)
 				}
 				a.Ping = &on
+			case "cache":
+				if a.Cache != nil {
+					return d.Err("duplicate cache directive in the same block")
+				}
+				cs, err := parseCacheDirective(d, true)
+				if err != nil {
+					return err
+				}
+				a.Cache = cs
 			case "token":
 				return d.Err("token belongs on the control line as token:… (per-listener), not as its own directive")
 			default:

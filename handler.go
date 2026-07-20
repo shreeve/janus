@@ -20,9 +20,17 @@ type Handler struct {
 	// Ping overrides the global ping default for this site when non-nil.
 	Ping *bool `json:"ping,omitempty"`
 
+	// Cache overrides the global cache default/tuning for this site when
+	// non-nil (process-wide keys are illegal here).
+	Cache *CacheSettings `json:"cache,omitempty"`
+
 	app    *App
 	dp     *dataPlane
 	logger *zap.Logger
+
+	// cacheCfg is the site's effective cache configuration; nil when the
+	// effective cache is off, so the bypass path costs one nil check.
+	cacheCfg *cacheSite
 }
 
 // CaddyModule returns the Caddy module information.
@@ -48,8 +56,12 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		h.app = app
 		h.dp = app.dp
 	}
+	if err := h.provisionCache(); err != nil {
+		return err
+	}
 	h.logger.Info("janus handler ready",
 		zap.Bool("ping", h.pingEnabled()),
+		zap.Bool("cache", h.cacheCfg != nil),
 	)
 	return nil
 }
@@ -74,6 +86,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		return err
 	}
 	if h.dp != nil {
+		if h.cacheCfg != nil {
+			return h.serveCache(w, r)
+		}
 		return h.dp.serve(w, r)
 	}
 	return caddyhttp.Error(http.StatusNotFound, nil)
@@ -85,6 +100,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 //	janus {
 //	    ping
 //	    ping off
+//	    cache off
+//	    cache { ttl 5s; debug }
 //	}
 func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume "janus"
@@ -99,6 +116,15 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("ping: %v", err)
 			}
 			h.Ping = &on
+		case "cache":
+			if h.Cache != nil {
+				return d.Err("duplicate cache directive in the same block")
+			}
+			cs, err := parseCacheDirective(d, false)
+			if err != nil {
+				return err
+			}
+			h.Cache = cs
 		case "control":
 			return d.Err("control is process-wide; configure it in the global janus options block")
 		default:

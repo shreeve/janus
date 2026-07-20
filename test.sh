@@ -251,7 +251,10 @@ cleanup() {
 	stop_caddy
 	stop_data_fixtures
 	stop_tenant
-	rm -f "$ROOT/.test-app-id" "$ROOT/.test-hb-app-id" "$ROOT/.test-tls-app-id" "$ROOT/.test-fixtures.log"
+	rm -f "$ROOT/.test-app-id" "$ROOT/.test-hb-app-id" "$ROOT/.test-tls-app-id" \
+		"$ROOT/.test-cache-app-id" "$ROOT/.test-fixtures.log" \
+		"$ROOT"/.test-cache-burst-* "$ROOT"/.test-cache-fail-* \
+		"$ROOT/.test-cache-cap-codes" "$ROOT/.test-cache-race"
 }
 
 trap cleanup EXIT INT TERM
@@ -723,6 +726,569 @@ case_data_ping_still_answers() {
 	eq "$(http_body https://app.ripdev.io/ping)" "pong"
 }
 
+# --- cases: cache -------------------------------------------------------------
+#
+# Capability 3: micro-cache + request coalescing
+# (docs/20260720-033201-capability-microcache.md "Acceptance sketch").
+# The instrument: a fixture upstream that records every request it receives
+# (tenant-side truth) plus /1.0/cache counters (Janus-side truth); every
+# case asserts both sides. Counter asserts use deltas — earlier groups also
+# move the process-wide counters. The doorkeeper admits a key on its second
+# sighting, so hit tests use three requests, not two.
+#
+# Hosts (root Caddyfile): cachetest.ripdev.io inherits global cache on
+# (ttl 1s, no debug); pages.ripdev.io overrides ttl 5s + debug;
+# api.ripdev.io is cache off.
+
+CACHE_APP_FILE="$ROOT/.test-cache-app-id"
+CACHE_HITS1="$ROOT/.test-cache1.hits"
+CACHE_HITS2="$ROOT/.test-cache2.hits"
+CACHE_SOCK1="$ROOT/run/cache1.sock"
+CACHE_SOCK2="$ROOT/run/cache2.sock"
+
+cache_app_id() { cat "$CACHE_APP_FILE"; }
+
+# cache_stat KEY — one process-total counter from GET /1.0/cache
+cache_stat() {
+	capi GET /1.0/cache
+	printf '%s' "$REPLY_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"
+}
+
+# path_hits HITFILE PATH — how many requests for exactly PATH the fixture
+# received (exact line match: /slow must not count /slower).
+path_hits() {
+	local file=$1 path=$2
+	if [[ ! -f "$file" ]]; then
+		echo 0
+		return
+	fi
+	grep -cxF -- "$path" "$file" || true
+}
+
+cache_hb() {
+	capi POST "/1.0/apps/$(cache_app_id)/heartbeat"
+	eq "$REPLY_CODE" "204"
+}
+
+# start_cache_upstream SOCK HITFILE — one fixture server, per-path behavior.
+start_cache_upstream() {
+	local sock=$1 hitfile=$2
+	rm -f "$sock"
+	: >"$hitfile"
+	printf '%s\n' "$sock" >>"$DATA_SOCKS_FILE"
+	printf '%s\n' "$hitfile" >>"$DATA_HITFILES_FILE"
+	python3 - "$sock" "$hitfile" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
+import gzip, http.server, socket, socketserver, sys, time
+
+sock, hitfile = sys.argv[1], sys.argv[2]
+GZ = gzip.compress(b"compressed-body\n")
+
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def _record(self):
+        with open(hitfile, "ab") as f:
+            f.write((self.path + "\n").encode())
+    def _send(self, code, body, headers=None):
+        self.send_response(code)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        self._record()
+        p = self.path.split("?")[0]
+        if p == "/slow":
+            time.sleep(0.5); self._send(200, b"slow-body\n")
+        elif p == "/slower":
+            time.sleep(1.5); self._send(200, b"slower-body\n")
+        elif p == "/slowcookie":
+            time.sleep(0.5); self._send(200, b"personal\n", {"Set-Cookie": "sid=1"})
+        elif p == "/setcookie":
+            self._send(200, b"cookie\n", {"Set-Cookie": "sid=1"})
+        elif p == "/nostore":
+            self._send(200, b"nostore\n", {"Cache-Control": "no-store"})
+        elif p == "/private":
+            self._send(200, b"private\n", {"Cache-Control": "private"})
+        elif p == "/badcc":
+            self._send(200, b"badcc\n", {"Cache-Control": "max-age=="})
+        elif p == "/expires":
+            self._send(200, b"expires\n", {"Expires": "Fri, 01 Jan 2100 00:00:00 GMT"})
+        elif p == "/ce":
+            self._send(200, GZ, {"Content-Encoding": "gzip"})
+        elif p == "/cevary":
+            self._send(200, GZ, {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+        elif p == "/acao-echo":
+            self._send(200, b"acao\n",
+                       {"Access-Control-Allow-Origin": self.headers.get("Origin", "none")})
+        elif p == "/acao-star":
+            self._send(200, b"acao\n", {"Access-Control-Allow-Origin": "*"})
+        elif p == "/vary-lang":
+            lang = self.headers.get("Accept-Language", "none")
+            self._send(200, f"lang:{lang}\n".encode(), {"Vary": "Accept-Language"})
+        elif p == "/vary-star":
+            self._send(200, b"varystar\n", {"Vary": "*"})
+        elif p == "/404":
+            self._send(404, b"nope\n")
+        elif p == "/500":
+            self._send(500, b"boom\n")
+        elif p == "/busy":
+            self._send(503, b"busy\n", {"Rip-Worker-Busy": "1", "Retry-After": "0"})
+        elif p == "/truncate":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            self.wfile.write(b"x" * 500)
+            self.wfile.flush()
+            # A real FIN mid-body: close() alone leaves the fd alive via
+            # rfile/wfile references and the peer would wait forever.
+            self.connection.shutdown(socket.SHUT_RDWR)
+            self.connection.close()
+        elif p == "/big":
+            self._send(200, b"B" * (300 * 1024))
+        else:
+            self._send(200, f"plain:{self.path}\n".encode())
+    def do_POST(self):
+        self._record()
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        self._send(200, b"posted\n")
+    def log_message(self, *args): pass
+    def address_string(self): return "unix"
+
+class S(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+
+S(sock, H).serve_forever()
+PY
+	printf '%s\n' "$!" >>"$DATA_PIDS_FILE"
+	local i
+	for i in $(seq 1 50); do
+		[[ -S "$sock" ]] && return 0
+		sleep 0.1
+	done
+	echo "cache upstream socket $sock never appeared" >&2
+	return 1
+}
+
+case_cache_register() {
+	start_cache_upstream "$CACHE_SOCK1" "$CACHE_HITS1" || return 1
+	start_cache_upstream "$CACHE_SOCK2" "$CACHE_HITS2" || return 1
+	capi POST /1.0/apps \
+		'{"name":"cachet","hosts":["cachetest.ripdev.io","pages.ripdev.io","api.ripdev.io"]}'
+	eq "$REPLY_CODE" "201"
+	local id
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	ok "-n \"$id\"" "no id in $REPLY_BODY"
+	printf '%s' "$id" >"$CACHE_APP_FILE"
+	capi PUT "/1.0/apps/$id/upstreams" "{\"upstreams\":[{\"path\":\"$CACHE_SOCK1\"}]}"
+	eq "$REPLY_CODE" "200"
+	capi GET /1.0/cache
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" '"hits"'
+	json_has "$REPLY_BODY" '"fenced_stores"'
+}
+
+case_cache_hit_serves_without_worker() {
+	cache_hb
+	local h0 a0 b1 b3 v
+	h0="$(cache_stat hits)"
+	a0="$(cache_stat admission_rejects)"
+	b1="$(curl -sS --max-time 10 -D "$ROOT/.test-cache-h1" https://pages.ripdev.io/page)"
+	curl -sS --max-time 10 -o /dev/null https://pages.ripdev.io/page
+	b3="$(curl -sS --max-time 10 -D "$ROOT/.test-cache-h3" https://pages.ripdev.io/page)"
+	eq "$(path_hits "$CACHE_HITS1" /page)" "2" # doorkeeper admits on the second fill
+	eq "$b3" "$b1"
+	# The hit carries Age and the debug verdict (pages has debug on).
+	v="$(tr -d '\r' <"$ROOT/.test-cache-h3" | awk -F': ' 'tolower($1)=="x-janus-cache" {print $2}')"
+	eq "$v" "HIT"
+	v="$(tr -d '\r' <"$ROOT/.test-cache-h1" | awk -F': ' 'tolower($1)=="x-janus-cache" {print $2}')"
+	eq "$v" "MISS"
+	if ! tr -d '\r' <"$ROOT/.test-cache-h3" | grep -qi '^age: '; then
+		echo "hit response missing Age header" >&2
+		return 1
+	fi
+	eq "$(($(cache_stat hits) - h0))" "1"
+	eq "$(($(cache_stat admission_rejects) - a0))" "1"
+	rm -f "$ROOT/.test-cache-h1" "$ROOT/.test-cache-h3"
+}
+
+case_cache_cookie_bypass() {
+	cache_hb
+	local by0 s0 i v
+	by0="$(cache_stat bypass)"
+	s0="$(cache_stat stores)"
+	for i in 1 2 3; do
+		v="$(curl -sS --max-time 10 -o /dev/null -D - -H 'Cookie: a=1' https://pages.ripdev.io/cookiepage |
+			tr -d '\r' | awk -F': ' 'tolower($1)=="x-janus-cache" {print $2}')"
+		eq "$v" "BYPASS"
+	done
+	eq "$(path_hits "$CACHE_HITS1" /cookiepage)" "3"
+	eq "$(($(cache_stat bypass) - by0))" "3"
+	eq "$(($(cache_stat stores) - s0))" "0"
+}
+
+case_cache_auth_bypass() {
+	cache_hb
+	curl -sS --max-time 10 -o /dev/null -H 'Authorization: Bearer x' https://cachetest.ripdev.io/authpage
+	curl -sS --max-time 10 -o /dev/null -H 'Authorization: Bearer x' https://cachetest.ripdev.io/authpage
+	curl -sS --max-time 10 -o /dev/null -H 'Proxy-Authorization: Basic x' https://cachetest.ripdev.io/authpage
+	eq "$(path_hits "$CACHE_HITS1" /authpage)" "3"
+}
+
+case_cache_post_bypass() {
+	cache_hb
+	curl -sS --max-time 10 -o /dev/null -X POST --data a https://cachetest.ripdev.io/postpage
+	curl -sS --max-time 10 -o /dev/null -X POST --data b https://cachetest.ripdev.io/postpage
+	eq "$(path_hits "$CACHE_HITS1" /postpage)" "2"
+}
+
+case_cache_setcookie_never_stored() {
+	cache_hb
+	local s0 i
+	s0="$(cache_stat stores)"
+	for i in 1 2 3; do
+		curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/setcookie
+	done
+	eq "$(path_hits "$CACHE_HITS1" /setcookie)" "3"
+	eq "$(($(cache_stat stores) - s0))" "0"
+}
+
+case_cache_origin_vetoes_respected() {
+	cache_hb
+	local s0 p
+	s0="$(cache_stat stores)"
+	for p in /nostore /private /badcc /expires; do
+		curl -sS --max-time 10 -o /dev/null "https://cachetest.ripdev.io$p"
+		curl -sS --max-time 10 -o /dev/null "https://cachetest.ripdev.io$p"
+		eq "$(path_hits "$CACHE_HITS1" "$p")" "2"
+	done
+	eq "$(($(cache_stat stores) - s0))" "0"
+}
+
+case_cache_content_encoding() {
+	cache_hb
+	local s0
+	s0="$(cache_stat stores)"
+	# gzip without Vary: never stored — every repeat reaches the worker.
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Encoding: gzip' https://cachetest.ripdev.io/ce
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Encoding: gzip' https://cachetest.ripdev.io/ce
+	eq "$(path_hits "$CACHE_HITS1" /ce)" "2"
+	eq "$(($(cache_stat stores) - s0))" "0"
+	# With Vary: Accept-Encoding it stores per variant: third is a HIT.
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Encoding: gzip' https://cachetest.ripdev.io/cevary
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Encoding: gzip' https://cachetest.ripdev.io/cevary
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Encoding: gzip' https://cachetest.ripdev.io/cevary
+	eq "$(path_hits "$CACHE_HITS1" /cevary)" "2"
+	eq "$(($(cache_stat stores) - s0))" "1"
+}
+
+case_cache_acao() {
+	cache_hb
+	local s0
+	s0="$(cache_stat stores)"
+	# Echoed ACAO: never stored.
+	curl -sS --max-time 10 -o /dev/null -H 'Origin: https://a.test' https://cachetest.ripdev.io/acao-echo
+	curl -sS --max-time 10 -o /dev/null -H 'Origin: https://b.test' https://cachetest.ripdev.io/acao-echo
+	eq "$(path_hits "$CACHE_HITS1" /acao-echo)" "2"
+	eq "$(($(cache_stat stores) - s0))" "0"
+	# Static * stores.
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/acao-star
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/acao-star
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/acao-star
+	eq "$(path_hits "$CACHE_HITS1" /acao-star)" "2"
+	eq "$(($(cache_stat stores) - s0))" "1"
+}
+
+case_cache_vary_respected() {
+	cache_hb
+	local body
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Language: de' https://cachetest.ripdev.io/vary-lang
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Language: de' https://cachetest.ripdev.io/vary-lang
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Language: en' https://cachetest.ripdev.io/vary-lang
+	curl -sS --max-time 10 -o /dev/null -H 'Accept-Language: en' https://cachetest.ripdev.io/vary-lang
+	# The fifth request is a HIT with the de body; both variants coexist.
+	body="$(curl -sS --max-time 10 -H 'Accept-Language: de' https://cachetest.ripdev.io/vary-lang)"
+	eq "$body" "lang:de"
+	eq "$(path_hits "$CACHE_HITS1" /vary-lang)" "4"
+}
+
+case_cache_unbounded_vary_never_stored() {
+	cache_hb
+	local s0
+	s0="$(cache_stat stores)"
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/vary-star
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/vary-star
+	eq "$(path_hits "$CACHE_HITS1" /vary-star)" "2"
+	eq "$(($(cache_stat stores) - s0))" "0"
+}
+
+case_cache_non200_never_stored() {
+	cache_hb
+	local p
+	for p in /404 /500; do
+		curl -sS --max-time 10 -o /dev/null "https://cachetest.ripdev.io$p"
+		curl -sS --max-time 10 -o /dev/null "https://cachetest.ripdev.io$p"
+		eq "$(path_hits "$CACHE_HITS1" "$p")" "2"
+	done
+}
+
+case_cache_marked_503_never_stored() {
+	cache_hb
+	local code
+	code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://cachetest.ripdev.io/busy)"
+	eq "$code" "503"
+	code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://cachetest.ripdev.io/busy)"
+	eq "$code" "503"
+	# Both requests reached the data plane's retry machinery (the fixture
+	# is the only upstream, so each request bounces off it once).
+	eq "$(path_hits "$CACHE_HITS1" /busy)" "2"
+}
+
+case_cache_truncated_fill_never_stored() {
+	cache_hb
+	local s0
+	s0="$(cache_stat stores)"
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/truncate 2>/dev/null || true
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/truncate 2>/dev/null || true
+	eq "$(path_hits "$CACHE_HITS1" /truncate)" "2"
+	eq "$(($(cache_stat stores) - s0))" "0"
+}
+
+case_cache_max_body_streams_uncached() {
+	cache_hb
+	local s0 n i
+	s0="$(cache_stat stores)"
+	for i in 1 2 3; do
+		n="$(curl -sS --max-time 10 https://cachetest.ripdev.io/big | wc -c | tr -d ' ')"
+		eq "$n" "307200" # response intact
+	done
+	eq "$(path_hits "$CACHE_HITS1" /big)" "3"
+	eq "$(($(cache_stat stores) - s0))" "0"
+}
+
+case_cache_coalescing_stampede() {
+	cache_hb
+	local h0 c0 i
+	h0="$(cache_stat hits)"
+	c0="$(cache_stat coalesced)"
+	rm -f "$ROOT"/.test-cache-burst-*
+	for i in $(seq 1 32); do
+		curl -sS --max-time 15 -o "$ROOT/.test-cache-burst-$i" https://cachetest.ripdev.io/slow &
+	done
+	wait
+	# N concurrent cold misses → exactly 1 origin request.
+	eq "$(path_hits "$CACHE_HITS1" /slow)" "1"
+	for i in $(seq 1 32); do
+		eq "$(cat "$ROOT/.test-cache-burst-$i")" "slow-body"
+	done
+	# Every non-leader either coalesced onto the fill or hit the stored
+	# entry (late arrival) — 31 either way, zero at the worker.
+	eq "$((($(cache_stat hits) - h0) + ($(cache_stat coalesced) - c0)))" "31"
+	rm -f "$ROOT"/.test-cache-burst-*
+}
+
+case_cache_waiter_cap_overflow() {
+	cache_hb
+	local o0 i codes
+	o0="$(cache_stat waiter_overflow)"
+	rm -f "$ROOT/.test-cache-cap-codes"
+	for i in $(seq 1 80); do
+		curl -sS --max-time 20 -o /dev/null -w '%{http_code}\n' \
+			https://cachetest.ripdev.io/slower >>"$ROOT/.test-cache-cap-codes" &
+	done
+	wait
+	# Overflow (past 64 waiters) falls through to the worker — nobody
+	# gets a manufactured 503.
+	codes="$(sort -u "$ROOT/.test-cache-cap-codes" | tr -d ' ')"
+	eq "$codes" "200"
+	eq "$(wc -l <"$ROOT/.test-cache-cap-codes" | tr -d ' ')" "80"
+	ok "$(($(cache_stat waiter_overflow) - o0)) -ge 1" "no waiter_overflow counted"
+	ok "$(path_hits "$CACHE_HITS1" /slower) -ge $((80 - 65))" \
+		"fall-throughs never reached the worker: $(path_hits "$CACHE_HITS1" /slower)"
+	rm -f "$ROOT/.test-cache-cap-codes"
+}
+
+case_cache_fill_failure_falls_through() {
+	cache_hb
+	local i v
+	rm -f "$ROOT"/.test-cache-fail-*
+	for i in $(seq 1 8); do
+		curl -sS --max-time 15 -o "$ROOT/.test-cache-fail-$i" \
+			https://pages.ripdev.io/slowcookie &
+	done
+	wait
+	# Set-Cookie fill: the leader's response is never shared — every
+	# waiter fell through and reached the worker itself.
+	eq "$(path_hits "$CACHE_HITS1" /slowcookie)" "8"
+	for i in $(seq 1 8); do
+		eq "$(cat "$ROOT/.test-cache-fail-$i")" "personal"
+	done
+	# The key carries a do-not-coalesce mark for one ttl: the next burst
+	# bypasses without buffering (pages has debug on to prove it).
+	v="$(curl -sS --max-time 10 -o /dev/null -D - https://pages.ripdev.io/slowcookie |
+		tr -d '\r' | awk -F': ' 'tolower($1)=="x-janus-cache" {print $2}')"
+	eq "$v" "BYPASS"
+	rm -f "$ROOT"/.test-cache-fail-*
+}
+
+case_cache_purge_on_upstream_swap() {
+	cache_hb
+	local p0 body
+	p0="$(cache_stat purges)"
+	# Fill the cache on the current (cache1) upstream.
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/swap
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/swap
+	eq "$(path_hits "$CACHE_HITS1" /swap)" "2"
+	# Swap to the second fixture: the purge empties the app's keys.
+	capi PUT "/1.0/apps/$(cache_app_id)/upstreams" "{\"upstreams\":[{\"path\":\"$CACHE_SOCK2\"}]}"
+	eq "$REPLY_CODE" "200"
+	ok "$(($(cache_stat purges) - p0)) -ge 1" "purges counter not incremented"
+	# The immediate next request reaches the NEW worker.
+	body="$(curl -sS --max-time 10 https://cachetest.ripdev.io/swap)"
+	eq "$body" "plain:/swap"
+	eq "$(path_hits "$CACHE_HITS2" /swap)" "1"
+}
+
+case_cache_purge_race_fill_straddles_put() {
+	cache_hb
+	local f0 body
+	f0="$(cache_stat fenced_stores)"
+	# One priming sighting on a fresh key: the doorkeeper now admits the
+	# NEXT fill (nothing stored yet — a stored prime would turn the race
+	# request into a plain HIT), so only the fence can reject its store.
+	curl -sS --max-time 10 -o /dev/null 'https://cachetest.ripdev.io/slow?race=1'
+	# Start the slow fill (~500ms), then land a PUT mid-fill.
+	curl -sS --max-time 15 -o "$ROOT/.test-cache-race" 'https://cachetest.ripdev.io/slow?race=1' &
+	local fill_pid=$!
+	sleep 0.2
+	capi PUT "/1.0/apps/$(cache_app_id)/upstreams" "{\"upstreams\":[{\"path\":\"$CACHE_SOCK1\"}]}"
+	eq "$REPLY_CODE" "200"
+	wait "$fill_pid"
+	eq "$(cat "$ROOT/.test-cache-race")" "slow-body" # the leader still gets its bytes
+	eq "$(($(cache_stat fenced_stores) - f0))" "1"   # …but the store is fenced
+	# The next GET misses and fills from the new pool (cache1).
+	curl -sS --max-time 10 -o /dev/null 'https://cachetest.ripdev.io/slow?race=1'
+	eq "$(path_hits "$CACHE_HITS1" '/slow?race=1')" "1"
+	rm -f "$ROOT/.test-cache-race"
+}
+
+case_cache_host_reclaim() {
+	cache_hb
+	local body id2
+	# Fill app A's cache.
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/reclaim
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/reclaim
+	eq "$(path_hits "$CACHE_HITS1" /reclaim)" "2"
+	# DELETE A; re-claim the hosts as app B on the second fixture.
+	capi DELETE "/1.0/apps/$(cache_app_id)"
+	eq "$REPLY_CODE" "204"
+	capi POST /1.0/apps \
+		'{"name":"cacheb","hosts":["cachetest.ripdev.io","pages.ripdev.io","api.ripdev.io"]}'
+	eq "$REPLY_CODE" "201"
+	id2="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	printf '%s' "$id2" >"$CACHE_APP_FILE"
+	capi PUT "/1.0/apps/$id2/upstreams" "{\"upstreams\":[{\"path\":\"$CACHE_SOCK2\"}]}"
+	eq "$REPLY_CODE" "200"
+	# The immediate GET reaches B's worker — never A's cached body.
+	body="$(curl -sS --max-time 10 https://cachetest.ripdev.io/reclaim)"
+	eq "$body" "plain:/reclaim"
+	eq "$(path_hits "$CACHE_HITS2" /reclaim)" "1"
+}
+
+case_cache_ttl_expiry() {
+	cache_hb
+	# cachetest inherits ttl 1s: fill + hit, expire, refill.
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/ttl
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/ttl
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/ttl # HIT
+	eq "$(path_hits "$CACHE_HITS2" /ttl)" "2"
+	sleep 1.2
+	cache_hb
+	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/ttl
+	eq "$(path_hits "$CACHE_HITS2" /ttl)" "3"
+}
+
+case_cache_off_site() {
+	cache_hb
+	local i
+	for i in 1 2 3; do
+		curl -sS --max-time 10 -o /dev/null https://api.ripdev.io/offpage
+	done
+	# Explicit off beats inherited on: every request reaches the worker.
+	eq "$(path_hits "$CACHE_HITS2" /offpage)" "3"
+}
+
+case_cache_cascade_ttl_override() {
+	cache_hb
+	# pages overrides ttl to 5s: a 1.2s-old entry (dead on the 1s
+	# catchall, per the expiry case above) still HITs here.
+	curl -sS --max-time 10 -o /dev/null https://pages.ripdev.io/cascade
+	curl -sS --max-time 10 -o /dev/null https://pages.ripdev.io/cascade
+	eq "$(path_hits "$CACHE_HITS2" /cascade)" "2"
+	sleep 1.2
+	cache_hb
+	local v
+	v="$(curl -sS --max-time 10 -o /dev/null -D - https://pages.ripdev.io/cascade |
+		tr -d '\r' | awk -F': ' 'tolower($1)=="x-janus-cache" {print $2}')"
+	eq "$v" "HIT"
+	eq "$(path_hits "$CACHE_HITS2" /cascade)" "2"
+}
+
+case_cache_parse_rejections() {
+	local bad dir rc
+	dir="$(mktemp -d /tmp/janus-cache-parse.XXXXXX)"
+	local -a cases=(
+		'cache maybe'
+		'cache off { ttl 1s }'
+		'cache { bogus 1 }'
+		'cache { ttl }'
+		'cache { ttl zero }'
+		'cache { max_body 0 }'
+		'cache { max_app_share 200 }'
+		'cache { debug loudly }'
+		'cache { ttl 1s
+			ttl 2s }'
+	)
+	for bad in "${cases[@]}"; do
+		cat >"$dir/Caddyfile" <<EOF
+{
+	janus {
+		$bad
+	}
+}
+EOF
+		if "$CADDY_BIN" adapt --config "$dir/Caddyfile" >/dev/null 2>&1; then
+			echo "caddy adapt accepted illegal global config: $bad" >&2
+			rm -rf "$dir"
+			return 1
+		fi
+	done
+	# Site-level rejections: process-wide keys and blocks on off.
+	local -a site_cases=(
+		'cache { max_bytes 1mb }'
+		'cache { max_app_share 10 }'
+		'cache off { debug }'
+	)
+	for bad in "${site_cases[@]}"; do
+		cat >"$dir/Caddyfile" <<EOF
+site.example.com {
+	janus {
+		$bad
+	}
+}
+EOF
+		if "$CADDY_BIN" adapt --config "$dir/Caddyfile" >/dev/null 2>&1; then
+			echo "caddy adapt accepted illegal site config: $bad" >&2
+			rm -rf "$dir"
+			return 1
+		fi
+	done
+	rm -rf "$dir"
+}
+
 # --- cases: heartbeat --------------------------------------------------------
 #
 # The group restarts caddy with JANUS_HEARTBEAT_TTL=2s (sweep every ~666ms)
@@ -1165,6 +1731,33 @@ test "PUT upstreams [] → 503 + Retry-After" case_data_empty_upstreams_503
 test "doorbell ring → body delivered once, no redirect" case_data_doorbell_ring
 test "after ring: steady state on new upstream" case_data_after_ring_steady_state
 test "registered host still answers /ping" case_data_ping_still_answers
+
+group "cache"
+test "register app + fixture upstreams, /1.0/cache answers" case_cache_register
+test "hit serves without touching the worker (Age, debug header)" case_cache_hit_serves_without_worker
+test "Cookie bypasses (never serve, never store)" case_cache_cookie_bypass
+test "Authorization / Proxy-Authorization bypass" case_cache_auth_bypass
+test "POST bypasses" case_cache_post_bypass
+test "Set-Cookie never stored" case_cache_setcookie_never_stored
+test "no-store / private / unparseable CC / Expires vetoes" case_cache_origin_vetoes_respected
+test "Content-Encoding without Vary never stored; with Vary stores" case_cache_content_encoding
+test "ACAO echo never stored; static * stores" case_cache_acao
+test "Vary respected — variants coexist under one key" case_cache_vary_respected
+test "unbounded Vary never stored" case_cache_unbounded_vary_never_stored
+test "non-200 never stored" case_cache_non200_never_stored
+test "marked 503 never stored" case_cache_marked_503_never_stored
+test "truncated fill never stored" case_cache_truncated_fill_never_stored
+test "max_body exceeded streams uncached, intact" case_cache_max_body_streams_uncached
+test "coalescing: 32 concurrent cold misses → 1 origin request" case_cache_coalescing_stampede
+test "waiter cap overflow falls through (no manufactured 503)" case_cache_waiter_cap_overflow
+test "fill failure falls through + do-not-coalesce mark" case_cache_fill_failure_falls_through
+test "purge on upstream swap → next GET reaches the new worker" case_cache_purge_on_upstream_swap
+test "purge race: straddling fill fenced, nothing stored" case_cache_purge_race_fill_straddles_put
+test "host re-claim never serves the old tenant" case_cache_host_reclaim
+test "TTL expiry → worker again" case_cache_ttl_expiry
+test "cache off site: repeats always reach the worker" case_cache_off_site
+test "cascade: per-site ttl override observed" case_cache_cascade_ttl_override
+test "parse rejections: every hard error fails caddy adapt" case_cache_parse_rejections
 
 group "heartbeat"
 printf '%s\n' "$(paint "$DIM" "restarting caddy with JANUS_HEARTBEAT_TTL=2s …")"

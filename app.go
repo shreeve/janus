@@ -21,6 +21,11 @@ type App struct {
 	// nil = built-in default (off). Sites may override.
 	Ping *bool `json:"ping,omitempty"`
 
+	// Cache is the global default for the site-scoped cache capability
+	// (micro-cache + coalescing), plus the process-wide pool knobs
+	// (max_bytes, max_app_share). nil = built-in default (off).
+	Cache *CacheSettings `json:"cache,omitempty"`
+
 	logger      *zap.Logger
 	ctx         caddy.Context
 	controlSrvs []*controlServer
@@ -30,6 +35,10 @@ type App struct {
 
 	// dp routes admitted data-plane requests (host → upstream, ring).
 	dp *dataPlane
+
+	// cache is the one process-wide micro-cache pool. Always constructed
+	// (the /1.0/cache counters are always on); sites opt in via cascade.
+	cache *cacheStore
 }
 
 // CaddyModule returns the Caddy module information.
@@ -51,6 +60,9 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 	a.appsReg.ttl = ttl
 	a.dp = newDataPlane(a.appsReg, a.logger)
+	if err := a.provisionCacheStore(); err != nil {
+		return err
+	}
 	if len(a.Control) == 0 {
 		a.Control = []Control{{Mode: "internal"}}
 	}

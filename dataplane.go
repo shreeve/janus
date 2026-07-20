@@ -128,7 +128,13 @@ func (dp *dataPlane) serve(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
+	return dp.serveResolved(w, r, host, rec)
+}
 
+// serveResolved continues the decision table from an already-resolved
+// record (the cache resolves once and reuses the record; the ring loop
+// still re-resolves after every wake).
+func (dp *dataPlane) serveResolved(w http.ResponseWriter, r *http.Request, host string, rec AppRecord) error {
 	rings := 0
 	for {
 		if len(rec.Upstreams) == 0 {
@@ -146,6 +152,7 @@ func (dp *dataPlane) serve(w http.ResponseWriter, r *http.Request) error {
 		switch out.kind {
 		case ringWoke:
 			// 204 is empty and advisory; trust only our own registry.
+			var ok bool
 			rec, ok = dp.registry.resolveHost(host)
 			if !ok {
 				return caddyhttp.Error(http.StatusNotFound,
