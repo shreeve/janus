@@ -133,14 +133,20 @@ saves cold-cache stampedes).
 These came from the adversarial track; the first one caps throughput
 under load and contradicts the protocol as implemented:
 
-1. **Busy-503 health poisoning (protocol bug).** Janus passive health
-   marks an upstream unhealthy on any 5xx — but at `c:1` a worker's
-   NORMAL "second request while busy" answer is a 503. A modest burst
-   can mark every healthy worker unhealthy and blackhole the app.
-   Fix: worker 503s carrying `Rip-Worker-Busy` / `Rip-Worker-Draining`
-   markers are excluded from health accounting and mean "try the next
-   upstream now." Needs: protocol doc update + Janus dataplane change
-   + worker header.
+1. **Busy-503 bounces (fixed 2026-07-19).** At `c:1` a worker's NORMAL
+   "second request while busy" answer is a 503. Correction to the
+   original finding: Janus passive health never counted response 5xx
+   toward health (only failed dials and post-dial transport failures),
+   so the predicted health-poisoning blackhole could not occur — but
+   every busy bounce was forwarded to the client as a raw 503, which
+   under a burst is most responses (measured: w:8/conc:64 on a 5ms
+   handler = 993,997 client-visible 503s in 15s). Shipped fix: worker
+   503s carry `Rip-Worker-Busy: 1` (drain: `Rip-Worker-Draining: 1`);
+   Janus excludes marked 503s from health accounting and immediately
+   tries the next upstream for replayable requests (no body streamed).
+   All-workers-busy still answers 503 + `Retry-After`, silently —
+   capacity, not failure. See the pool protocol "Data plane decision
+   table" and "Measured results" below.
 2. **Boot storm vs the 15s ring hold.** `w` simultaneous cold boots
    contend for cores; a heavy app can push first-readiness past the
    hold cap. Mitigation: prebuild-once (#3) mostly dissolves this;

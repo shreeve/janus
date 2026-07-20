@@ -247,6 +247,117 @@ func TestDataPlane502WhenWorkerMisbehavesAfterDial(t *testing.T) {
 	}
 }
 
+// --- marked 503s (worker busy / draining) --------------------------------------
+
+// busyUpstream answers every request 503 + Rip-Worker-Busy, like a c:1
+// worker at capacity.
+func busyUpstream(hits *atomic.Int32) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits != nil {
+			hits.Add(1)
+		}
+		w.Header().Set(workerBusyHeader, "1")
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("busy"))
+	})
+}
+
+func TestMarkedBusy503TriesNextUpstream(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	var bounces atomic.Int32
+	busy := startUnixHTTP(t, busyUpstream(&bounces))
+	free := startUnixHTTP(t, echoUpstream("w2", nil))
+	registerApp(t, reg, "app.test", Upstream{Path: busy}, Upstream{Path: free})
+
+	// Bias least_conn toward the busy worker so the bounce path runs.
+	dp.state[free] = &upstreamState{inflight: 1}
+
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK || rr.Body.String() != "upstream:w2" {
+		t.Fatalf("want 200 upstream:w2 via retry, got %d %q", rr.Code, rr.Body.String())
+	}
+	if bounces.Load() != 1 {
+		t.Fatalf("want exactly one bounce off the busy worker, got %d", bounces.Load())
+	}
+	// The marked 503 never counts toward health.
+	dp.mu.Lock()
+	st := dp.state[busy]
+	dp.mu.Unlock()
+	if st != nil && time.Now().Before(st.unhealthyUntil) {
+		t.Fatal("marked busy 503 poisoned the worker's health")
+	}
+}
+
+func TestAllWorkersBusy503RetryAfter(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	b1 := startUnixHTTP(t, busyUpstream(nil))
+	b2 := startUnixHTTP(t, busyUpstream(nil))
+	registerApp(t, reg, "app.test", Upstream{Path: b1}, Upstream{Path: b2})
+
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 when every worker is busy, got %d", rr.Code)
+	}
+	if rr.Header().Get("Retry-After") != retryAfter {
+		t.Fatalf("want Retry-After %q, got %q", retryAfter, rr.Header().Get("Retry-After"))
+	}
+	// Busy workers stay healthy: the next request tries them again.
+	for _, p := range []string{b1, b2} {
+		dp.mu.Lock()
+		st := dp.state[p]
+		dp.mu.Unlock()
+		if st != nil && time.Now().Before(st.unhealthyUntil) {
+			t.Fatalf("busy bounce marked %s unhealthy", p)
+		}
+	}
+}
+
+func TestMarkedBusy503WithBodyForwardsToClient(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	busy := startUnixHTTP(t, busyUpstream(nil))
+	registerApp(t, reg, "app.test", Upstream{Path: busy})
+
+	// A request whose body was already streamed must not be replayed; the
+	// bounce goes to the client with the internal markers stripped.
+	rr, err := doServe(dp, "POST", "app.test", "/submit", "payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want the 503 forwarded, got %d", rr.Code)
+	}
+	if rr.Header().Get(workerBusyHeader) != "" || rr.Header().Get(workerDrainingHeader) != "" {
+		t.Fatal("internal marker headers leaked to the client")
+	}
+}
+
+func TestUnmarked503PassesThrough(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	app503 := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("app-level 503"))
+	}))
+	other := startUnixHTTP(t, echoUpstream("w2", nil))
+	registerApp(t, reg, "app.test", Upstream{Path: app503}, Upstream{Path: other})
+	dp.state[other] = &upstreamState{inflight: 1} // bias selection to app503
+
+	// An application 503 without the marker is a real response — no retry.
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusServiceUnavailable || rr.Body.String() != "app-level 503" {
+		t.Fatalf("want the app's own 503 verbatim, got %d %q", rr.Code, rr.Body.String())
+	}
+}
+
 func TestAcquireUpstreamLeastConn(t *testing.T) {
 	dp, _ := newTestDataPlane(t)
 	ups := []Upstream{{Path: "a"}, {Path: "b"}}

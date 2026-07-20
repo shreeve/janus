@@ -188,6 +188,33 @@ type dialError struct {
 func (e *dialError) Error() string { return fmt.Sprintf("dial %s: %v", e.path, e.err) }
 func (e *dialError) Unwrap() error { return e.err }
 
+// Worker-marked 503s (docs/20260719-002000-pool-protocol.md "Passive
+// health"): a worker at its concurrency cap answers 503 with
+// Rip-Worker-Busy: 1 (drains: Rip-Worker-Draining: 1). Those are protocol
+// flow control, not failures — they never count toward health, and when the
+// request is replayable (no body was sent) Janus immediately tries the next
+// upstream instead of forwarding the bounce to the client.
+const (
+	workerBusyHeader     = "Rip-Worker-Busy"
+	workerDrainingHeader = "Rip-Worker-Draining"
+)
+
+// errWorkerMarked503 aborts a proxy attempt on a marked 503 so the retry
+// loop can select another upstream. Only raised for replayable requests.
+var errWorkerMarked503 = errors.New("worker answered a marked 503")
+
+func marked503(resp *http.Response) bool {
+	return resp.StatusCode == http.StatusServiceUnavailable &&
+		(resp.Header.Get(workerBusyHeader) != "" || resp.Header.Get(workerDrainingHeader) != "")
+}
+
+// replayable reports whether the request can be safely delivered to another
+// upstream after an attempt that received a response: with no body to
+// stream (and none chunked), nothing was consumed that a retry would need.
+func replayable(r *http.Request) bool {
+	return r.ContentLength == 0 && len(r.TransferEncoding) == 0
+}
+
 // sockHost encodes a socket path as a synthetic URL host so one shared
 // transport pools connections per socket.
 func sockHost(path string) string { return hex.EncodeToString([]byte(path)) }
@@ -216,15 +243,28 @@ func (dp *dataPlane) dialUpstream(ctx context.Context, _, addr string) (net.Conn
 // succeeded followed by a misbehaving worker.
 func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, rec AppRecord) error {
 	tried := map[string]bool{}
+	sawBusy := false
 	for {
 		path, ok := dp.acquireUpstream(rec.Upstreams, tried)
 		if !ok {
+			if sawBusy {
+				// Every upstream bounced a marked 503 — capacity, not
+				// failure. Answer 503 + Retry-After without the health
+				// warning (and without the per-request log: under a burst
+				// this is the common path).
+				w.Header().Set("Retry-After", retryAfter)
+				w.Header().Set("Cache-Control", "no-store")
+				http.Error(w, "all workers busy", http.StatusServiceUnavailable)
+				return nil
+			}
 			return dp.unavailable(w, rec.ID, "all upstreams unhealthy")
 		}
 		tried[path] = true
-		if dp.proxyOnce(w, r, path) {
+		final, busy := dp.proxyOnce(w, r, path)
+		if final {
 			return nil
 		}
+		sawBusy = sawBusy || busy
 	}
 }
 
@@ -290,18 +330,21 @@ func (dp *dataPlane) markUnhealthy(path string) {
 	st.unhealthyUntil = time.Now().Add(dp.unhealthyWindow)
 }
 
-// proxyOnce streams the request to one worker socket. It returns true when
-// the attempt is final (response written, or client gone) and false when the
-// dial failed and another upstream may be tried.
+// proxyOnce streams the request to one worker socket. It returns final=true
+// when the attempt concluded the request (response written, or client gone)
+// and final=false when another upstream may be tried — either the dial
+// failed (body untouched) or a replayable request received a marked busy /
+// draining 503 (busy=true; never a health event).
 //
 // The proxy is a focused net/http/httputil.ReverseProxy over a unix-dialing
 // transport rather than Caddy's reverseproxy module: that module is built to
 // be provisioned cold with its own upstream/health state, while Janus selects
 // upstreams per request from the hot registry. ReverseProxy still gives us
 // streaming in both directions, flush-on-stream, trailers, and upgrades.
-func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path string) bool {
+func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path string) (final, busy bool) {
 	defer dp.releaseUpstream(path)
 
+	canReplay := replayable(r)
 	var rpErr error
 	rp := &httputil.ReverseProxy{
 		Transport: dp.transport,
@@ -310,6 +353,22 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 			pr.Out.URL.Host = sockHost(path)
 			pr.Out.Host = pr.In.Host
 			pr.SetXForwarded()
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if !marked503(resp) {
+				return nil
+			}
+			if canReplay {
+				// Abort this attempt (routed to ErrorHandler; the proxy
+				// closes the response body) so the retry loop delivers
+				// the request to another upstream.
+				return errWorkerMarked503
+			}
+			// A body was already streamed to the worker; the bounce must
+			// go to the client. Strip the internal marker headers.
+			resp.Header.Del(workerBusyHeader)
+			resp.Header.Del(workerDrainingHeader)
+			return nil
 		},
 		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, err error) { rpErr = err },
 		ErrorLog:     zap.NewStdLog(dp.logger),
@@ -327,10 +386,14 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	}
 	rp.ServeHTTP(w, attempt)
 	if rpErr == nil {
-		return true
+		return true, false
+	}
+	if errors.Is(rpErr, errWorkerMarked503) {
+		// Marked 503: flow control, not failure — no health accounting.
+		return false, true
 	}
 	if r.Context().Err() != nil {
-		return true // client gone; nothing to write, nothing to blame
+		return true, false // client gone; nothing to write, nothing to blame
 	}
 
 	var de *dialError
@@ -340,7 +403,7 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 			zap.String("upstream", path),
 			zap.Error(rpErr),
 		)
-		return false
+		return false, false
 	}
 
 	// Dial succeeded and the worker misbehaved before a response landed.
@@ -351,5 +414,5 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, "bad gateway", http.StatusBadGateway)
-	return true
+	return true, false
 }
