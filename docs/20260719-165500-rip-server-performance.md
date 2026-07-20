@@ -49,7 +49,7 @@ throttle.
 | 2 | Janus micro-cache + request coalescing (anonymous GETs) | 10–100x on cacheable pages | Medium-high (correctness) | Measure-first, then build as a capability |
 | 3 | Manager prebuilds app once per dirty epoch; workers boot artifact (+`--bytecode`) | Reload/boot 2–4x; RSS drops | Low-medium | **Ship now** |
 | 4 | DSL fast path (context allocation, route buckets) | 1.3–2x per worker ping-class | Medium | Measure-first (profile, then cut) |
-| 5 | `ReverseProxy.BufferPool` + proxy-struct reuse + idle conns scaled with `c` | 5–15% of Janus CPU | Trivial (~20 lines) | **Ship now** |
+| 5 | `ReverseProxy.BufferPool` + proxy-struct reuse + idle conns scaled with `c` | 5–15% of Janus CPU | Trivial (~20 lines) | **Shipped 2026-07-19** — measured +20–37% RPS (see Measured results), far above the estimate |
 | 6 | Static file bypass at Janus (registration declares static roots) | Large for asset-heavy tenants; zero for APIs | Medium (protocol extension) | Later (need a real tenant) |
 | 7 | GOMAXPROCS split / core pinning (Janus 2–4 procs, workers own the rest) | 5–15%, mostly tail latency | Low | Measure-first |
 | 8 | Hand-rolled UDS proxy replacing httputil.ReverseProxy | 20–40% of the Go-side share only | High (streaming/trailers/upgrades correctness) | Later |
@@ -89,17 +89,21 @@ the compiler's retained heap (parser tables) leaves all workers.
 Zero protocol changes. Composes with scrap-at-publish: a dirty epoch
 rebuilds one artifact, then spawns against it.
 
-### 5. Trivial Janus proxy tuning
+### 5. Trivial Janus proxy tuning (shipped 2026-07-19)
 
-- Set `ReverseProxy.BufferPool` (sync.Pool of 32KB buffers) — today
-  every response copy allocates.
-- Stop constructing a `ReverseProxy` struct per proxy attempt — build
-  one per socket path or pool them (only the Rewrite closure is
-  per-request).
-- Scale `MaxIdleConnsPerHost` with `c` (32 is right for c:1; at c:16
-  under load it churns connections).
+- `ReverseProxy.BufferPool` (sync.Pool of 32KB buffers) — shipped;
+  previously every response copy allocated.
+- One `ReverseProxy` per socket path, built lazily and reused — shipped;
+  per-attempt state (retryability, the attempt's error) moved to a
+  context value so the structs carry no per-request state.
+- `MaxIdleConnsPerHost` stays 32 — right for c:1, which is the only
+  shipped `c`; scale it alongside a future `c` raise.
 - TLS session resumption is on by default in Go/Caddy — verify with
   `openssl s_client -reconnect`, expect no work needed.
+
+Measured effect (M5, interleaved A/B, ping-class, HTTPS full stack):
++14–20% at conc=w, +37% at conc:64 (w:2 conc:64 49.6k → 68.2k RPS;
+w:8 conc:64 50.9k → 69.9k). See Measured results.
 
 ### 4. DSL fast path — profile first, then cut
 
@@ -206,6 +210,98 @@ stress phase:
   the change; construction cost counts (e.g. prebuild time added to
   reload latency must be measured, not assumed).
 - fd budget: `ulimit -n` 65k+ before high-RPS runs.
+
+## Measured results (2026-07-19)
+
+Phase 8 stress run. Machine: Apple M5, 10 cores, 32GB, macOS Darwin 25.
+Bun 1.3.14, Go 1.26.5, Caddy v2.11.4, oha 1.14.0. `ulimit -n` 65536 on
+Janus, the manager, and the bench shell. Full stack over HTTPS with
+keep-alive: oha → Janus (TLS, `*.ripdev.io` certs) → UDS → Bun worker,
+ping-class DSL route returning `{"ok":true}`. Watch OFF
+(`RIP_ENV=production`), `c:1`, 15s runs, first warmup run discarded.
+p50/p99 from oha's latency percentiles; `conc` is client concurrency.
+
+**The 20k RPS target is comfortably exceeded**: every configuration at
+conc ≥ 16 measured ≥ 47k RPS end to end, and w:2 needs only conc:2 to
+clear 20k when the machine is cool.
+
+### w sweep at c:1 (pre-fix baseline, all-200 runs)
+
+| w | conc=w RPS | p50 | p99 | conc:64 RPS | p50 | p99 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 23,948 | 0.07ms | 0.26ms | 71,804 | 0.67ms | 3.06ms |
+| 4 | 33,419 | 0.10ms | 0.33ms | 61,025 | 0.78ms | 3.74ms |
+| 8 | 48,359 | 0.14ms | 0.48ms | 64,762 | 0.74ms | 3.48ms |
+| 16 | 59,773 | 0.21ms | 0.88ms | 64,057 | 0.76ms | 3.36ms |
+| 32 | 54,310 | 0.45ms | 2.09ms | 56,801 | 0.88ms | 3.62ms |
+
+The knee at matched concurrency is w:16 (w:32 loses to spawn overhead
+and scheduler pressure at 10 cores). Under conc:64 the curve is nearly
+flat across w — the bottleneck at high concurrency is Janus-side
+per-request cost, not worker count (see attribution), which is why the
+proxy tuning below moved the number and more workers did not.
+
+### Attribution: Janus vs direct UDS (w:2 pool, one worker socket)
+
+| Path | conc | RPS | p50 | p99 |
+| --- | --- | --- | --- | --- |
+| oha → worker UDS directly | 1 | 67,060 | 0.01ms | 0.03ms |
+| oha → worker UDS directly | 2 | 105,601 | 0.02ms | 0.04ms |
+| oha → Janus (TLS) → UDS | 1 | 16,471 | 0.05ms | 0.19ms |
+
+A worker answers in ~15µs; the same request through Janus takes ~60µs —
+Janus (TLS + proxy + routing) is ~75% of per-request latency on this
+route, so Janus-side cost dominates and the §5 tunings were justified.
+
+### Busy-503 fix, before/after (interleaved A/B, same thermal state)
+
+5ms-sleep handler (`/io`), w:8, c:1, conc:64, 15s:
+
+| | 200s (15s) | client 503s (15s) | p50 | p99 |
+| --- | --- | --- | --- | --- |
+| before | 22,609 | 758,206 | 0.84ms | 6.66ms |
+| after | 22,949 | 119,002 | 6.40ms | 13.70ms |
+
+Real work is capacity-bound (w × 1/5ms ≈ 1,600/s) and unchanged; the
+fix cuts client-visible 503s 6.4x. Each remaining 503 now means all 8
+workers were genuinely busy after Janus tried every one — before, it
+meant least_conn's single pick happened to be busy. p50/p99 rise
+because requests now find capacity instead of failing fast.
+
+### Proxy tuning (§5), before/after (interleaved A/B, ping-class)
+
+| Config | before RPS | after RPS | Δ |
+| --- | --- | --- | --- |
+| w:2 conc:2 | 13,848 | 15,825 | +14% |
+| w:2 conc:64 | 49,630 | 68,174 | +37% |
+| w:8 conc:8 | 36,566 | 43,778 | +20% |
+| w:8 conc:64 | 50,856 | 69,883 | +37% |
+
+Peak observed on a cool machine after both changes: **98,702 RPS**
+(w:2, conc:64, p50 0.49ms, p99 2.78ms, zero non-200s). Sustained
+thermal state costs ~30% on this fanless-class silicon; the A/B tables
+above are interleaved runs at matched temperature and are the honest
+comparison. Run-to-run variance on absolute numbers is large (w:2
+conc:2 measured 13.8k–30.6k across the day); ratios were stable.
+
+### Informational: one c:8 sweep on the 5ms handler (w:8, conc:64)
+
+| c | 200s/s | client 503s (15s) | p99 |
+| --- | --- | --- | --- |
+| 1 | ~1,530 | 119,002 | 13.7ms |
+| 8 | 6,083 | 0 | 114ms |
+
+Raising `c` to 8 on the I/O-bound route delivered ~4x real throughput
+and eliminated 503s entirely (capacity w×c = 64 = conc), confirming
+lever #1's headroom. Run with a temporary local worker edit; the
+shipped worker stays c:1 pending the protocol's opt-in knob.
+
+### Next-best lever
+
+Lever #1 (raise `c` for I/O-bound apps, watch off) — the measured 4x
+with zero code risk beyond the knob itself. After that, lever #4 (DSL
+fast path) is what stands between the ~15µs worker answer and the
+~200k/s hello-world ceiling.
 
 ## Pointers
 

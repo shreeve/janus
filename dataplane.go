@@ -69,10 +69,25 @@ type dataPlane struct {
 	// own per-host pooling applies and idle conns expire normally).
 	transport *http.Transport
 
+	// buffers is the ReverseProxy copy-buffer pool (32KB, matching the
+	// proxy's own default size) — without it every response copy allocates.
+	buffers *bufferPool
+
 	mu      sync.Mutex
-	state   map[string]*upstreamState // socket path → health + inflight
-	flights map[string]*ringFlight    // app id → the one outstanding ring
+	state   map[string]*upstreamState         // socket path → health + inflight
+	flights map[string]*ringFlight            // app id → the one outstanding ring
+	proxies map[string]*httputil.ReverseProxy // socket path → reusable proxy
 }
+
+// bufferPool adapts sync.Pool to httputil.BufferPool.
+type bufferPool struct{ p sync.Pool }
+
+func newBufferPool() *bufferPool {
+	return &bufferPool{p: sync.Pool{New: func() any { return make([]byte, 32<<10) }}}
+}
+
+func (b *bufferPool) Get() []byte    { return b.p.Get().([]byte) }
+func (b *bufferPool) Put(buf []byte) { b.p.Put(buf) }
 
 func newDataPlane(reg *appRegistry, logger *zap.Logger) *dataPlane {
 	if logger == nil {
@@ -85,8 +100,10 @@ func newDataPlane(reg *appRegistry, logger *zap.Logger) *dataPlane {
 		waiterCap:       defaultWaiterCap,
 		maxRings:        defaultMaxRings,
 		unhealthyWindow: defaultUnhealthyWindow,
+		buffers:         newBufferPool(),
 		state:           map[string]*upstreamState{},
 		flights:         map[string]*ringFlight{},
+		proxies:         map[string]*httputil.ReverseProxy{},
 	}
 	dp.transport = &http.Transport{
 		DialContext:         dp.dialUpstream,
@@ -330,27 +347,42 @@ func (dp *dataPlane) markUnhealthy(path string) {
 	st.unhealthyUntil = time.Now().Add(dp.unhealthyWindow)
 }
 
-// proxyOnce streams the request to one worker socket. It returns final=true
-// when the attempt concluded the request (response written, or client gone)
-// and final=false when another upstream may be tried — either the dial
-// failed (body untouched) or a replayable request received a marked busy /
-// draining 503 (busy=true; never a health event).
+// attemptState is one proxy attempt's per-request state, carried on the
+// outbound request context so per-socket ReverseProxy structs are reusable.
+type attemptState struct {
+	canReplay bool
+	err       error
+}
+
+type attemptKey struct{}
+
+func attemptOf(ctx context.Context) *attemptState {
+	st, _ := ctx.Value(attemptKey{}).(*attemptState)
+	return st
+}
+
+// proxyFor returns the reusable ReverseProxy for one socket path. The struct
+// carries no per-request state (that lives in attemptState), so one instance
+// serves every request to that socket.
 //
 // The proxy is a focused net/http/httputil.ReverseProxy over a unix-dialing
 // transport rather than Caddy's reverseproxy module: that module is built to
 // be provisioned cold with its own upstream/health state, while Janus selects
 // upstreams per request from the hot registry. ReverseProxy still gives us
 // streaming in both directions, flush-on-stream, trailers, and upgrades.
-func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path string) (final, busy bool) {
-	defer dp.releaseUpstream(path)
-
-	canReplay := replayable(r)
-	var rpErr error
+func (dp *dataPlane) proxyFor(path string) *httputil.ReverseProxy {
+	dp.mu.Lock()
+	defer dp.mu.Unlock()
+	if rp := dp.proxies[path]; rp != nil {
+		return rp
+	}
+	host := sockHost(path)
 	rp := &httputil.ReverseProxy{
-		Transport: dp.transport,
+		Transport:  dp.transport,
+		BufferPool: dp.buffers,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
-			pr.Out.URL.Host = sockHost(path)
+			pr.Out.URL.Host = host
 			pr.Out.Host = pr.In.Host
 			pr.SetXForwarded()
 		},
@@ -358,7 +390,7 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 			if !marked503(resp) {
 				return nil
 			}
-			if canReplay {
+			if st := attemptOf(resp.Request.Context()); st != nil && st.canReplay {
 				// Abort this attempt (routed to ErrorHandler; the proxy
 				// closes the response body) so the retry loop delivers
 				// the request to another upstream.
@@ -370,25 +402,40 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 			resp.Header.Del(workerDrainingHeader)
 			return nil
 		},
-		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, err error) { rpErr = err },
-		ErrorLog:     zap.NewStdLog(dp.logger),
+		ErrorHandler: func(_ http.ResponseWriter, r *http.Request, err error) {
+			if st := attemptOf(r.Context()); st != nil {
+				st.err = err
+			}
+		},
+		ErrorLog: zap.NewStdLog(dp.logger),
 	}
+	dp.proxies[path] = rp
+	return rp
+}
+
+// proxyOnce streams the request to one worker socket. It returns final=true
+// when the attempt concluded the request (response written, or client gone)
+// and final=false when another upstream may be tried — either the dial
+// failed (body untouched) or a replayable request received a marked busy /
+// draining 503 (busy=true; never a health event).
+func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path string) (final, busy bool) {
+	defer dp.releaseUpstream(path)
+
+	st := &attemptState{canReplay: replayable(r)}
 
 	// The transport closes the outbound body even when the dial fails; hand
 	// it a wrapper so the client's body (guaranteed unread on a dial error)
 	// survives for a retry on another upstream. The server closes the real
 	// body itself after the handler returns.
-	attempt := r
+	attempt := r.WithContext(context.WithValue(r.Context(), attemptKey{}, st))
 	if r.Body != nil {
-		ar := *r
-		ar.Body = io.NopCloser(r.Body)
-		attempt = &ar
+		attempt.Body = io.NopCloser(r.Body)
 	}
-	rp.ServeHTTP(w, attempt)
-	if rpErr == nil {
+	dp.proxyFor(path).ServeHTTP(w, attempt)
+	if st.err == nil {
 		return true, false
 	}
-	if errors.Is(rpErr, errWorkerMarked503) {
+	if errors.Is(st.err, errWorkerMarked503) {
 		// Marked 503: flow control, not failure — no health accounting.
 		return false, true
 	}
@@ -397,11 +444,11 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	}
 
 	var de *dialError
-	if errors.As(rpErr, &de) {
+	if errors.As(st.err, &de) {
 		dp.markUnhealthy(path)
 		dp.logger.Warn("janus upstream dial failed",
 			zap.String("upstream", path),
-			zap.Error(rpErr),
+			zap.Error(st.err),
 		)
 		return false, false
 	}
@@ -410,7 +457,7 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	dp.markUnhealthy(path)
 	dp.logger.Warn("janus upstream failed after dial",
 		zap.String("upstream", path),
-		zap.Error(rpErr),
+		zap.Error(st.err),
 	)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, "bad gateway", http.StatusBadGateway)
