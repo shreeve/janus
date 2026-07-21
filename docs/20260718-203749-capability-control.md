@@ -50,7 +50,9 @@ Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` +
 
 - **local** host must be loopback (`127.0.0.1`, `::1`, or `localhost`).
 - **public** must be `https://` (never bare `http://`).
-- **public** TLS uses `certs/ripdev.io.{crt,key}` (same material as the data-plane demo).
+- TLS listeners (public, or an `https://` local) serve `cert:…`/`key:…`
+  when given, else the committed dev pair `certs/ripdev.io.{crt,key}`
+  (same material as the data-plane demo; see `certs/README.md`).
 
 ## Syntax
 
@@ -66,6 +68,7 @@ Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` +
 		# control local http://127.0.0.1:7600/ token:JANUS_TOKEN
 		# control public token:JANUS_TOKEN
 		# control public https://0.0.0.0:7601/ token:./secrets/janus.auth
+		# control public token:JANUS_TOKEN cert:/etc/janus/tls.crt key:/etc/janus/tls.key
 	}
 }
 
@@ -88,6 +91,7 @@ control public
 control public <https://host:port[/path]>
 control public … token:ENV
 control public … token:./path/to/file
+control public … token:ENV cert:/path/tls.crt key:/path/tls.key
 ```
 
 ### `token:…` rules
@@ -99,6 +103,15 @@ control public … token:./path/to/file
 | `"token:…"` (entire arg quoted) | Literal secret — **not allowed on `public`** |
 
 Prefer env names without `$` (avoids clashing with Caddy `{$VAR}` expansion). Auth is HTTP `Authorization: Bearer <secret>` when a token is configured.
+
+### `cert:…` / `key:…` rules
+
+| Form | Meaning |
+| --- | --- |
+| `cert:<path>` | TLS certificate file for this listener |
+| `key:<path>` | TLS private key file for this listener |
+
+Both or neither — one without the other is a hard parse error. Only meaningful on a TLS listener (`public`, or a `local` with an `https://` listen); a plain-HTTP or unix listener rejects them loudly. Unset, a TLS listener uses the committed dev pair `certs/ripdev.io.{crt,key}` (see `certs/README.md`). The pair loads at Start — a missing or unreadable file refuses the config.
 
 ### Defaults
 
@@ -121,6 +134,8 @@ Port **7601** for public avoids clashing with local **7600**.
 - `control public` with a quoted literal token
 - `control public` with `http://` (https required)
 - Unset/empty env or empty token file at provision time
+- `cert:…` without `key:…` (or the reverse), an empty `cert:`/`key:` value, or a duplicate of either on one line
+- `cert:…`/`key:…` on a non-TLS listener (`internal`, or `local` over plain `http://`)
 - Site-level `janus { control … }` (control is global only)
 
 ## API surface (served today)

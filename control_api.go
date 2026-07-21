@@ -38,8 +38,14 @@ func (a *App) startControlListeners() error {
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		if c.useTLS {
-			certFile := "certs/ripdev.io.crt"
-			keyFile := "certs/ripdev.io.key"
+			// Defaults are the committed dev pair (see certs/README.md);
+			// operators point cert:…/key:… at their own material.
+			certFile := c.CertFile
+			keyFile := c.KeyFile
+			if certFile == "" {
+				certFile = "certs/ripdev.io.crt"
+				keyFile = "certs/ripdev.io.key"
+			}
 			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 			if err != nil {
 				return fmt.Errorf("control %s tls: %w (need %s / %s)", c.Mode, err, certFile, keyFile)

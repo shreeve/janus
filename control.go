@@ -37,6 +37,13 @@ type Control struct {
 	// TokenKind is env, file, or literal.
 	TokenKind string `json:"token_kind,omitempty"`
 
+	// CertFile and KeyFile are the TLS certificate/key paths from the
+	// cert:… and key:… arguments. Both or neither; only meaningful on a
+	// TLS listener (public mode or an https:// listen). Unset, a TLS
+	// listener uses the committed dev pair certs/ripdev.io.{crt,key}.
+	CertFile string `json:"cert_file,omitempty"`
+	KeyFile  string `json:"key_file,omitempty"`
+
 	// Everything below is derived at Provision, never configured.
 
 	// basePath is the URL path prefix for the control API (local/public).
@@ -150,6 +157,13 @@ func (c *Control) normalize() error {
 		}
 	default:
 		return fmt.Errorf("unknown control mode %q (want internal, local, or public)", c.Mode)
+	}
+
+	if (c.CertFile != "") != (c.KeyFile != "") {
+		return fmt.Errorf("control %s: cert:… and key:… must be given together", c.Mode)
+	}
+	if c.CertFile != "" && !c.useTLS {
+		return fmt.Errorf("control %s: cert:…/key:… are only meaningful on a TLS listener (public mode or an https:// listen)", c.Mode)
 	}
 
 	if c.TokenKind != "" {

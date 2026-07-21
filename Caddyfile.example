@@ -59,10 +59,14 @@
 		# stripped); "token:literal" (whole argument quoted) is a
 		# literal, never legal on public. public requires https:// and
 		# token:…, and the secret resolves at provision — export or
-		# create it before starting, or the config refuses to load:
+		# create it before starting, or the config refuses to load.
+		# TLS material, per listener: cert:<path> key:<path> (both or
+		# neither; TLS listeners only) — unset, the committed dev pair
+		# certs/ripdev.io.{crt,key} serves (see certs/README.md):
 		#
 		#	control public token:JANUS_TOKEN
 		#	control public https://0.0.0.0:7601/ token:/etc/janus/control.token
+		#	control public token:JANUS_TOKEN cert:/etc/janus/tls.crt key:/etc/janus/tls.key
 		#	control local http://127.0.0.1:7600/ token:JANUS_TOKEN
 
 		# 3) cache — micro-cache + request coalescing. Site-scoped and

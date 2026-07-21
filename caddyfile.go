@@ -108,6 +108,7 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 //	control public
 //	control public https://0.0.0.0:7601/ token:JANUS_TOKEN
 //	control public token:./secrets/janus.auth
+//	control public token:JANUS_TOKEN cert:/etc/janus/tls.crt key:/etc/janus/tls.key
 func parseControl(d *caddyfile.Dispenser) (Control, error) {
 	var c Control
 	if !d.NextArg() {
@@ -134,6 +135,28 @@ func parseControl(d *caddyfile.Dispenser) (Control, error) {
 			}
 			c.TokenKind = kind
 			c.Token = ref
+			continue
+		}
+		if strings.HasPrefix(val, "cert:") {
+			path := strings.TrimPrefix(val, "cert:")
+			if path == "" {
+				return c, d.Err("cert: value is empty")
+			}
+			if c.CertFile != "" {
+				return c, d.Err("control line has more than one cert:…")
+			}
+			c.CertFile = path
+			continue
+		}
+		if strings.HasPrefix(val, "key:") {
+			path := strings.TrimPrefix(val, "key:")
+			if path == "" {
+				return c, d.Err("key: value is empty")
+			}
+			if c.KeyFile != "" {
+				return c, d.Err("control line has more than one key:…")
+			}
+			c.KeyFile = path
 			continue
 		}
 		if c.Listen != "" {

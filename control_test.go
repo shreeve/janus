@@ -117,6 +117,46 @@ func TestControlNormalizePublic(t *testing.T) {
 	}
 }
 
+func TestControlNormalizeCertKey(t *testing.T) {
+	t.Setenv("JANUS_PUB", "secret")
+
+	// Both on a TLS listener: accepted, carried through to Start.
+	c := Control{Mode: "public", TokenKind: tokenEnv, Token: "JANUS_PUB",
+		CertFile: "/etc/janus/tls.crt", KeyFile: "/etc/janus/tls.key"}
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.CertFile != "/etc/janus/tls.crt" || c.KeyFile != "/etc/janus/tls.key" {
+		t.Fatalf("cert/key mangled: %+v", c)
+	}
+
+	// One without the other is a hard error, in both directions.
+	c = Control{Mode: "public", TokenKind: tokenEnv, Token: "JANUS_PUB", CertFile: "/etc/janus/tls.crt"}
+	if err := c.normalize(); err == nil {
+		t.Fatal("cert without key: want error")
+	}
+	c = Control{Mode: "public", TokenKind: tokenEnv, Token: "JANUS_PUB", KeyFile: "/etc/janus/tls.key"}
+	if err := c.normalize(); err == nil {
+		t.Fatal("key without cert: want error")
+	}
+
+	// Only meaningful with TLS: plain-HTTP local and internal reject loudly.
+	c = Control{Mode: "local", CertFile: "/x.crt", KeyFile: "/x.key"}
+	if err := c.normalize(); err == nil {
+		t.Fatal("cert/key on plain-http local: want error")
+	}
+	c = Control{Mode: "internal", CertFile: "/x.crt", KeyFile: "/x.key"}
+	if err := c.normalize(); err == nil {
+		t.Fatal("cert/key on internal: want error")
+	}
+
+	// An https:// local listener is TLS: cert/key are legal there.
+	c = Control{Mode: "local", Listen: "https://127.0.0.1:7600/", CertFile: "/x.crt", KeyFile: "/x.key"}
+	if err := c.normalize(); err != nil {
+		t.Fatalf("cert/key on https local: %v", err)
+	}
+}
+
 func TestControlNormalizeLocalLoopback(t *testing.T) {
 	c := Control{Mode: "local", Listen: "http://192.168.1.1:7600/"}
 	if err := c.normalize(); err == nil {
@@ -166,6 +206,36 @@ func TestParseControlQuotedLiteral(t *testing.T) {
 	}
 	if len(app.Control) != 1 || app.Control[0].TokenKind != tokenLiteral || app.Control[0].Token != "dev-only" {
 		t.Fatalf("got %+v", app.Control)
+	}
+}
+
+func TestParseControlCertKey(t *testing.T) {
+	t.Setenv("JANUS_PUB", "x")
+	d := caddyfile.NewTestDispenser(`janus {
+		control public token:JANUS_PUB cert:/etc/janus/tls.crt key:/etc/janus/tls.key
+	}`)
+	app := new(App)
+	if err := app.UnmarshalCaddyfile(d); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.Control) != 1 {
+		t.Fatalf("want 1 control, got %d", len(app.Control))
+	}
+	c := app.Control[0]
+	if c.CertFile != "/etc/janus/tls.crt" || c.KeyFile != "/etc/janus/tls.key" {
+		t.Fatalf("cert/key: %+v", c)
+	}
+
+	for name, src := range map[string]string{
+		"empty cert":     `janus { control public token:JANUS_PUB cert: key:/k }`,
+		"empty key":      `janus { control public token:JANUS_PUB cert:/c key: }`,
+		"duplicate cert": `janus { control public token:JANUS_PUB cert:/c cert:/c2 key:/k }`,
+		"duplicate key":  `janus { control public token:JANUS_PUB cert:/c key:/k key:/k2 }`,
+	} {
+		app := new(App)
+		if err := app.UnmarshalCaddyfile(caddyfile.NewTestDispenser(src)); err == nil {
+			t.Fatalf("%s: want parse error", name)
+		}
 	}
 }
 
