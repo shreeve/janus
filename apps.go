@@ -259,6 +259,12 @@ type appRegistry struct {
 	// removed from the app; all other membership stays.
 	hubHostsRemoved func(appID string, removed map[string]bool)
 
+	// pruneUpstreams lets the data plane drop per-socket state for paths
+	// no registered app references anymore; invoked (outside the lock)
+	// after every event that retires upstream paths: upstreams PUT,
+	// DELETE, and heartbeat reap.
+	pruneUpstreams func()
+
 	// now is the heartbeat clock source; tests inject a fake.
 	now func() time.Time
 
@@ -367,6 +373,29 @@ func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
 	return rec, true
 }
 
+// exists reports whether the app id is currently registered (the hub
+// set's liveness oracle for zombie-free lazy construction).
+func (r *appRegistry) exists(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.apps[id]
+	return ok
+}
+
+// allUpstreamPaths is the data plane's prune oracle: every socket path
+// any registered app currently references.
+func (r *appRegistry) allUpstreamPaths() map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := map[string]bool{}
+	for _, rec := range r.apps {
+		for _, u := range rec.Upstreams {
+			out[u.Path] = true
+		}
+	}
+	return out
+}
+
 func (r *appRegistry) get(id string) (AppRecord, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -472,6 +501,9 @@ func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error)
 	out := rec.clone()
 	r.mu.Unlock()
 	r.purgeApp(id)
+	if r.pruneUpstreams != nil {
+		r.pruneUpstreams()
+	}
 	return out, nil
 }
 
@@ -513,6 +545,9 @@ func (r *appRegistry) sweepExpired() []string {
 		if r.hubTeardown != nil {
 			r.hubTeardown(id)
 		}
+	}
+	if len(reaped) > 0 && r.pruneUpstreams != nil {
+		r.pruneUpstreams()
 	}
 	return reaped
 }
@@ -571,6 +606,9 @@ func (r *appRegistry) delete(id string) error {
 	// DELETE kills the registration itself: the hub dies with it.
 	if r.hubTeardown != nil {
 		r.hubTeardown(id)
+	}
+	if r.pruneUpstreams != nil {
+		r.pruneUpstreams()
 	}
 	return nil
 }

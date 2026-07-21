@@ -57,6 +57,13 @@ const (
 	hubMaxChanName  = 128 // channel name bytes
 	hubMaxPingBytes = 128 // ? value string bytes
 	hubMaxKickBytes = 128 // * value string bytes
+
+	// hubMaxValueDepth bounds JSON nesting inside event values: the
+	// duplicate-key walk recurses per level, and without a cap an
+	// adversarial frame rents ~10k stack frames per connection
+	// (encoding/json's own scanner limit). 64 is far beyond any honest
+	// payload.
+	hubMaxValueDepth = 64
 )
 
 var (
@@ -263,7 +270,7 @@ func consumeHubObject(dec *json.Decoder, data []byte, item int) ([]hubKV, *hubVi
 		}
 		seen[key] = true
 		valStart := hubSkipToValue(data, dec.InputOffset())
-		if verr := consumeHubValue(dec, item); verr != nil {
+		if verr := consumeHubValue(dec, item, 0); verr != nil {
 			return nil, verr
 		}
 		valEnd := dec.InputOffset()
@@ -295,8 +302,11 @@ func hubSkipToValue(data []byte, off int64) int64 {
 
 // consumeHubValue consumes one JSON value's tokens, rejecting duplicate
 // object keys at any nesting depth ("the parser also rejects duplicate
-// object keys at any nesting level").
-func consumeHubValue(dec *json.Decoder, item int) *hubViolation {
+// object keys at any nesting level") and bounding that depth.
+func consumeHubValue(dec *json.Decoder, item, depth int) *hubViolation {
+	if depth > hubMaxValueDepth {
+		return hubBad(item, "value nesting exceeds %d levels", hubMaxValueDepth)
+	}
 	tok, err := dec.Token()
 	if err != nil {
 		return hubBadFrame("frame is not a JSON object or list of objects")
@@ -321,7 +331,7 @@ func consumeHubValue(dec *json.Decoder, item int) *hubViolation {
 				return hubBad(item, "duplicate key %q", key)
 			}
 			seen[key] = true
-			if verr := consumeHubValue(dec, item); verr != nil {
+			if verr := consumeHubValue(dec, item, depth+1); verr != nil {
 				return verr
 			}
 		}
@@ -330,7 +340,7 @@ func consumeHubValue(dec *json.Decoder, item int) *hubViolation {
 		}
 	case '[':
 		for dec.More() {
-			if verr := consumeHubValue(dec, item); verr != nil {
+			if verr := consumeHubValue(dec, item, depth+1); verr != nil {
 				return verr
 			}
 		}

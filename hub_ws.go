@@ -62,7 +62,11 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 		// the table must agree; a mismatch means the table is stale.
 		floor = cfg.maxConns
 	}
-	hub := st.hubs.getOrCreate(rec.ID)
+	hub := st.hubs.getOrCreate(rec.ID, st.registry.exists)
+	if hub == nil {
+		// The registration died between host resolution and here.
+		return app.hubUnavailable(w, rec.ID, "app deregistered during admission")
+	}
 	if !hub.reserveSlot(floor) {
 		return app.hubUnavailable(w, rec.ID, fmt.Sprintf("connection cap reached (%d)", floor))
 	}

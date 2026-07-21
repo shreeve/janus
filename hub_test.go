@@ -16,7 +16,7 @@ import (
 // --- harness ------------------------------------------------------------------
 
 func newTestAppHub() *appHub {
-	return newHubSet().getOrCreate("app-test01")
+	return newHubSet().getOrCreate("app-test01", nil)
 }
 
 // dialHubConn stands up one real WebSocket pair: the server side becomes a
@@ -612,7 +612,7 @@ func TestHubSlowConsumerOverflowClosesOnce(t *testing.T) {
 // so the admission path keeps ownership of the raw socket.
 func TestHubCloseBeforeUpgrade(t *testing.T) {
 	hs := newHubSet()
-	hub := hs.getOrCreate("app-race")
+	hub := hs.getOrCreate("app-race", nil)
 	c := newHubConn("rrrrrrrrrrrrrrrr", hub, "h", "", http.Header{}, 8, hubDefaultMaxFrame)
 	if !hub.registerConn(c) {
 		t.Fatal("registerConn refused")
@@ -647,6 +647,30 @@ func TestHubCloseBeforeUpgrade(t *testing.T) {
 	c.qmu.Unlock()
 	if code != hubCloseGoingAway || !strings.Contains(reason, "app deregistered") {
 		t.Fatalf("recorded close: %d %q", code, reason)
+	}
+}
+
+// TestHubGetOrCreateHonorsLiveness pins the zombie-hub fix: lazily
+// constructing a hub for an app whose registration died between
+// resolution and construction returns nil instead of parking a
+// never-torn-down entry in the set.
+func TestHubGetOrCreateHonorsLiveness(t *testing.T) {
+	hs := newHubSet()
+	dead := func(string) bool { return false }
+	if h := hs.getOrCreate("app-gone", dead); h != nil {
+		t.Fatal("dead app must not get a hub")
+	}
+	if hs.get("app-gone") != nil {
+		t.Fatal("refused construction must leave no entry")
+	}
+	live := func(string) bool { return true }
+	if h := hs.getOrCreate("app-alive", live); h == nil {
+		t.Fatal("live app must get a hub")
+	}
+	// An existing hub is returned without consulting the oracle (its
+	// lifecycle belongs to teardown, not to construction).
+	if h := hs.getOrCreate("app-alive", dead); h == nil {
+		t.Fatal("existing hub must be returned as-is")
 	}
 }
 
@@ -701,7 +725,7 @@ func TestHubCloseCleansBothMapDirections(t *testing.T) {
 
 func TestHubTeardownClosesEverything(t *testing.T) {
 	hs := newHubSet()
-	hub := hs.getOrCreate("app-x")
+	hub := hs.getOrCreate("app-x", nil)
 	a, aws := dialHubConn(t, hub, hubDefaultMaxChannels)
 	mustExec(t, hub, hubPlaneClient, a, `{"+":["/room"]}`)
 
@@ -725,7 +749,7 @@ func TestHubTeardownClosesEverything(t *testing.T) {
 
 func TestHubHostsRemovedClosesOnlyBoundConns(t *testing.T) {
 	hs := newHubSet()
-	hub := hs.getOrCreate("app-x")
+	hub := hs.getOrCreate("app-x", nil)
 	a, aws := dialHubConn(t, hub, hubDefaultMaxChannels)
 	b, bws := dialHubConn(t, hub, hubDefaultMaxChannels)
 	b.host = "kept.example.com"

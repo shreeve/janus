@@ -42,7 +42,12 @@ func (a *App) handleHubPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hub := a.hubs.getOrCreate(rec.ID)
+	hub := a.hubs.getOrCreate(rec.ID, a.appsReg.exists)
+	if hub == nil {
+		// The registration died between the get above and here.
+		writeAPIError(w, errUnknownApp(rec.ID))
+		return
+	}
 	out, verr := hub.execute(objs, hubPlanePublish, nil)
 	if verr != nil {
 		writeAPIError(w, errBadRequest("%s", verr.msg))

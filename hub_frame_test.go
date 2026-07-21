@@ -1,6 +1,7 @@
 package janus
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -205,6 +206,54 @@ func TestHubGrammarEdges(t *testing.T) {
 	if got := string(objs[0].events[0].value); got != `{"z":1,  "a": [2,3]}` {
 		t.Fatalf("value bytes altered: %q", got)
 	}
+}
+
+func TestHubValueDepthCap(t *testing.T) {
+	deep := strings.Repeat("[", hubMaxValueDepth+2) + strings.Repeat("]", hubMaxValueDepth+2)
+	_, verr := parseHubFrame([]byte(`{"chat":`+deep+`}`), hubPlaneClient)
+	if verr == nil || !strings.Contains(verr.msg, "nesting exceeds") {
+		t.Fatalf("want depth rejection, got %v", verr)
+	}
+	// Honest nesting well under the cap still parses.
+	ok := strings.Repeat("[", 16) + "1" + strings.Repeat("]", 16)
+	if _, verr := parseHubFrame([]byte(`{"chat":`+ok+`}`), hubPlaneClient); verr != nil {
+		t.Fatalf("16-level value must parse: %v", verr)
+	}
+}
+
+// FuzzParseHubFrame hammers the wire parser: it must never panic, and an
+// accepted frame must round-trip its structural guarantees (every event
+// value slice is valid JSON — the bytes we later splice into delivered
+// bundles verbatim).
+func FuzzParseHubFrame(f *testing.F) {
+	seeds := []string{
+		`{"+": ["/lobby", "/game/42"]}`,
+		`{"@": ["/game/42"], "move!": {"x": 3, "y": 5}}`,
+		`[{"-": ["/lobby"]}, {"@": ["/game/42"], "left": {"who": "x"}}]`,
+		`{"?":"t1"}`,
+		`{"<":["relay"],"chat":{}}`,
+		`{"chat":{"a":[1,{"b":null}],"c":"d"}}`,
+		`{">":["x"]}`,
+		`{"chat":` + strings.Repeat("[", 70) + strings.Repeat("]", 70) + `}`,
+		"{\"chat\":\"\xff\"}",
+	}
+	for _, s := range seeds {
+		f.Add([]byte(s), 0)
+	}
+	f.Fuzz(func(t *testing.T, data []byte, planeInt int) {
+		plane := hubPlane(((planeInt % 3) + 3) % 3)
+		objs, verr := parseHubFrame(data, plane)
+		if verr != nil {
+			return
+		}
+		for _, obj := range objs {
+			for _, ev := range obj.events {
+				if !json.Valid(ev.value) {
+					t.Fatalf("accepted frame carries invalid event value bytes: %q", ev.value)
+				}
+			}
+		}
+	})
 }
 
 // TestHubViolationPositionFirst pins that reasons put the position and rule

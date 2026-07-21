@@ -347,7 +347,7 @@ func TestJanusStatePooling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub := st1.hubs.getOrCreate(rec.ID)
+	hub := st1.hubs.getOrCreate(rec.ID, nil)
 
 	// The "reload": a second config generation acquires the state.
 	st2, err := build()
@@ -360,7 +360,7 @@ func TestJanusStatePooling(t *testing.T) {
 	if _, err := st2.registry.get(rec.ID); err != nil {
 		t.Fatal("registration must survive the second acquisition")
 	}
-	if st2.hubs.getOrCreate(rec.ID) != hub {
+	if st2.hubs.getOrCreate(rec.ID, nil) != hub {
 		t.Fatal("hub entry must survive the second acquisition")
 	}
 

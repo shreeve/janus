@@ -70,12 +70,21 @@ func (hs *hubSet) get(appID string) *appHub {
 	return hs.apps[appID]
 }
 
-// getOrCreate returns the app's hub, constructing an empty one on first use.
-func (hs *hubSet) getOrCreate(appID string) *appHub {
+// getOrCreate returns the app's hub, constructing an empty one on first
+// use. Construction consults live — the registry-membership check — under
+// the set lock, so a hub can never be created for an app whose
+// registration died between the caller's resolution and here: teardown
+// removes entries strictly after the registry delete, so either live sees
+// the app gone (nil) or teardown removes the entry we create. nil = the
+// app is no longer registered.
+func (hs *hubSet) getOrCreate(appID string, live func(string) bool) *appHub {
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
 	h := hs.apps[appID]
 	if h == nil {
+		if live != nil && !live(appID) {
+			return nil
+		}
 		h = &appHub{
 			id:       appID,
 			conns:    map[string]*hubConn{},

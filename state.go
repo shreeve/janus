@@ -57,6 +57,7 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 	// the registry live and die together in this holder.
 	reg.hubTeardown = st.hubs.teardownApp
 	reg.hubHostsRemoved = st.hubs.hostsRemoved
+	reg.pruneUpstreams = st.dp.pruneState
 	reg.startSweeper(logger.Named("registry"))
 	return st, nil
 }

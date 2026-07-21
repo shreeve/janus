@@ -101,6 +101,46 @@ func (dp *dataPlane) testHasState(path string) bool {
 	return ok
 }
 
+// TestPruneStateDropsUnreferencedPaths pins the reload-epoch growth fix:
+// the pooled data plane sheds per-socket state once no registered app
+// references the path (the pool protocol never reuses paths, so without
+// pruning every publish grows the map for the process lifetime).
+func TestPruneStateDropsUnreferencedPaths(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	reg.pruneUpstreams = dp.pruneState
+	id := registerApp(t, reg, "prune.test", Upstream{Path: "/run/old1.sock"}, Upstream{Path: "/run/old2.sock"})
+
+	dp.mu.Lock()
+	dp.state["/run/old1.sock"] = &upstreamState{}
+	dp.state["/run/old2.sock"] = &upstreamState{}
+	dp.mu.Unlock()
+
+	// The swap retires both old paths; their state must go with them.
+	if _, err := reg.setUpstreams(id, []Upstream{{Path: "/run/new1.sock"}}); err != nil {
+		t.Fatal(err)
+	}
+	if dp.testHasState("/run/old1.sock") || dp.testHasState("/run/old2.sock") {
+		t.Fatal("retired socket paths must be pruned")
+	}
+
+	// A still-referenced path survives pruning.
+	dp.mu.Lock()
+	dp.state["/run/new1.sock"] = &upstreamState{}
+	dp.mu.Unlock()
+	dp.pruneState()
+	if !dp.testHasState("/run/new1.sock") {
+		t.Fatal("referenced socket path must survive pruning")
+	}
+
+	// DELETE retires everything the app referenced.
+	if err := reg.delete(id); err != nil {
+		t.Fatal(err)
+	}
+	if dp.testHasState("/run/new1.sock") {
+		t.Fatal("deleted app's socket paths must be pruned")
+	}
+}
+
 // stateWithInflight seeds an upstreamState carrying n in-flight requests.
 func stateWithInflight(n int64) *upstreamState {
 	st := &upstreamState{}

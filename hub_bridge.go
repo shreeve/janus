@@ -166,6 +166,12 @@ type hubBridge struct {
 	closeBody []byte // set once by notifyClose
 	wake      chan struct{}
 	done      chan struct{}
+
+	// lastFailLog throttles per-failure warns (drainer-goroutine-local):
+	// during a tenant outage a chatty client would otherwise emit one
+	// warn per bridged frame. Counters stay exact; logs sample.
+	lastFailLog time.Time
+	failsMuted  int64
 }
 
 func newHubBridge(c *hubConn, st *janusState, logger *zap.Logger, maxFrame int64) *hubBridge {
@@ -286,12 +292,22 @@ func (b *hubBridge) processResponse(kind string, res hubBridgeResult) {
 	c := b.c
 	if !res.ok || res.status < 200 || res.status > 299 {
 		c.hub.ctr.bridgeFailed.Add(1)
-		b.logger.Warn("janus hub bridge failed",
-			zap.String("app", c.appID),
-			zap.String("conn", c.id),
-			zap.String("frame", kind),
-			zap.String("reason", bridgeFailReason(res)),
-		)
+		// Sample failure logs to one per second per connection: a tenant
+		// outage under chatty senders must not flood the log (the
+		// bridge_failed counter stays exact).
+		if now := time.Now(); now.Sub(b.lastFailLog) >= time.Second {
+			b.logger.Warn("janus hub bridge failed",
+				zap.String("app", c.appID),
+				zap.String("conn", c.id),
+				zap.String("frame", kind),
+				zap.String("reason", bridgeFailReason(res)),
+				zap.Int64("muted_since_last", b.failsMuted),
+			)
+			b.lastFailLog = now
+			b.failsMuted = 0
+		} else {
+			b.failsMuted++
+		}
 		return
 	}
 	c.hub.ctr.bridgeSent.Add(1)

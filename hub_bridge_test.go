@@ -223,7 +223,7 @@ func TestHubBridgeMarked503Replay(t *testing.T) {
 // newBridgeConn wires a registered hubConn + hubBridge into the harness.
 func newBridgeConn(t *testing.T, st *janusState, rec AppRecord) (*hubConn, *hubBridge) {
 	t.Helper()
-	hub := st.hubs.getOrCreate(rec.ID)
+	hub := st.hubs.getOrCreate(rec.ID, nil)
 	c, _ := dialHubConn(t, hub, hubDefaultMaxChannels)
 	b := newHubBridge(c, st, zap.NewNop(), hubDefaultMaxFrame)
 	c.bridge = b
@@ -245,7 +245,7 @@ func TestHubBridgeFIFOOrder(t *testing.T) {
 			t.Fatalf("order: post %d = %q", i, f.post(i).body)
 		}
 	}
-	if st.hubs.getOrCreate(rec.ID).ctr.bridgeSent.Load() != 3 {
+	if st.hubs.getOrCreate(rec.ID, nil).ctr.bridgeSent.Load() != 3 {
 		t.Fatal("bridge_sent must count 2xx posts")
 	}
 }

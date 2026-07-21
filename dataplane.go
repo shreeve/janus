@@ -379,6 +379,23 @@ func (dp *dataPlane) markUnhealthy(st *upstreamState) {
 	st.unhealthyUntil.Store(time.Now().Add(dp.unhealthyWindow).UnixNano())
 }
 
+// pruneState drops per-socket state for paths no longer referenced by any
+// registered app. The pool protocol never reuses socket paths, so every
+// pool boot adds entries; without pruning, the pooled (process-lifetime)
+// data plane grows one entry per worker per publish, forever. In-flight
+// requests are unaffected: they hold the *upstreamState pointer, which
+// stays valid after the map entry drops.
+func (dp *dataPlane) pruneState() {
+	referenced := dp.registry.allUpstreamPaths()
+	dp.mu.Lock()
+	for path := range dp.state {
+		if !referenced[path] {
+			delete(dp.state, path)
+		}
+	}
+	dp.mu.Unlock()
+}
+
 // attemptState is one proxy attempt's per-request state, carried on the
 // outbound request context so per-socket ReverseProxy structs are reusable.
 type attemptState struct {
