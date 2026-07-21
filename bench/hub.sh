@@ -9,7 +9,7 @@
 #   6) text-bridge tax      — client-send throughput, tenant 204 instant vs +5ms
 #
 # Needs only: Janus caddy running (root Caddyfile), Go (builds bench/hubbench),
-# python3, curl. NO rip manager — the tenant is hubbench's own bridge fixture.
+# curl. NO rip manager — the tenant is hubbench's own bridge fixture.
 #
 # Env knobs (all optional):
 #   JANUS_DIR      janus checkout        (default: this script's repo root)
