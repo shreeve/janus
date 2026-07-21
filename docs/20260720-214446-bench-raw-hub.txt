@@ -1,0 +1,247 @@
+=== hub bench sweep Mon Jul 20 21:44:46 MDT 2026 ===
+sections: 1; legs 15s; host hubany.ripdev.io; channel /bench
+load: 21:44  up 12:54, 2 users, load averages: 2.01 1.95 1.89
+rig: Apple M5, 10 cores, 32GB, 26.5.2
+go version go1.26.5 darwin/arm64, caddy v2.11.4
+janus commit: 919c4bd
+ulimit -n 1048575
+
+app: hubbench-tsuauy (host hubany.ripdev.io, bridge /bench/bridge)
+
+== 1) fan-out throughput: 1 publisher, 1 channel, N subscribers, rate ladder ==
+1 fanout n:100 rate:250 READY n=100 fails=0 wedged=0 dial_ms=25
+1 fanout n:100 rate:250 PUB rate_target=250 published=3750 achieved=250/s enq_deliveries=375000 enq_rate=25006/s errors=0 dur_s=15.0
+1 fanout n:100 rate:250 SUBS n=100 recv=375000 window_s=15.00 rate=25006/s p50=0.28ms p99=1.03ms max=5.90ms maxgap_ms=11 unexpected_closes=0 closes={} samples=375000
+1 fanout n:100 rate:250 slow_closes_delta=0
+1 fanout n:100 rate:500 READY n=100 fails=0 wedged=0 dial_ms=24
+1 fanout n:100 rate:500 PUB rate_target=500 published=7500 achieved=500/s enq_deliveries=750000 enq_rate=50005/s errors=0 dur_s=15.0
+1 fanout n:100 rate:500 SUBS n=100 recv=750000 window_s=15.00 rate=50006/s p50=0.28ms p99=0.59ms max=39.40ms maxgap_ms=33 unexpected_closes=0 closes={} samples=750000
+1 fanout n:100 rate:500 slow_closes_delta=0
+1 fanout n:100 rate:1000 READY n=100 fails=0 wedged=0 dial_ms=25
+1 fanout n:100 rate:1000 PUB rate_target=1000 published=15000 achieved=1000/s enq_deliveries=1500000 enq_rate=100005/s errors=0 dur_s=15.0
+1 fanout n:100 rate:1000 SUBS n=100 recv=1500000 window_s=15.00 rate=100005/s p50=0.27ms p99=0.42ms max=1.96ms maxgap_ms=3 unexpected_closes=0 closes={} samples=1031200
+1 fanout n:100 rate:1000 slow_closes_delta=0
+1 fanout n:100 rate:2000 READY n=100 fails=0 wedged=0 dial_ms=25
+1 fanout n:100 rate:2000 PUB rate_target=2000 published=30000 achieved=2000/s enq_deliveries=3000000 enq_rate=200005/s errors=0 dur_s=15.0
+1 fanout n:100 rate:2000 SUBS n=100 recv=3000000 window_s=15.00 rate=200005/s p50=0.26ms p99=3.11ms max=50.28ms maxgap_ms=49 unexpected_closes=0 closes={} samples=1125000
+1 fanout n:100 rate:2000 slow_closes_delta=0
+1 fanout n:100 rate:4000 READY n=100 fails=0 wedged=0 dial_ms=27
+1 fanout n:100 rate:4000 PUB rate_target=4000 published=60000 achieved=4000/s enq_deliveries=6000000 enq_rate=399998/s errors=0 dur_s=15.0
+1 fanout n:100 rate:4000 SUBS n=100 recv=6000000 window_s=15.00 rate=399998/s p50=0.46ms p99=1.54ms max=16.96ms maxgap_ms=16 unexpected_closes=0 closes={} samples=1312500
+1 fanout n:100 rate:4000 slow_closes_delta=0
+1 fanout n:1000 rate:50 READY n=1000 fails=0 wedged=0 dial_ms=241
+1 fanout n:1000 rate:50 PUB rate_target=50 published=750 achieved=50/s enq_deliveries=750000 enq_rate=50054/s errors=0 dur_s=15.0
+1 fanout n:1000 rate:50 SUBS n=1000 recv=750000 window_s=14.98 rate=50056/s p50=2.11ms p99=4.12ms max=22.73ms maxgap_ms=37 unexpected_closes=0 closes={} samples=750000
+1 fanout n:1000 rate:50 slow_closes_delta=0
+1 fanout n:1000 rate:100 READY n=1000 fails=0 wedged=0 dial_ms=218
+1 fanout n:1000 rate:100 PUB rate_target=100 published=1500 achieved=100/s enq_deliveries=1500000 enq_rate=100042/s errors=0 dur_s=15.0
+1 fanout n:1000 rate:100 SUBS n=1000 recv=1500000 window_s=14.99 rate=100044/s p50=2.09ms p99=3.89ms max=31.89ms maxgap_ms=35 unexpected_closes=0 closes={} samples=1500000
+1 fanout n:1000 rate:100 slow_closes_delta=0
+1 fanout n:1000 rate:200 READY n=0 fails=1000 wedged=0 dial_ms=226
+1 fanout n:1000 rate:200 PUB rate_target=200 published=3000 achieved=200/s enq_deliveries=0 enq_rate=0/s errors=0 dur_s=15.0
+1 fanout n:1000 rate:200 SUBS n=0 recv=0 window_s=0.00 rate=0/s p50=0.00ms p99=0.00ms max=0.00ms maxgap_ms=0 unexpected_closes=0 closes={} samples=0
+1 fanout n:1000 rate:200 slow_closes_delta=0
+1 fanout n:1000 rate:400 READY n=1000 fails=0 wedged=0 dial_ms=217
+1 fanout n:1000 rate:400 PUB rate_target=400 published=6000 achieved=400/s enq_deliveries=6000000 enq_rate=399931/s errors=0 dur_s=15.0
+1 fanout n:1000 rate:400 SUBS n=1000 recv=6000000 window_s=15.00 rate=399873/s p50=5.83ms p99=12.86ms max=58.12ms maxgap_ms=55 unexpected_closes=0 closes={} samples=6000000
+1 fanout n:1000 rate:400 slow_closes_delta=0
+1 fanout n:1000 rate:800 READY n=1000 fails=0 wedged=0 dial_ms=226
+1 fanout n:1000 rate:800 PUB rate_target=800 published=12000 achieved=571/s enq_deliveries=9149682 enq_rate=435613/s errors=0 dur_s=21.0
+1 fanout n:1000 rate:800 SUBS n=1000 recv=9107154 window_s=20.87 rate=436307/s p50=10.32ms p99=23.43ms max=119.09ms maxgap_ms=112 unexpected_closes=0 closes={} samples=9107154
+1 fanout n:1000 rate:800 slow_closes_delta=0
+1 fanout n:4000 rate:12 READY n=4000 fails=0 wedged=0 dial_ms=971
+1 fanout n:4000 rate:12 PUB rate_target=12 published=180 achieved=12/s enq_deliveries=720000 enq_rate=48255/s errors=0 dur_s=14.9
+1 fanout n:4000 rate:12 SUBS n=4000 recv=720000 window_s=14.93 rate=48233/s p50=7.78ms p99=14.81ms max=18.70ms maxgap_ms=99 unexpected_closes=0 closes={} samples=720000
+1 fanout n:4000 rate:12 slow_closes_delta=0
+1 fanout n:4000 rate:25 READY n=0 fails=4000 wedged=0 dial_ms=897
+1 fanout n:4000 rate:25 PUB rate_target=25 published=375 achieved=25/s enq_deliveries=0 enq_rate=0/s errors=0 dur_s=15.0
+1 fanout n:4000 rate:25 SUBS n=0 recv=0 window_s=0.00 rate=0/s p50=0.00ms p99=0.00ms max=0.00ms maxgap_ms=0 unexpected_closes=0 closes={} samples=0
+1 fanout n:4000 rate:25 slow_closes_delta=0
+1 fanout n:4000 rate:50 READY n=4000 fails=0 wedged=0 dial_ms=915
+1 fanout n:4000 rate:50 PUB rate_target=50 published=750 achieved=50/s enq_deliveries=3000000 enq_rate=200198/s errors=0 dur_s=15.0
+1 fanout n:4000 rate:50 SUBS n=4000 recv=3000000 window_s=14.99 rate=200116/s p50=7.28ms p99=15.46ms max=97.49ms maxgap_ms=108 unexpected_closes=0 closes={} samples=3000000
+1 fanout n:4000 rate:50 slow_closes_delta=0
+1 fanout n:4000 rate:100 READY n=0 fails=4000 wedged=0 dial_ms=892
+1 fanout n:4000 rate:100 PUB rate_target=100 published=1500 achieved=100/s enq_deliveries=0 enq_rate=0/s errors=0 dur_s=15.0
+1 fanout n:4000 rate:100 SUBS n=0 recv=0 window_s=0.00 rate=0/s p50=0.00ms p99=0.00ms max=0.00ms maxgap_ms=0 unexpected_closes=0 closes={} samples=0
+1 fanout n:4000 rate:100 slow_closes_delta=0
+1 fanout n:4000 rate:200 READY n=4000 fails=0 wedged=0 dial_ms=905
+1 fanout n:4000 rate:200 PUB rate_target=200 published=3000 achieved=143/s enq_deliveries=5882111 enq_rate=279771/s errors=0 dur_s=21.0
+1 fanout n:4000 rate:200 SUBS n=4000 recv=5862578 window_s=20.89 rate=280631/s p50=27.48ms p99=213.48ms max=581.87ms maxgap_ms=224 unexpected_closes=0 closes={} samples=5862578
+1 fanout n:4000 rate:200 slow_closes_delta=0
+1 counters conns=0 deliveries=38626793 publishes=145305 frames_in=16500 slow_closes=0 bridge_sent=26054 bridge_failed=6947 bridge_dropped=0 unknown_targets=9707
+load after 1: load averages: 10.52 6.70 4.07
+
+DONE Mon Jul 20 21:49:58 MDT 2026
+final load: load averages: 10.52 6.70 4.07
+=== hub bench sweep Mon Jul 20 21:56:37 MDT 2026 ===
+sections: 1; legs 15s; host hubany.ripdev.io; channel /bench
+load: 21:56  up 13:05, 2 users, load averages: 1.88 2.90 3.10
+rig: Apple M5, 10 cores, 32GB, 26.5.2
+go version go1.26.5 darwin/arm64, caddy v2.11.4
+janus commit: 919c4bd
+ulimit -n 1048575
+
+app: hubbench-5006v4 (host hubany.ripdev.io, bridge /bench/bridge)
+
+== 1) fan-out throughput: 1 publisher, 1 channel, N subscribers, rate ladder ==
+1 fanout n:1000 rate:200 READY n=1000 fails=0 wedged=0 dial_ms=191
+1 fanout n:1000 rate:200 PUB rate_target=200 published=3000 achieved=200/s enq_deliveries=3000000 enq_rate=200021/s errors=0 dur_s=15.0
+1 fanout n:1000 rate:200 SUBS n=1000 recv=3000000 window_s=15.00 rate=200020/s p50=2.20ms p99=3.97ms max=101.90ms maxgap_ms=104 unexpected_closes=0 closes={} samples=3000000
+1 fanout n:1000 rate:200 slow_closes_delta=0
+1 counters conns=0 deliveries=3000000 publishes=3000 frames_in=1000 slow_closes=0 bridge_sent=2001 bridge_failed=0 bridge_dropped=0 unknown_targets=0
+load after 1: load averages: 3.46 3.22 3.21
+
+DONE Mon Jul 20 21:57:04 MDT 2026
+final load: load averages: 3.46 3.22 3.21
+=== hub bench sweep Mon Jul 20 21:57:23 MDT 2026 ===
+sections: 1; legs 15s; host hubany.ripdev.io; channel /bench
+load: 21:57  up 13:06, 2 users, load averages: 10.13 4.60 3.69
+rig: Apple M5, 10 cores, 32GB, 26.5.2
+go version go1.26.5 darwin/arm64, caddy v2.11.4
+janus commit: 919c4bd
+ulimit -n 1048575
+
+app: hubbench-ml28sz (host hubany.ripdev.io, bridge /bench/bridge)
+
+== 1) fan-out throughput: 1 publisher, 1 channel, N subscribers, rate ladder ==
+1 fanout n:100 rate:8000 READY n=100 fails=0 wedged=0 dial_ms=25
+1 fanout n:100 rate:8000 PUB rate_target=8000 published=120000 achieved=5732/s enq_deliveries=10124525 enq_rate=483603/s errors=0 dur_s=20.9
+1 fanout n:100 rate:8000 SUBS n=100 recv=10112325 window_s=20.89 rate=484115/s p50=1.11ms p99=9.92ms max=105.01ms maxgap_ms=85 unexpected_closes=19 closes={"1013":19} samples=1551568
+1 fanout n:100 rate:8000 slow_closes_delta=42
+1 fanout n:4000 rate:25 READY n=4000 fails=0 wedged=0 dial_ms=837
+1 fanout n:4000 rate:25 PUB rate_target=25 published=375 achieved=25/s enq_deliveries=1500000 enq_rate=100186/s errors=0 dur_s=15.0
+1 fanout n:4000 rate:25 SUBS n=4000 recv=1500000 window_s=14.97 rate=100184/s p50=8.69ms p99=19.39ms max=98.59ms maxgap_ms=145 unexpected_closes=0 closes={} samples=1500000
+1 fanout n:4000 rate:25 slow_closes_delta=0
+1 fanout n:4000 rate:100 READY n=4000 fails=0 wedged=0 dial_ms=3575
+1 fanout n:4000 rate:100 PUB rate_target=100 published=1500 achieved=92/s enq_deliveries=6000000 enq_rate=366865/s errors=0 dur_s=16.4
+1 fanout n:4000 rate:100 SUBS n=4000 recv=6000000 window_s=16.37 rate=366554/s p50=46.75ms p99=106.14ms max=262.89ms maxgap_ms=153 unexpected_closes=0 closes={} samples=6000000
+1 fanout n:4000 rate:100 slow_closes_delta=0
+1 counters conns=0 deliveries=17624525 publishes=121875 frames_in=8100 slow_closes=42 bridge_sent=14200 bridge_failed=2001 bridge_dropped=0 unknown_targets=3509
+load after 1: load averages: 13.90 6.89 4.63
+
+DONE Mon Jul 20 21:58:37 MDT 2026
+final load: load averages: 13.90 6.89 4.63
+=== hub bench sweep Mon Jul 20 21:59:02 MDT 2026 ===
+sections: 2 3 4 5 6; legs 15s; host hubany.ripdev.io; channel /bench
+load: 21:59  up 13:08, 2 users, load averages: 10.16 6.58 4.58
+rig: Apple M5, 10 cores, 32GB, 26.5.2
+go version go1.26.5 darwin/arm64, caddy v2.11.4
+janus commit: 919c4bd
+ulimit -n 1048575
+
+app: hubbench-mbj6lt (host hubany.ripdev.io, bridge /bench/bridge)
+
+== 2) delivery latency at 10/50/90% of the fan-out ceiling (n:1000, ceiling 400/s) ==
+2 latency n:1000 rate:40 READY n=1000 fails=0 wedged=0 dial_ms=300
+2 latency n:1000 rate:40 PUB rate_target=40 published=600 achieved=40/s enq_deliveries=600000 enq_rate=40057/s errors=0 dur_s=15.0
+2 latency n:1000 rate:40 SUBS n=1000 recv=600000 window_s=14.98 rate=40058/s p50=2.39ms p99=5.57ms max=15.19ms maxgap_ms=40 unexpected_closes=0 closes={} samples=600000
+2 latency n:1000 rate:40 slow_closes_delta=0
+2 latency n:1000 rate:200 READY n=1000 fails=0 wedged=0 dial_ms=311
+2 latency n:1000 rate:200 PUB rate_target=200 published=3000 achieved=200/s enq_deliveries=3000000 enq_rate=200030/s errors=0 dur_s=15.0
+2 latency n:1000 rate:200 SUBS n=1000 recv=3000000 window_s=15.00 rate=200016/s p50=2.08ms p99=14.45ms max=131.47ms maxgap_ms=136 unexpected_closes=0 closes={} samples=3000000
+2 latency n:1000 rate:200 slow_closes_delta=0
+2 latency n:1000 rate:360 READY n=1000 fails=0 wedged=0 dial_ms=308
+2 latency n:1000 rate:360 PUB rate_target=360 published=5400 achieved=360/s enq_deliveries=5400000 enq_rate=359940/s errors=0 dur_s=15.0
+2 latency n:1000 rate:360 SUBS n=1000 recv=5400000 window_s=15.01 rate=359859/s p50=4.56ms p99=16.67ms max=59.07ms maxgap_ms=43 unexpected_closes=0 closes={} samples=5400000
+2 latency n:1000 rate:360 slow_closes_delta=0
+load after 2: load averages: 10.86 7.28 4.99
+
+== 3) connection ceiling + idle cost: ramp to 4096, RSS per idle conn ==
+3 caddy rss before: 342.8MB
+3 RAMP n=4096 fails=0 elapsed_s=1.38 rate=2964 conns/s
+3 caddy rss at 4096 idle conns: 342.9MB
+3 rss per idle conn: 0.0KB
+3 upgrade past the cap: 503 (want 503)
+load after 3: load averages: 10.15 7.19 4.97
+
+== 4) slow-consumer isolation: one wedged sub in n:1000 at rate:100 (pad 1kb) ==
+4 nowedge pair-A READY n=1000 fails=0 wedged=0 dial_ms=307
+4 nowedge pair-A PUB rate_target=100 published=1500 achieved=100/s enq_deliveries=1500000 enq_rate=100056/s errors=0 dur_s=15.0
+4 nowedge pair-A SUBS n=1000 recv=1500000 window_s=15.00 rate=99990/s p50=2.25ms p99=31.02ms max=116.54ms maxgap_ms=127 unexpected_closes=0 closes={} samples=1500000
+4 nowedge pair-A slow_closes_delta=0
+4 wedged  pair-A READY n=1000 fails=0 wedged=1 dial_ms=315
+4 wedged  pair-A PUB rate_target=100 published=1500 achieved=100/s enq_deliveries=1499257 enq_rate=100004/s errors=0 dur_s=15.0
+4 wedged  pair-A SUBS n=1000 recv=1498500 window_s=14.99 rate=99943/s p50=2.35ms p99=5.84ms max=23.88ms maxgap_ms=34 unexpected_closes=0 closes={} samples=1498500
+4 wedged  pair-A slow_closes_delta=1
+4 wedged  pair-B READY n=1000 fails=0 wedged=1 dial_ms=319
+4 wedged  pair-B PUB rate_target=100 published=1500 achieved=100/s enq_deliveries=1499257 enq_rate=99995/s errors=0 dur_s=15.0
+4 wedged  pair-B SUBS n=1000 recv=1498500 window_s=14.99 rate=99944/s p50=2.27ms p99=5.56ms max=18.15ms maxgap_ms=28 unexpected_closes=0 closes={} samples=1498500
+4 wedged  pair-B slow_closes_delta=1
+4 nowedge pair-B READY n=1000 fails=0 wedged=0 dial_ms=329
+4 nowedge pair-B PUB rate_target=100 published=1500 achieved=100/s enq_deliveries=1500000 enq_rate=100027/s errors=0 dur_s=15.0
+4 nowedge pair-B SUBS n=1000 recv=1500000 window_s=15.00 rate=100031/s p50=2.26ms p99=5.75ms max=19.34ms maxgap_ms=29 unexpected_closes=0 closes={} samples=1500000
+4 nowedge pair-B slow_closes_delta=0
+load after 4: load averages: 7.55 7.43 5.30
+
+== 5) reload under fan-out: doorbell cut + republish mid-traffic (n:1000 rate:100) ==
+5 READY n=1000 fails=0 wedged=0 dial_ms=359
+5 doorbell cut (admission cut mid-traffic)
+5 republish (pool back)
+5 PUB rate_target=100 published=2000 achieved=100/s enq_deliveries=2000000 enq_rate=100035/s errors=0 dur_s=20.0
+5 SUBS n=1000 recv=2000000 window_s=19.99 rate=100031/s p50=2.19ms p99=7.07ms max=90.92ms maxgap_ms=89 unexpected_closes=0 closes={} samples=2000000
+5 bridge_failed_delta=0 bridge_dropped_delta=0
+load after 5: load averages: 11.29 8.39 5.72
+
+== 6) text-bridge tax: n:50 senders, tenant 204 instant vs +5ms (interleaved) ==
+6 tax A delay:0s READY n=50 fails=0 dial_ms=18
+6 tax A delay:0s SEND n=50 frames=4310076 elapsed_s=19.46 rate=221503/s errors=0
+6 tax A delay:0s frames_in_delta=4310126 bridge_sent_delta=1697697 bridge_dropped_delta=2612479
+6 tax B delay:5ms READY n=50 fails=0 dial_ms=17
+6 tax B delay:5ms SEND n=50 frames=7900285 elapsed_s=18.63 rate=424126/s errors=0
+6 tax B delay:5ms frames_in_delta=7900335 bridge_sent_delta=165709 bridge_dropped_delta=7734676
+6 tax B delay:5ms READY n=50 fails=0 dial_ms=18
+6 tax B delay:5ms SEND n=50 frames=7865524 elapsed_s=18.71 rate=420332/s errors=0
+6 tax B delay:5ms frames_in_delta=7865574 bridge_sent_delta=166428 bridge_dropped_delta=7699196
+6 tax A delay:0s READY n=50 fails=0 dial_ms=17
+6 tax A delay:0s SEND n=50 frames=4186897 elapsed_s=19.88 rate=210576/s errors=0
+6 tax A delay:0s frames_in_delta=4186947 bridge_sent_delta=1661483 bridge_dropped_delta=2525514
+load after 6: load averages: 16.25 10.52 6.75
+
+DONE Mon Jul 20 22:03:29 MDT 2026
+final load: load averages: 16.25 10.52 6.75
+3 NOTE: rerun of section 3 against a FRESHLY STARTED caddy (previous run's RSS was polluted by prior fan-out legs)
+=== hub bench sweep Mon Jul 20 22:04:24 MDT 2026 ===
+sections: 3; legs 15s; host hubany.ripdev.io; channel /bench
+load: 22:04  up 13:13, 2 users, load averages: 8.00 9.17 6.48
+rig: Apple M5, 10 cores, 32GB, 26.5.2
+go version go1.26.5 darwin/arm64, caddy v2.11.4
+janus commit: 919c4bd
+ulimit -n 1048575
+
+app: hubbench-pk5yot (host hubany.ripdev.io, bridge /bench/bridge)
+
+== 3) connection ceiling + idle cost: ramp to 4096, RSS per idle conn ==
+3 caddy rss before: 44.5MB
+3 RAMP n=4096 fails=0 elapsed_s=1.53 rate=2669 conns/s
+3 caddy rss at 4096 idle conns: 314.9MB
+3 rss per idle conn: 67.6KB
+3 upgrade past the cap: 503 (want 503)
+load after 3: load averages: 8.21 9.16 6.53
+
+DONE Mon Jul 20 22:04:37 MDT 2026
+final load: load averages: 8.21 9.16 6.53
+=== hub bench sweep Mon Jul 20 22:06:30 MDT 2026 ===
+sections: 1; legs 15s; host hubany.ripdev.io; channel /bench
+load: 22:06  up 13:15, 2 users, load averages: 3.58 7.11 6.04
+rig: Apple M5, 10 cores, 32GB, 26.5.2
+go version go1.26.5 darwin/arm64, caddy v2.11.4
+janus commit: 919c4bd
+ulimit -n 1048575
+
+app: hubbench-eb4q9d (host hubany.ripdev.io, bridge /bench/bridge)
+
+== 1) fan-out throughput: 1 publisher, 1 channel, N subscribers, rate ladder ==
+1 fanout n:4000 rate:150 READY n=4000 fails=0 wedged=0 dial_ms=1385
+1 fanout n:4000 rate:150 PUB rate_target=150 published=2250 achieved=107/s enq_deliveries=7564702 enq_rate=358219/s errors=0 dur_s=21.1
+1 fanout n:4000 rate:150 SUBS n=4000 recv=7516951 window_s=20.93 rate=359111/s p50=44.07ms p99=167.86ms max=500.06ms maxgap_ms=194 unexpected_closes=0 closes={} samples=7516951
+1 fanout n:4000 rate:150 slow_closes_delta=0
+1 fanout n:4000 rate:200 READY n=4000 fails=0 wedged=0 dial_ms=1353
+1 fanout n:4000 rate:200 PUB rate_target=200 published=3000 achieved=142/s enq_deliveries=5907932 enq_rate=280379/s errors=0 dur_s=21.1
+1 fanout n:4000 rate:200 SUBS n=4000 recv=5870552 window_s=20.86 rate=281406/s p50=31.45ms p99=218.09ms max=483.06ms maxgap_ms=323 unexpected_closes=0 closes={} samples=5870552
+1 fanout n:4000 rate:200 slow_closes_delta=0
+1 counters conns=0 deliveries=13472634 publishes=5250 frames_in=8000 slow_closes=0 bridge_sent=16001 bridge_failed=0 bridge_dropped=0 unknown_targets=3623
+load after 1: load averages: 12.07 8.98 6.80
+
+DONE Mon Jul 20 22:07:22 MDT 2026
+final load: load averages: 12.07 8.98 6.80

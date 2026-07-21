@@ -691,6 +691,124 @@ session's ~75% within noise. The attribution story is unchanged: the
 path past ~105k proxied is Janus-side cost, and the cache already
 routes around it (160k+ on HITs).
 
+### Hub: the six Phase 7 measurements (2026-07-20)
+
+The hub capability's bench plan
+([contract](20260720-162350-hub-design.md), "Bench plan"), run against
+the implementation commit `919c4bd` (both test layers green:
+`go test -race ./...` and `./test.sh` 112/112). Raw legs:
+[20260720-214446-bench-raw-hub.txt](20260720-214446-bench-raw-hub.txt).
+Rig: M5, 10 cores, 32GB, Go 1.26.5, Caddy v2.11.4 at `919c4bd`,
+`ulimit -n` 1,048,575. **Warm, loaded machine (NOT the canonical
+cold baseline)** — load 1.7 at start, 7–16 during the heavy legs, and
+the bench client (`bench/hubbench`, committed with this entry; run by
+`bench/hub.sh`) shares all ten cores with Janus — so absolutes are
+indicative; the behavioral claims (flatness, isolation, zero-drop) and
+interleaved ratios are what this entry asserts. Stack: hubbench wss
+subscribers → Janus (loopback TLS, `hubany.ripdev.io`, `origin any`,
+app cap 4096) ← paced publisher on `POST /1.0/apps/{id}/hub/publish`;
+the bridge fixture tenant (hubbench `-mode tenant`) answers 204 on a
+unix socket and heartbeats every 5s. 15s legs. Two mid-ladder legs in
+the raw file read `SUBS n=0`: a mass disconnect from the previous
+leg's teardown flooded the fixture with close bridges and tripped
+passive health's 2s window exactly as the dialers arrived; the bench
+dialer gained bounded 503 retries and those legs were rerun (both
+takes are in the raw file).
+
+**1) Fan-out throughput** (1 publisher, 1 channel, N subscribers;
+deliveries/s = publish rate × N; clean = zero slow closes, subs
+received = enqueued):
+
+| N | publish/s | deliveries/s | p50 | p99 | clean |
+| --- | --- | --- | --- | --- | --- |
+| 100 | 4,000 | 400,000 | 0.46ms | 1.54ms | yes |
+| 100 | 5,732 (target 8000) | 484,115 | 1.11ms | 9.92ms | no — 42 slow-consumer closes 1013 |
+| 1,000 | 400 | 399,873 | 5.83ms | 12.86ms | yes |
+| 1,000 | 571 (target 800) | 436,307 | 10.32ms | 23.43ms | yes — publisher saturated, not delivery |
+| 4,000 | 50 | 200,116 | 7.28ms | 15.46ms | yes |
+| 4,000 | 107 (target 150) | 359,111 | 44.07ms | 167.86ms | yes, deep queueing |
+
+**Sustained fan-out is ~0.4M deliveries/s and roughly independent of
+room size** (400k at N=100, 436k at N=1k, 359k at N=4k) — the ceiling
+is shared fan-out work, not connection count. Past it the designed
+failure mode appears instead of collapse: at N=100/484k the laggards
+close 1013 (slow consumer) while the rest keep receiving. The
+clean-latency envelope is ~400k deliveries/s at N≤1k and ~200k at
+N=4k. Single-channel publish ceiling through the control plane:
+~5,700 publishes/s (4 concurrent HTTP publishers). At the N=4k
+over-ceiling legs, subscribers collected 0.6% less than enqueued with
+zero closes: the measurement window closes before the tail drains —
+enqueue-vs-window artifact, not loss.
+
+**2) Delivery latency at 10/50/90% of the fan-out ceiling** (N=1,000;
+ceiling taken as the 400/s clean point; publish→receive, publisher
+timestamps in the payload, client-side receive queueing included):
+
+| % of ceiling | publish/s | p50 | p99 |
+| --- | --- | --- | --- |
+| 10% | 40 | 2.39ms | 5.57ms |
+| 50% | 200 | 2.08ms | 14.45ms |
+| 90% | 360 | 4.56ms | 16.67ms |
+
+p50 sits flat ~2ms until half load and only doubles at 90%; p99 grows
+to condensed-teens ms, not linearly — the queue design holds the tail
+until saturation, as the contract asserts.
+
+**3) Connection ceiling + idle cost** (fresh caddy, zero traffic):
+4,096 connections admitted — each through a real open bridge to the
+fixture tenant — in 1.53s ≈ **2,700–3,000 conns/s admitted** (2,964/s
+on the warm-caddy take); the 4,097th handshake answers **503** at the
+cap. Idle RSS: 44.5MB → 314.9MB at 4,096 idle conns ≈ **68KB per idle
+connection** (goroutine pair + queues + header snapshot) — ~2% of the
+contract's 3.03MiB adversarial per-conn cap, so the 12.1GiB worst-case
+budget bounds attack traffic, not idle fleets.
+
+**4) Slow-consumer isolation** (one wedged subscriber among N=1,000,
+100 publishes/s × 1KiB pad, interleaved A/B/B/A):
+
+| Leg | others' p99 | slow closes |
+| --- | --- | --- |
+| no wedge pair-A | 31.02ms | 0 |
+| wedged pair-A | 5.84ms | 1 (close 1013) |
+| wedged pair-B | 5.56ms | 1 (close 1013) |
+| no wedge pair-B | 5.75ms | 0 |
+
+The wedged connection closes 1013 within the cap arithmetic (256
+messages / 1MiB) in every wedge leg; the other 999 subscribers'
+p99 does not move (5.6–5.8ms across the three settled legs;
+pair-A's 31ms is the first leg after the 4k ramp — warm-up noise the
+interleaving exists to expose). Zero unexpected closes among the
+non-wedged.
+
+**5) Reload under fan-out** (N=1,000 at 100 publishes/s for 20s;
+doorbell-only PUT at t≈5s — the admission cut — republish at t≈8s):
+**zero socket drops** (unexpected_closes=0), delivery rate steady
+(100,031/s received vs 100,035/s enqueued), max inter-delivery gap
+89ms — inside the 28–136ms band undisturbed legs show on this loaded
+rig — and `bridge_failed`/`bridge_dropped` deltas both 0 (no client
+frames were in flight; membership and fan-out ride above the worker
+plane, as designed).
+
+**6) Text-bridge tax** (50 senders, no-delivery bare events —
+pure edge execution + bridge observation; tenant answering 204
+instantly vs +5ms, interleaved A/B/B/A):
+
+| Leg | client frames/s | bridge_sent | bridge_dropped |
+| --- | --- | --- | --- |
+| A instant | 221,503 | 1.70M | 2.61M |
+| B +5ms | 424,126 | 166k | 7.73M |
+| B +5ms | 420,332 | 166k | 7.70M |
+| A instant | 210,576 | 1.66M | 2.53M |
+
+Edge client-send throughput does **not** degrade behind a slow tenant
+— it doubles (2.0x, both pairs), because completed bridge POSTs
+compete with the edge for CPU while the bounded bridge FIFO's
+drop-oldest is nearly free. Stated the other way: full-speed
+observation with an instant tenant costs ~half the raw send ceiling,
+and that is the tax's worst case; a slow tenant pays it in dropped
+observations (at-most-once by contract), never in client-visible
+latency or delivery.
+
 ### Next-best lever
 
 The ranked list is closed: #1, #2, #3, #4, and #5 are shipped with
