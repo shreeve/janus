@@ -25,15 +25,40 @@ const (
 	hubMinMaxFrame        = int64(1 << 10)
 )
 
-// HubSettings is the cold `hub` directive, in the global janus block
-// (default) and in site janus blocks (override).
+// HubSettings configures the site-scoped hub: per-app WebSocket fan-out
+// terminated at the edge. It appears in the global janus options
+// (default) and per site (override); unset keys cascade from the global
+// settings, then built-in defaults. The full contract is
+// docs/20260720-162350-hub-design.md.
 type HubSettings struct {
-	Enabled     *bool    `json:"enabled,omitempty"`
-	Path        *string  `json:"path,omitempty"`
-	MaxConns    *int     `json:"max_conns,omitempty"`
-	MaxFrame    *int64   `json:"max_frame,omitempty"`
-	MaxChannels *int     `json:"max_channels,omitempty"`
-	Origin      []string `json:"origin,omitempty"`
+	// Enabled turns the hub on or off for the site. Default: off.
+	// Sites may override the global default; explicit off beats an
+	// inherited on.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Path is the WebSocket endpoint path; only upgrade requests to it
+	// are intercepted. Must start with "/" and contain no "?" or "#".
+	// Default: "/hub".
+	Path *string `json:"path,omitempty"`
+
+	// MaxConns caps concurrent hub connections per app. An app spanning
+	// several hub-enabled hosts is admitted against the minimum effective
+	// value across all of them. Default: 4096.
+	MaxConns *int `json:"max_conns,omitempty"`
+
+	// MaxFrame is the largest client frame, in bytes; larger frames close
+	// the connection (1009). Minimum: 1024 (1KiB). Default: 65536 (64KiB).
+	MaxFrame *int64 `json:"max_frame,omitempty"`
+
+	// MaxChannels caps channels one connection may join. Default: 128.
+	MaxChannels *int `json:"max_channels,omitempty"`
+
+	// Origin is the browser Origin policy: "same" (Origin host must
+	// equal the request Host), "any" (no check — for token-authenticated
+	// non-browser clients), or "same" plus allowlisted hostnames, or
+	// hostnames alone. Failure answers 403 before any tenant contact.
+	// Default: same.
+	Origin []string `json:"origin,omitempty"`
 }
 
 // hubSite is one site's effective hub configuration after cascade.
@@ -61,20 +86,9 @@ type hubSite struct {
 // illegal origin combinations, nested blocks.
 func parseHubDirective(d *caddyfile.Dispenser) (*HubSettings, error) {
 	hs := &HubSettings{}
-	on := true
-	args := d.RemainingArgs()
-	switch len(args) {
-	case 0:
-	case 1:
-		switch args[0] {
-		case "on":
-		case "off":
-			on = false
-		default:
-			return nil, d.Errf(`hub: want "on" or "off", got %q`, args[0])
-		}
-	default:
-		return nil, d.Err(`hub: want at most one of "on" or "off"`)
+	on, err := parseOnOff(d.RemainingArgs())
+	if err != nil {
+		return nil, d.Errf("hub: %v", err)
 	}
 	hs.Enabled = &on
 
@@ -90,7 +104,7 @@ func parseHubDirective(d *caddyfile.Dispenser) (*HubSettings, error) {
 		seen[sub] = true
 		switch sub {
 		case "path":
-			val, err := oneHubArg(d, sub)
+			val, err := oneDirectiveArg(d, "hub", sub)
 			if err != nil {
 				return nil, err
 			}
@@ -99,7 +113,7 @@ func parseHubDirective(d *caddyfile.Dispenser) (*HubSettings, error) {
 			}
 			hs.Path = &val
 		case "max_conns", "max_channels":
-			val, err := oneHubArg(d, sub)
+			val, err := oneDirectiveArg(d, "hub", sub)
 			if err != nil {
 				return nil, err
 			}
@@ -113,7 +127,7 @@ func parseHubDirective(d *caddyfile.Dispenser) (*HubSettings, error) {
 				hs.MaxChannels = &n
 			}
 		case "max_frame":
-			val, err := oneHubArg(d, sub)
+			val, err := oneDirectiveArg(d, "hub", sub)
 			if err != nil {
 				return nil, err
 			}
@@ -140,14 +154,6 @@ func parseHubDirective(d *caddyfile.Dispenser) (*HubSettings, error) {
 		}
 	}
 	return hs, nil
-}
-
-func oneHubArg(d *caddyfile.Dispenser, sub string) (string, error) {
-	args := d.RemainingArgs()
-	if len(args) != 1 {
-		return "", d.Errf("hub %s: want exactly one argument", sub)
-	}
-	return args[0], nil
 }
 
 func validateHubPath(p string) error {
@@ -233,7 +239,7 @@ func (h *Handler) provisionHub() error {
 			}
 		}
 	}
-	if !cascadeBoolPtr(hubEnabledPtr(s), hubEnabledPtr(g), false) {
+	if !cascadeBool(hubEnabledPtr(s), hubEnabledPtr(g), false) {
 		return nil
 	}
 	if h.app == nil || h.dp == nil {

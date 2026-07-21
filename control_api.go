@@ -37,7 +37,7 @@ func (a *App) startControlListeners() error {
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 		}
-		if c.UseTLS {
+		if c.useTLS {
 			certFile := "certs/ripdev.io.crt"
 			keyFile := "certs/ripdev.io.key"
 			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -50,8 +50,8 @@ func (a *App) startControlListeners() error {
 			}
 		}
 
-		if c.Network == "unix" {
-			if err := os.MkdirAll(filepath.Dir(c.Addr), 0o755); err != nil {
+		if c.network == "unix" {
+			if err := os.MkdirAll(filepath.Dir(c.addr), 0o755); err != nil {
 				return fmt.Errorf("control internal: %w", err)
 			}
 		}
@@ -60,7 +60,7 @@ func (a *App) startControlListeners() error {
 		// swaps: on reload the new app shares the old app's socket instead
 		// of failing to bind while the old app still holds it. Caddy also
 		// unlinks unix sockets before binding and after the last close.
-		na, err := caddy.ParseNetworkAddress(c.Network + "/" + c.Addr)
+		na, err := caddy.ParseNetworkAddress(c.network + "/" + c.addr)
 		if err != nil {
 			return fmt.Errorf("control %s address %s: %w", c.Mode, c.Listen, err)
 		}
@@ -72,7 +72,7 @@ func (a *App) startControlListeners() error {
 		if !ok {
 			return fmt.Errorf("control %s listen %s: %T is not a stream listener", c.Mode, c.Listen, lnAny)
 		}
-		if c.UseTLS {
+		if c.useTLS {
 			ln = tls.NewListener(ln, srv.TLSConfig)
 		}
 
@@ -81,8 +81,8 @@ func (a *App) startControlListeners() error {
 		a.logger.Info("janus control listening",
 			zap.String("mode", c.Mode),
 			zap.String("listen", c.Listen),
-			zap.String("network", c.Network),
-			zap.String("addr", c.Addr),
+			zap.String("network", c.network),
+			zap.String("addr", c.addr),
 			zap.Bool("auth", c.secret != ""),
 		)
 		go func(s *controlServer) {
@@ -130,7 +130,7 @@ func (a *App) controlMux() *http.ServeMux {
 	// Register under each base path; empty base → /1.0
 	paths := map[string]bool{"": true}
 	for _, c := range a.Control {
-		paths[c.BasePath] = true
+		paths[c.basePath] = true
 	}
 	for base := range paths {
 		p1 := base + "/1.0"
@@ -208,7 +208,7 @@ func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"api_version": "1.0",
 		"type":        "janus",
-		"ping":        resolveBool(nil, a.Ping, false),
+		"ping":        cascadeBool(nil, a.Ping, false),
 		"control":     a.controlPublicInfo(),
 	})
 }

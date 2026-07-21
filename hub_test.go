@@ -746,8 +746,11 @@ func TestHubHostsRemovedClosesOnlyBoundConns(t *testing.T) {
 
 func TestHubSlotReservation(t *testing.T) {
 	hub := newTestAppHub()
-	if !hub.reserveSlot(2) || !hub.reserveSlot(2) {
-		t.Fatal("two reservations must fit a floor of 2")
+	if !hub.reserveSlot(2) {
+		t.Fatal("first reservation must fit a floor of 2")
+	}
+	if !hub.reserveSlot(2) {
+		t.Fatal("second reservation must fit a floor of 2")
 	}
 	if hub.reserveSlot(2) {
 		t.Fatal("third reservation must fail at floor 2")

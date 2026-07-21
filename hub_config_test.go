@@ -332,7 +332,7 @@ func TestJanusStatePooling(t *testing.T) {
 	key := "janus.test." + t.Name()
 	build := func() (*janusState, error) {
 		st, _, err := janusPool.LoadOrNew(key, func() (caddy.Destructor, error) {
-			return newJanusState(nil)
+			return newJanusState(nil, 0)
 		})
 		if err != nil {
 			return nil, err

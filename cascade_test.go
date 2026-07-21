@@ -1,8 +1,37 @@
 package janus
 
-import "testing"
+import (
+	"testing"
+	"time"
 
-func TestResolveBool(t *testing.T) {
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+)
+
+func TestParseHeartbeatTTL(t *testing.T) {
+	d := caddyfile.NewTestDispenser("janus {\n heartbeat_ttl 30s \n}")
+	app := new(App)
+	if err := app.UnmarshalCaddyfile(d); err != nil {
+		t.Fatal(err)
+	}
+	if time.Duration(app.HeartbeatTTL) != 30*time.Second {
+		t.Fatalf("heartbeat_ttl: got %v", caddy.Duration(app.HeartbeatTTL))
+	}
+	for _, bad := range []string{
+		"janus {\n heartbeat_ttl \n}",
+		"janus {\n heartbeat_ttl abc \n}",
+		"janus {\n heartbeat_ttl 0s \n}",
+		"janus {\n heartbeat_ttl -5s \n}",
+		"janus {\n heartbeat_ttl 5s \n heartbeat_ttl 6s \n}",
+	} {
+		d := caddyfile.NewTestDispenser(bad)
+		if err := new(App).UnmarshalCaddyfile(d); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
+func TestCascadeBool(t *testing.T) {
 	on, off := true, false
 	tests := []struct {
 		name    string
@@ -20,7 +49,7 @@ func TestResolveBool(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := resolveBool(tt.site, tt.global, tt.builtin); got != tt.want {
+			if got := cascadeBool(tt.site, tt.global, tt.builtin); got != tt.want {
 				t.Fatalf("got %v, want %v", got, tt.want)
 			}
 		})

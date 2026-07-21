@@ -37,18 +37,20 @@ type Control struct {
 	// TokenKind is env, file, or literal.
 	TokenKind string `json:"token_kind,omitempty"`
 
-	// BasePath is the URL path prefix for the control API (local/public).
-	BasePath string `json:"-"`
+	// Everything below is derived at Provision, never configured.
 
-	// Network / Addr are derived for net.Listen.
-	Network string `json:"-"`
-	Addr    string `json:"-"`
+	// basePath is the URL path prefix for the control API (local/public).
+	basePath string
 
-	// UseTLS is set for https:// listeners.
-	UseTLS bool `json:"-"`
+	// network and addr feed net.Listen.
+	network string
+	addr    string
 
-	// secret is resolved at Provision.
-	secret string `json:"-"`
+	// useTLS is set for https:// listeners.
+	useTLS bool
+
+	// secret is the resolved Bearer token.
+	secret string
 }
 
 // parseTokenArg parses a token:… argument.
@@ -58,7 +60,7 @@ type Control struct {
 //	"token:dev-only"      → literal (entire arg was quoted; not for public)
 func parseTokenArg(val string, quoted bool) (kind, secretRef string, err error) {
 	if !strings.HasPrefix(val, "token:") {
-		return "", "", fmt.Errorf("token argument must start with token:")
+		return "", "", fmt.Errorf("token argument must start with %q", "token:")
 	}
 	ref := strings.TrimPrefix(val, "token:")
 	if ref == "" {
@@ -120,10 +122,10 @@ func (c *Control) normalize() error {
 		if strings.Contains(c.Listen, "://") {
 			return fmt.Errorf("control internal wants a socket path, got URL %q", c.Listen)
 		}
-		c.Network = "unix"
-		c.Addr = c.Listen
-		c.BasePath = ""
-		c.UseTLS = false
+		c.network = "unix"
+		c.addr = c.Listen
+		c.basePath = ""
+		c.useTLS = false
 	case "local":
 		c.Mode = "local"
 		if c.Listen == "" {
@@ -170,16 +172,16 @@ func (c *Control) parseHTTPListen(requireHTTPS bool) error {
 		if requireHTTPS {
 			return fmt.Errorf("public control requires https://, got %q", c.Listen)
 		}
-		c.UseTLS = false
+		c.useTLS = false
 	case "https":
-		c.UseTLS = true
+		c.useTLS = true
 	default:
 		return fmt.Errorf("listen URL must be http:// or https://, got %q", c.Listen)
 	}
 	host := u.Hostname()
 	port := u.Port()
 	if port == "" {
-		if c.UseTLS {
+		if c.useTLS {
 			port = "443"
 		} else {
 			port = "80"
@@ -193,11 +195,11 @@ func (c *Control) parseHTTPListen(requireHTTPS bool) error {
 			return fmt.Errorf("local control must bind loopback (127.0.0.1, ::1, or localhost), got %q", host)
 		}
 	}
-	c.Network = "tcp"
-	c.Addr = net.JoinHostPort(host, port)
-	c.BasePath = strings.TrimSuffix(u.Path, "/")
-	if c.BasePath == "/" {
-		c.BasePath = ""
+	c.network = "tcp"
+	c.addr = net.JoinHostPort(host, port)
+	c.basePath = strings.TrimSuffix(u.Path, "/")
+	if c.basePath == "/" {
+		c.basePath = ""
 	}
 	return nil
 }

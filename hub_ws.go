@@ -39,7 +39,7 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 
 	// Origin check: fails → 403, no upgrade, no bridge.
 	if !hubOriginAllowed(cfg, r, host) {
-		app.logger.Warn("janus hub origin rejected",
+		app.hubLog.Warn("janus hub origin rejected",
 			zap.String("app", rec.ID),
 			zap.String("host", host),
 			zap.String("origin", r.Header.Get("Origin")),
@@ -51,7 +51,7 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 
 	// Hub-enabled site, hub-unready tenant: loud, not a hang.
 	if rec.BridgePath == "" {
-		return hubUnavailable(w, "app has no registered bridge_path")
+		return app.hubUnavailable(w, rec.ID, "app has no registered bridge_path")
 	}
 
 	// Admission checks and slot reservation, atomically: reserving before
@@ -64,7 +64,7 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	}
 	hub := st.hubs.getOrCreate(rec.ID)
 	if !hub.reserveSlot(floor) {
-		return hubUnavailable(w, fmt.Sprintf("connection cap reached (%d)", floor))
+		return app.hubUnavailable(w, rec.ID, fmt.Sprintf("connection cap reached (%d)", floor))
 	}
 
 	// The filtered handshake-header snapshot: frozen at open, replayed on
@@ -91,12 +91,7 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	res := hubBridgePost(st, host, rec.ID, connID, "open", r.RemoteAddr, snapshot, nil)
 	if !res.ok {
 		hub.releaseSlot()
-		app.logger.Warn("janus hub open bridge failed",
-			zap.String("app", rec.ID),
-			zap.String("conn", connID),
-			zap.String("reason", res.errMsg),
-		)
-		return hubUnavailable(w, "open bridge failed: "+res.errMsg)
+		return app.hubUnavailable(w, rec.ID, "open bridge failed: "+res.errMsg)
 	}
 	if res.status < 200 || res.status > 299 {
 		// The tenant refused admission: forward that status and body
@@ -120,7 +115,7 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	// into a registration. Teardown during the bridge → 503, no upgrade.
 	c := newHubConn(connID, hub, host, r.RemoteAddr, snapshot, cfg.maxChannels, cfg.maxFrame)
 	if !hub.registerConn(c) {
-		return hubUnavailable(w, "app deregistered during the open bridge")
+		return app.hubUnavailable(w, rec.ID, "app deregistered during the open bridge")
 	}
 
 	ws, err := hubUpgrader.Upgrade(w, r, nil)
@@ -141,7 +136,7 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 		c.pongReceived()
 		return nil
 	})
-	c.bridge = newHubBridge(c, st, app.logger, cfg.maxFrame)
+	c.bridge = newHubBridge(c, st, app.hubLog, cfg.maxFrame)
 
 	go c.writeLoop()
 	go c.pingLoop()
@@ -169,11 +164,17 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func hubUnavailable(w http.ResponseWriter, reason string) error {
+// hubUnavailable rejects a hub handshake with 503 + Retry-After and logs
+// the reason with app attribution — a refused admission must be visible
+// to the operator, not just to the refused client.
+func (a *App) hubUnavailable(w http.ResponseWriter, appID, reason string) error {
+	a.hubLog.Warn("janus hub handshake refused",
+		zap.String("app", appID),
+		zap.String("reason", reason),
+	)
 	w.Header().Set("Retry-After", retryAfter)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-	_ = reason // carried in logs by callers that have context
 	return nil
 }
 
@@ -181,7 +182,7 @@ func hubUnavailable(w http.ResponseWriter, reason string) error {
 // forwarding each valid frame to the text bridge (observation only).
 func (h *Handler) hubReadLoop(c *hubConn) {
 	hub := c.hub
-	logger := h.app.logger
+	logger := h.app.hubLog
 	for {
 		mt, data, err := c.ws.ReadMessage()
 		if err != nil {

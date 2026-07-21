@@ -84,7 +84,7 @@ func (h *Handler) pingEnabled() bool {
 	if h.app != nil {
 		global = h.app.Ping
 	}
-	return resolveBool(h.Ping, global, false)
+	return cascadeBool(h.Ping, global, false)
 }
 
 // ServeHTTP handles admitted requests: site-scoped /ping answers first when

@@ -364,6 +364,9 @@ func TestAppsHTTPLifecycle(t *testing.T) {
 		t.Fatalf("put upstreams: %d %v", code, body)
 	}
 	code, body = doJSON(t, mux, http.MethodGet, "/1.0/apps/"+id, "")
+	if code != http.StatusOK {
+		t.Fatalf("get after put: %d", code)
+	}
 	if ups, _ := body["upstreams"].([]any); len(ups) != 2 {
 		t.Fatalf("upstreams after put: %v", body)
 	}

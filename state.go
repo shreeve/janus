@@ -2,6 +2,7 @@ package janus
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
@@ -27,17 +28,28 @@ type janusState struct {
 	logger   *zap.Logger
 }
 
-func newJanusState(logger *zap.Logger) (*janusState, error) {
-	ttl, err := heartbeatTTLFromEnv()
-	if err != nil {
-		return nil, fmt.Errorf("janus: %w", err)
+// newJanusState builds the pooled holder. ttl is the configured heartbeat
+// TTL; zero falls back to the JANUS_HEARTBEAT_TTL environment variable,
+// then the built-in default. The holder is constructed once per process
+// (first Provision wins), so a config reload cannot retune the TTL — only
+// a restart can.
+func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
+	if ttl == 0 {
+		var err error
+		ttl, err = heartbeatTTLFromEnv()
+		if err != nil {
+			return nil, fmt.Errorf("janus: %w", err)
+		}
+	}
+	if logger == nil {
+		logger = zap.NewNop()
 	}
 	reg := newAppRegistry()
 	reg.ttl = ttl
 	st := &janusState{
 		registry: reg,
 		hubs:     newHubSet(),
-		dp:       newDataPlane(reg, logger),
+		dp:       newDataPlane(reg, logger.Named("dataplane")),
 		logger:   logger,
 	}
 	// DELETE and TTL reap tear the app's hub down; PATCH host removal
@@ -45,7 +57,7 @@ func newJanusState(logger *zap.Logger) (*janusState, error) {
 	// the registry live and die together in this holder.
 	reg.hubTeardown = st.hubs.teardownApp
 	reg.hubHostsRemoved = st.hubs.hostsRemoved
-	reg.startSweeper(logger)
+	reg.startSweeper(logger.Named("registry"))
 	return st, nil
 }
 

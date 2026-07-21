@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -74,6 +75,19 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return err
 				}
 				a.Hub = hs
+			case "heartbeat_ttl":
+				if a.HeartbeatTTL != 0 {
+					return d.Err("duplicate heartbeat_ttl directive")
+				}
+				val, err := oneDirectiveArg(d, "janus", "heartbeat_ttl")
+				if err != nil {
+					return err
+				}
+				dur, perr := caddy.ParseDuration(val)
+				if perr != nil || dur <= 0 {
+					return d.Errf("heartbeat_ttl: want a positive duration (e.g. 15s), got %q", val)
+				}
+				a.HeartbeatTTL = caddy.Duration(dur)
 			case "token":
 				return d.Err("token belongs on the control line as token:… (per-listener), not as its own directive")
 			default:

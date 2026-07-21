@@ -78,7 +78,7 @@ func TestControlNormalizeDefaults(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != DefaultControlInternal || c.Network != "unix" || c.Addr != DefaultControlInternal {
+	if c.Listen != DefaultControlInternal || c.network != "unix" || c.addr != DefaultControlInternal {
 		t.Fatalf("internal defaults: %+v", c)
 	}
 
@@ -86,7 +86,7 @@ func TestControlNormalizeDefaults(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != DefaultControlLocal || c.Network != "tcp" || c.Addr != "127.0.0.1:7600" || c.UseTLS {
+	if c.Listen != DefaultControlLocal || c.network != "tcp" || c.addr != "127.0.0.1:7600" || c.useTLS {
 		t.Fatalf("local defaults: %+v", c)
 	}
 }
@@ -97,7 +97,7 @@ func TestControlNormalizePublic(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatal(err)
 	}
-	if !c.UseTLS || c.Addr != "0.0.0.0:7601" || c.secret != "secret" {
+	if !c.useTLS || c.addr != "0.0.0.0:7601" || c.secret != "secret" {
 		t.Fatalf("public defaults: %+v secret=%q", c, c.secret)
 	}
 
@@ -129,8 +129,8 @@ func TestControlNormalizeBasePath(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatal(err)
 	}
-	if c.BasePath != "/admin" {
-		t.Fatalf("base path: got %q", c.BasePath)
+	if c.basePath != "/admin" {
+		t.Fatalf("base path: got %q", c.basePath)
 	}
 }
 
@@ -206,8 +206,8 @@ func TestStartUnwindsOnPartialFailure(t *testing.T) {
 
 	app := &App{
 		Control: []Control{
-			{Mode: "internal", Network: "unix", Addr: good, Listen: good},
-			{Mode: "local", Network: "unix", Addr: bad, Listen: bad},
+			{Mode: "internal", network: "unix", addr: good, Listen: good},
+			{Mode: "local", network: "unix", addr: bad, Listen: bad},
 		},
 		logger:  zap.NewNop(),
 		appsReg: newAppRegistry(),

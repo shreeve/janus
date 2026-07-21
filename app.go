@@ -2,8 +2,10 @@ package janus
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"go.uber.org/zap"
 )
 
@@ -13,24 +15,32 @@ func init() {
 
 // App is the process-wide Janus application (cold config).
 type App struct {
-	// Control is the exact set of control-plane listeners.
-	// Empty means default: one implicit "control internal".
+	// Control is the exact set of control-plane listeners serving the
+	// hot /1.0 API. Empty means one implicit internal (unix socket)
+	// listener.
 	Control []Control `json:"control,omitempty"`
 
 	// Ping is the global default for the site-scoped ping capability.
-	// nil = built-in default (off). Sites may override.
+	// Default: off. Sites may override.
 	Ping *bool `json:"ping,omitempty"`
 
-	// Cache is the global default for the site-scoped cache capability
-	// (micro-cache + coalescing), plus the process-wide pool knobs
-	// (max_bytes, max_app_share). nil = built-in default (off).
+	// Cache is the global default and process-wide pool configuration
+	// for the site-scoped micro-cache. Default: off. Sites may override
+	// the per-site keys.
 	Cache *CacheSettings `json:"cache,omitempty"`
 
 	// Hub is the global default for the site-scoped hub capability
-	// (per-app WebSocket fan-out). nil = built-in default (off).
+	// (per-app WebSocket fan-out). Default: off. Sites may override.
 	Hub *HubSettings `json:"hub,omitempty"`
 
+	// HeartbeatTTL is how long a registered app may go without a
+	// heartbeat before its registration is reaped (same effect as
+	// DELETE). Default: 15s. The JANUS_HEARTBEAT_TTL environment
+	// variable is honored as a fallback when this is unset.
+	HeartbeatTTL caddy.Duration `json:"heartbeat_ttl,omitempty"`
+
 	logger      *zap.Logger
+	hubLog      *zap.Logger // named child logger for the hub subsystem
 	ctx         caddy.Context
 	controlSrvs []*controlServer
 
@@ -70,9 +80,13 @@ func (App) CaddyModule() caddy.ModuleInfo {
 // the same live state instead of constructing a split-brain registry.
 func (a *App) Provision(ctx caddy.Context) error {
 	a.logger = ctx.Logger()
+	a.hubLog = a.logger.Named("hub")
 	a.ctx = ctx
+	if a.HeartbeatTTL < 0 {
+		return fmt.Errorf("janus: heartbeat_ttl must be positive, got %v", time.Duration(a.HeartbeatTTL))
+	}
 	stI, _, err := janusPool.LoadOrNew(janusStateKey, func() (caddy.Destructor, error) {
-		return newJanusState(a.logger)
+		return newJanusState(a.logger, time.Duration(a.HeartbeatTTL))
 	})
 	if err != nil {
 		return err
@@ -103,7 +117,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 // Start starts the Janus app.
 func (a *App) Start() error {
 	a.logger.Info("janus ping default",
-		zap.Bool("enabled", resolveBool(nil, a.Ping, false)),
+		zap.Bool("enabled", cascadeBool(nil, a.Ping, false)),
 	)
 	// The HTTP app is provisioned by now: pair each janus site with its
 	// host matchers (max_conns floor resolution), then close hub
@@ -142,8 +156,9 @@ func (a *App) Cleanup() error {
 
 // Interface guards
 var (
-	_ caddy.Module       = (*App)(nil)
-	_ caddy.App          = (*App)(nil)
-	_ caddy.Provisioner  = (*App)(nil)
-	_ caddy.CleanerUpper = (*App)(nil)
+	_ caddy.Module          = (*App)(nil)
+	_ caddy.App             = (*App)(nil)
+	_ caddy.Provisioner     = (*App)(nil)
+	_ caddy.CleanerUpper    = (*App)(nil)
+	_ caddyfile.Unmarshaler = (*App)(nil)
 )

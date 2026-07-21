@@ -3,27 +3,47 @@ package janus
 import (
 	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/dustin/go-humanize"
 )
 
-// CacheSettings is the cold `cache` directive
-// (docs/20260720-033201-capability-microcache.md "Syntax"). It appears in
-// the global janus block (default + process-wide pool knobs) and in site
-// janus blocks (override). Tuning keys cascade per key: a site overrides
-// only the keys it names. MaxBytes and MaxAppShare name the one shared
-// memory pool and are legal only in the global block.
+// CacheSettings configures the site-scoped micro-cache with request
+// coalescing. It appears in the global janus options (default plus the
+// process-wide pool knobs) and per site (override); unset keys cascade
+// from the global settings, then built-in defaults. The full contract is
+// docs/20260720-033201-capability-microcache.md.
 type CacheSettings struct {
-	Enabled     *bool           `json:"enabled,omitempty"`
-	TTL         *caddy.Duration `json:"ttl,omitempty"`
-	TTLMax      *caddy.Duration `json:"ttl_max,omitempty"`
-	MaxBody     *int64          `json:"max_body,omitempty"`
-	Debug       *bool           `json:"debug,omitempty"`
-	MaxBytes    *int64          `json:"max_bytes,omitempty"`
-	MaxAppShare *int            `json:"max_app_share,omitempty"`
+	// Enabled turns the cache on or off for the site. Default: off.
+	// Sites may override the global default; explicit off beats an
+	// inherited on.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// TTL is the freshness window for cached responses when the origin
+	// sends no explicit lifetime. Default: 1s.
+	TTL *caddy.Duration `json:"ttl,omitempty"`
+
+	// TTLMax caps origin-declared lifetimes (s-maxage or max-age); a
+	// larger declared value is clamped to this. Default: 10s.
+	TTLMax *caddy.Duration `json:"ttl_max,omitempty"`
+
+	// MaxBody is the largest response body, in bytes, the cache stores;
+	// larger responses stream through uncached. Default: 262144 (256KiB).
+	MaxBody *int64 `json:"max_body,omitempty"`
+
+	// Debug adds an X-Janus-Cache header (HIT, MISS, BYPASS, …) to every
+	// response served on the site. Default: off.
+	Debug *bool `json:"debug,omitempty"`
+
+	// MaxBytes is the process-wide memory pool shared by every site's
+	// cache, in bytes. Global-only: illegal in a site block.
+	// Default: 67108864 (64MiB).
+	MaxBytes *int64 `json:"max_bytes,omitempty"`
+
+	// MaxAppShare is the percentage of max_bytes one app may hold
+	// (1–100). Global-only: illegal in a site block. Default: 50.
+	MaxAppShare *int `json:"max_app_share,omitempty"`
 }
 
 // parseCacheDirective parses one cache directive:
@@ -39,20 +59,9 @@ type CacheSettings struct {
 // process-wide keys in a site block, nested blocks, debug with arguments.
 func parseCacheDirective(d *caddyfile.Dispenser, global bool) (*CacheSettings, error) {
 	cs := &CacheSettings{}
-	on := true
-	args := d.RemainingArgs()
-	switch len(args) {
-	case 0:
-	case 1:
-		switch args[0] {
-		case "on":
-		case "off":
-			on = false
-		default:
-			return nil, d.Errf(`cache: want "on" or "off", got %q`, args[0])
-		}
-	default:
-		return nil, d.Err(`cache: want at most one of "on" or "off"`)
+	on, err := parseOnOff(d.RemainingArgs())
+	if err != nil {
+		return nil, d.Errf("cache: %v", err)
 	}
 	cs.Enabled = &on
 
@@ -68,7 +77,7 @@ func parseCacheDirective(d *caddyfile.Dispenser, global bool) (*CacheSettings, e
 		seen[sub] = true
 		switch sub {
 		case "ttl", "ttl_max":
-			val, err := oneCacheArg(d, sub)
+			val, err := oneDirectiveArg(d, "cache", sub)
 			if err != nil {
 				return nil, err
 			}
@@ -86,7 +95,7 @@ func parseCacheDirective(d *caddyfile.Dispenser, global bool) (*CacheSettings, e
 			if sub == "max_bytes" && !global {
 				return nil, d.Err("cache max_bytes names the process-wide pool; set it in the global janus block only")
 			}
-			val, err := oneCacheArg(d, sub)
+			val, err := oneDirectiveArg(d, "cache", sub)
 			if err != nil {
 				return nil, err
 			}
@@ -104,7 +113,7 @@ func parseCacheDirective(d *caddyfile.Dispenser, global bool) (*CacheSettings, e
 			if !global {
 				return nil, d.Err("cache max_app_share is process-wide; set it in the global janus block only")
 			}
-			val, err := oneCacheArg(d, sub)
+			val, err := oneDirectiveArg(d, "cache", sub)
 			if err != nil {
 				return nil, err
 			}
@@ -129,14 +138,6 @@ func parseCacheDirective(d *caddyfile.Dispenser, global bool) (*CacheSettings, e
 	return cs, nil
 }
 
-func oneCacheArg(d *caddyfile.Dispenser, sub string) (string, error) {
-	args := d.RemainingArgs()
-	if len(args) != 1 {
-		return "", d.Errf("cache %s: want exactly one argument", sub)
-	}
-	return args[0], nil
-}
-
 // --- cascade -----------------------------------------------------------------
 
 func cacheEnabledPtr(cs *CacheSettings) *bool {
@@ -144,36 +145,6 @@ func cacheEnabledPtr(cs *CacheSettings) *bool {
 		return nil
 	}
 	return cs.Enabled
-}
-
-func cascadeDuration(site, global *caddy.Duration, builtin time.Duration) time.Duration {
-	if site != nil {
-		return time.Duration(*site)
-	}
-	if global != nil {
-		return time.Duration(*global)
-	}
-	return builtin
-}
-
-func cascadeInt64(site, global *int64, builtin int64) int64 {
-	if site != nil {
-		return *site
-	}
-	if global != nil {
-		return *global
-	}
-	return builtin
-}
-
-func cascadeBoolPtr(site, global *bool, builtin bool) bool {
-	if site != nil {
-		return *site
-	}
-	if global != nil {
-		return *global
-	}
-	return builtin
 }
 
 // provisionCacheStore validates the process-wide knobs and builds the one
@@ -242,7 +213,7 @@ func (h *Handler) provisionCache() error {
 			return fmt.Errorf("janus cache: ttl_max must be positive")
 		}
 	}
-	if !cascadeBoolPtr(cacheEnabledPtr(s), cacheEnabledPtr(g), false) {
+	if !cascadeBool(cacheEnabledPtr(s), cacheEnabledPtr(g), false) {
 		return nil
 	}
 	if h.app == nil || h.dp == nil {
@@ -265,7 +236,7 @@ func (h *Handler) provisionCache() error {
 		ttl:     cascadeDuration(sTTL, gTTL, defaultCacheTTL),
 		ttlMax:  cascadeDuration(sTTLMax, gTTLMax, defaultCacheTTLMax),
 		maxBody: cascadeInt64(sBody, gBody, defaultCacheMaxBody),
-		debug:   cascadeBoolPtr(sDebug, gDebug, false),
+		debug:   cascadeBool(sDebug, gDebug, false),
 	}
 	if cc.ttlMax < cc.ttl {
 		return fmt.Errorf("janus cache: effective ttl_max (%v) must be ≥ effective ttl (%v)", cc.ttlMax, cc.ttl)
