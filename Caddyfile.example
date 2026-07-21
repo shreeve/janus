@@ -1,0 +1,190 @@
+# Janus — production-shaped example config
+#
+# Operator-facing companion to the root Caddyfile (the working dev config
+# on *.ripdev.io). Domains here are example.com placeholders; substitute
+# your own. Check it without serving anything:
+#
+#   ./bin/caddy validate --config Caddyfile.example --adapter caddyfile
+#
+# Cold vs hot, in one breath: this file admits CAPABILITIES — what a host
+# may do (ping, cache, hub) and where /1.0 listens. The hot /1.0 API wires
+# TENANTS — which hosts map to which worker sockets, heartbeats, the hub
+# bridge_path, and publish. Nothing here names an app or a socket; a
+# tenant registers itself against the control plane:
+#
+#   POST /1.0/apps                  {"name":"shop","hosts":["www.example.com"],"bridge_path":"/rt/bridge"}
+#   PUT  /1.0/apps/{id}/upstreams   {"upstreams":[{"unix":"run/shop-1.sock"}]}
+#   POST /1.0/apps/{id}/heartbeat
+#   POST /1.0/apps/{id}/hub/publish {"@":["/lobby"],"note":{"text":"hi"}}
+#
+# The registry is memory-only: tenants re-register after a restart.
+#
+# TLS: sites below carry no tls directive on purpose — Caddy manages
+# certificates (ACME) for every named host, which is the production
+# default. Local development uses the committed trusted wildcard instead:
+#
+#   tls certs/ripdev.io.crt certs/ripdev.io.key
+{
+	# On-demand TLS: before minting a certificate for a name it has no
+	# cert for, Caddy asks Janus. The registry answers 200 when a
+	# registered app claims the host, 404 otherwise — registration IS
+	# the allowlist; there is nothing separate to manage. Point ask at a
+	# listener WITHOUT token:… (Caddy's ask request carries no
+	# Authorization header; a tokened listener denies every mint with a
+	# loud 401). The default local listener below is that listener.
+	on_demand_tls {
+		ask http://127.0.0.1:7600/1.0/tls/ask
+	}
+
+	janus {
+		# 1) ping — site-scoped, cascades. Global on means every site
+		# below answers GET /ping with pong unless it says `ping off`:
+		# unmentioned inherits, explicit off beats inherited on, and the
+		# built-in default is off when unset everywhere. A tiny
+		# data-plane liveness probe for smoke tests and load balancers —
+		# distinct from the control plane's GET /1.0/health.
+		ping
+
+		# 2) control — process-wide /1.0 listeners; never legal in a
+		# site block (one process, one registry). Each line is
+		# self-contained: mode, optional listen target, optional token:…
+		# on the same line. With no control line at all, Janus opens one
+		# implicit `control internal`.
+		control internal # unix socket run/janus.sock — operators on the box
+		control local # http://127.0.0.1:7600/ — tenants, and the tls ask above
+
+		# Token forms, per listener: token:NAME (unquoted, no slash)
+		# reads the secret from that environment variable;
+		# token:path/with/slash reads it from a file (trailing newline
+		# stripped); "token:literal" (whole argument quoted) is a
+		# literal, never legal on public. public requires https:// and
+		# token:…, and the secret resolves at provision — export or
+		# create it before starting, or the config refuses to load:
+		#
+		#	control public token:JANUS_TOKEN
+		#	control public https://0.0.0.0:7601/ token:/etc/janus/control.token
+		#	control local http://127.0.0.1:7600/ token:JANUS_TOKEN
+
+		# 3) cache — micro-cache + request coalescing. Site-scoped and
+		# cascades exactly like ping — except max_bytes and
+		# max_app_share, which name the one process-wide memory pool and
+		# are legal only in this global block. Enabling cache declares:
+		# this site's anonymous GETs may be shared for one ttl. Requests
+		# carrying Cookie or Authorization bypass; responses that set
+		# cookies, declare no-store/private, or Vary outside
+		# Accept/Accept-Encoding/Accept-Language are never stored.
+		# Concurrent misses on one key coalesce into a single worker
+		# request. Counters: GET /1.0/cache.
+		cache {
+			ttl 1s # freshness when the response declares no max-age; 1s is enough to flatten a stampede
+			ttl_max 10s # cap on response-declared max-age/s-maxage — no tenant pins an entry for an hour
+			max_body 256kb # largest storable body; anything bigger streams through uncached
+			max_bytes 64mb # process-wide pool (GLOBAL ONLY); an accounting bound, not an RSS promise — expect ~1.5–2x under churn
+			max_app_share 50 # % of max_bytes one app may hold (GLOBAL ONLY) — one hot tenant cannot zero everyone else's hit rate
+		}
+
+		# 4) hub — per-app WebSocket fan-out. Site-scoped, cascades like
+		# ping and cache; every knob here is per-site admission policy
+		# (no process-wide-only keys). Sockets terminate at Janus and
+		# survive app reloads; the tenant observes frames through its
+		# hot-registered bridge_path and steers via
+		# POST /1.0/apps/{id}/hub/publish — cold admits the capability,
+		# hot wires the tenant. Counters: GET /1.0/hub.
+		hub {
+			path /hub # WS endpoint; the hub claims Upgrade requests here only — plain HTTP on the same path flows to the worker
+			max_conns 4096 # per app, not per site — see the floor caveat at ws-small/ws-large below
+			max_frame 64kb # largest client frame; oversize closes 1009. Raising it raises the per-connection memory budget
+			max_channels 128 # channels one connection may join; the whole frame rejects past it
+			origin same # browsers must present an Origin matching the request Host — closes cross-site WebSocket hijacking by default
+		}
+	}
+}
+
+# The main site — the empty janus block admits the host and inherits
+# every global default: ping on, cache on at 1s, hub on at /hub. An
+# unmentioned capability is an inherited one; that is the cascade's
+# common case, and most sites should look exactly like this.
+example.com, www.example.com {
+	janus
+}
+
+# API — explicit off beats inherited on, for both capabilities. WHY:
+# auth carried in custom headers (X-API-Key, …) is invisible to the
+# cache's bypass rules — it can only enumerate Cookie, Authorization,
+# and Proxy-Authorization — so custom-header auth and a shared cache
+# must never meet. And a plain HTTP API speaks no hub; leaving it on
+# would let anyone open sockets against a tenant that never bridges.
+api.example.com {
+	janus {
+		cache off
+		hub off
+	}
+}
+
+# Pages — per-key override. A site block overrides only the keys it
+# names: ttl becomes 5s here, while ttl_max, max_body, and the pool
+# knobs keep their global values. debug emits X-Janus-Cache
+# (HIT|MISS|COALESCED|BYPASS) on this site's responses — dev-visible,
+# prod-quiet; drop it once the hit rate is proven.
+pages.example.com {
+	janus {
+		cache {
+			ttl 5s
+			debug
+		}
+	}
+}
+
+# Chat — hub tuning override plus an origin allowlist: same-origin
+# browsers, and the admin console served from another host. `origin
+# same admin.example.com` extends `same` rather than replacing it.
+# Non-browser clients send no Origin header and fail `same`; the
+# spelled-out opt-out for token-authenticated machine clients is
+# `origin any` — a deliberate choice, never a silent default.
+chat.example.com {
+	janus {
+		hub {
+			max_conns 16384
+			origin same admin.example.com
+		}
+	}
+}
+
+# The max_conns floor caveat: the cap is per APP, resolved as the
+# MINIMUM effective max_conns across every hub-enabled host the app
+# claims. One app claiming both hosts below admits at most 100
+# connections total, from either host — adding a tightly capped host
+# lowers the whole app's floor. Size the per-connection memory budget
+# (~3 MiB adversarial ceiling per connection) against this floor.
+ws-small.example.com {
+	janus {
+		hub {
+			max_conns 100
+		}
+	}
+}
+
+ws-large.example.com {
+	janus {
+		hub {
+			max_conns 1000
+		}
+	}
+}
+
+# On-demand TLS — the catch-all for names this file does not mention:
+# customer domains that CNAME to this edge. Caddy mints a certificate
+# per SNI at handshake time, gated by the ask in the global block, so
+# a tenant hot-registering a new host gets TLS with no config reload
+# and no wildcard. hub off because this site matches EVERY unknown
+# host: leaving hub on here would make every on-demand name
+# hub-enabled, defeating per-host hub admission. Cache stays inherited
+# — an anonymous GET on a registered host is the cache's home turf.
+https:// {
+	tls {
+		on_demand
+	}
+	janus {
+		hub off
+	}
+}

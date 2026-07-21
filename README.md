@@ -143,6 +143,7 @@ Confirm the module is linked:
 | `cache_serve.go` | Cache request path: decision table, coalescing, the fill |
 | `cache_config.go` | `cache` directive: parse, cascade, provision |
 | `Caddyfile` | Working cold config (multi-site cascade demos) |
+| `Caddyfile.example` | Operator-facing, production-shaped example config (validates standalone) |
 | `test.sh` | High-level acceptance suite (self-contained; not a substitute for `go test`) |
 | `docs/` | Design notes, SPEC, capabilities (`YYYYMMDD-HHMMSS-` prefixed) |
 
