@@ -811,7 +811,7 @@ so hit tests use three requests, not two.
 | **Unbounded Vary never stored** | Upstream answers `Vary: *` (and `Vary: Cookie`); repeats always reach the worker |
 | **Non-200 never stored** | Upstream 404 and 500; repeats always reach the worker |
 | **Marked 503 never stored** | Busy fixture answers `Rip-Worker-Busy: 1` 503; repeats reach the data plane's normal retry machinery |
-| **Truncated fill never stored** | Fixture declares `Content-Length: 1000`, sends 500 bytes, closes; repeats reach the worker |
+| **Truncated fill never stored** | Fixture declares `Content-Length: 1000`, sends 500 bytes, closes; nothing stored. The truncated copy is also a mid-response worker death (pool protocol health): the socket is marked unhealthy, a request inside the window answers 503, and after the window the worker is selectable again |
 | **Key is wire bytes** | `go test` unit: `/a%2Fb` and `/a/b` are two keys |
 | **Coalescing** | Slow fixture (~200ms); N=32 concurrent `GET`s on a cold key; worker counter = **1**; all 32 get 200 with the same body; coalesced counter = 31 |
 | **Waiter cap overflow falls through** | N=100 concurrent on one cold key; ≥ N−65 requests reach the worker as fall-throughs (waiter_overflow counted); nobody gets a manufactured 503 |

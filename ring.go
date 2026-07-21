@@ -121,11 +121,17 @@ func (dp *dataPlane) runRing(appID, sockPath string, f *ringFlight) {
 			zap.String("reason", outcome.reason),
 		)
 	}
+	// Publish the outcome, then retire the flight and release its holders
+	// in one critical section. The outcome write happens-before close(done)
+	// (holders read it only after <-done), and a new arrival can never find
+	// the flight after its done channel closes — deleting first and closing
+	// later would open a gap where a second flight starts while up to a
+	// full waiter cap of holders is still parked on this one.
+	f.outcome = outcome
 	dp.mu.Lock()
 	delete(dp.flights, appID)
-	dp.mu.Unlock()
-	f.outcome = outcome
 	close(f.done)
+	dp.mu.Unlock()
 }
 
 // doRing sends GET /ring (no body, Host = app id) on its own connection to

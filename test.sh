@@ -917,9 +917,14 @@ case_cache_truncated_fill_never_stored() {
 	local s0
 	s0="$(cache_stat stores)"
 	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/truncate 2>/dev/null || true
+	# A truncated copy is a mid-response worker death: the socket is
+	# marked unhealthy, and with no other upstream the window answers 503.
+	eq "$(http_code https://cachetest.ripdev.io/truncate)" "503"
+	sleep 2.1 # the unhealthy window expires; the worker is selectable again
 	curl -sS --max-time 10 -o /dev/null https://cachetest.ripdev.io/truncate 2>/dev/null || true
 	eq "$(path_hits "$CACHE_HITS1" /truncate)" "2"
 	eq "$(($(cache_stat stores) - s0))" "0"
+	sleep 2.1 # leave the group with a healthy upstream
 }
 
 case_cache_max_body_streams_uncached() {

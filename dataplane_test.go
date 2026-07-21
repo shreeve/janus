@@ -300,6 +300,35 @@ func TestDataPlane502WhenWorkerMisbehavesAfterDial(t *testing.T) {
 	}
 }
 
+// TestWorkerDiesMidResponseMarksUnhealthy pins the health accounting for a
+// worker dying after response headers landed: the body copy fails (the
+// proxy aborts with http.ErrAbortHandler — ErrorHandler never runs), the
+// client's partial response is already out the door, and the one required
+// effect is that the socket is deselected for the unhealthy window.
+func TestWorkerDiesMidResponseMarksUnhealthy(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	// Declares Content-Length 1000 but sends 500 bytes: Go's server slams
+	// the connection and the proxy's body copy fails mid-response.
+	sock := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		w.Write(make([]byte, 500))
+	}))
+	registerApp(t, reg, "app.test", Upstream{Path: sock})
+
+	func() {
+		defer func() { recover() }() // the abort panic is the server's business
+		doServe(dp, "GET", "app.test", "/", "")
+	}()
+
+	dp.mu.Lock()
+	st := dp.state[sock]
+	dp.mu.Unlock()
+	if st == nil || !st.unhealthyNow() {
+		t.Fatal("mid-response worker death did not mark the socket unhealthy")
+	}
+}
+
 // --- marked 503s (worker busy / draining) --------------------------------------
 
 // busyUpstream answers every request 503 + Rip-Worker-Busy, like a c:1
@@ -545,6 +574,64 @@ func TestRingSingleFlight(t *testing.T) {
 			t.Fatalf("holder %d: want 200 upstream:fresh, got %d %q", i, codes[i], bodies[i])
 		}
 	}
+}
+
+// TestRingFlightRetiredAtomicallyWithClose pins the waiter-cap overshoot
+// fix: the moment a flight leaves dp.flights, its done channel is already
+// closed (both happen in one critical section, outcome published first).
+// The retired ordering — delete under the lock, close after unlocking —
+// left a gap where a new arrival started flight #2 while up to a full
+// waiter cap of holders was still parked on flight #1.
+func TestRingFlightRetiredAtomicallyWithClose(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	worker := startUnixHTTP(t, echoUpstream("fresh", nil))
+
+	var appID string
+	release := make(chan struct{})
+	bell := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		reg.setUpstreams(appID, []Upstream{{Path: worker}})
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	appID = registerApp(t, reg, "app.test", Upstream{Path: bell, Doorbell: true})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rr, _ := doServe(dp, "GET", "app.test", "/", "")
+		if rr.Code != http.StatusOK {
+			t.Errorf("holder: want 200, got %d", rr.Code)
+		}
+	}()
+	waitFor(t, "the holder", func() bool { return dp.testWaiters(appID) == 1 })
+	dp.mu.Lock()
+	f := dp.flights[appID]
+	dp.mu.Unlock()
+	if f == nil {
+		t.Fatal("no flight in progress")
+	}
+
+	close(release)
+	// Spin under the lock until the flight leaves the map; at that exact
+	// observation its done channel must already be closed and the outcome
+	// published — otherwise the overshoot gap is open.
+	waitFor(t, "the flight to retire", func() bool {
+		dp.mu.Lock()
+		defer dp.mu.Unlock()
+		if dp.flights[appID] == f {
+			return false
+		}
+		select {
+		case <-f.done:
+		default:
+			t.Error("flight left dp.flights before its done channel closed")
+		}
+		return true
+	})
+	if f.outcome.kind != ringWoke {
+		t.Fatalf("outcome not published before close: %+v", f.outcome)
+	}
+	<-done
 }
 
 func TestRingWaiterCap(t *testing.T) {

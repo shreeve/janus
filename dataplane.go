@@ -379,6 +379,21 @@ func (dp *dataPlane) markUnhealthy(st *upstreamState) {
 	st.unhealthyUntil.Store(time.Now().Add(dp.unhealthyWindow).UnixNano())
 }
 
+// markMidResponseFailure marks the upstream unhealthy when the worker died
+// mid-response: a recorded body-copy read failure with the client still
+// present. A canceled client context is the client's death, not the
+// worker's — never a health event.
+func (dp *dataPlane) markMidResponseFailure(at *attemptState, r *http.Request, path string, st *upstreamState) {
+	if at.bodyErr == nil || r.Context().Err() != nil {
+		return
+	}
+	dp.markUnhealthy(st)
+	dp.logger.Warn("janus upstream died mid-response",
+		zap.String("upstream", path),
+		zap.Error(at.bodyErr),
+	)
+}
+
 // pruneState drops per-socket state for paths no longer referenced by any
 // registered app. The pool protocol never reuses socket paths, so every
 // pool boot adds entries; without pruning, the pooled (process-lifetime)
@@ -401,7 +416,30 @@ func (dp *dataPlane) pruneState() {
 type attemptState struct {
 	canReplay bool
 	err       error
+
+	// bodyErr is the first read failure on the worker's response body: the
+	// worker died after response headers landed. ErrorHandler never sees
+	// this — the proxy aborts the copy with http.ErrAbortHandler instead —
+	// so proxyOnce reads it directly for health marking.
+	bodyErr error
 }
+
+// bodyWatcher wraps a worker's response body and records the first read
+// failure on the attempt. io.EOF is the normal end of body, never recorded.
+type bodyWatcher struct {
+	rc io.ReadCloser
+	at *attemptState
+}
+
+func (b *bodyWatcher) Read(p []byte) (n int, err error) {
+	n, err = b.rc.Read(p)
+	if err != nil && err != io.EOF {
+		b.at.bodyErr = err
+	}
+	return n, err
+}
+
+func (b *bodyWatcher) Close() error { return b.rc.Close() }
 
 type attemptKey struct{}
 
@@ -435,19 +473,25 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 			// Scrub the internal correlation id from every client response
 			// (surfacing it in the access log is future work).
 			resp.Header.Del(ripMarkHeader)
-			if !marked503(resp) {
-				return nil
+			st := attemptOf(resp.Request.Context())
+			if marked503(resp) {
+				if st != nil && st.canReplay {
+					// Abort this attempt (routed to ErrorHandler; the proxy
+					// closes the response body) so the retry loop delivers
+					// the request to another upstream.
+					return errWorkerMarked503
+				}
+				// A body was already streamed to the worker; the bounce must
+				// go to the client. Strip the internal marker headers.
+				resp.Header.Del(workerBusyHeader)
+				resp.Header.Del(workerDrainingHeader)
 			}
-			if st := attemptOf(resp.Request.Context()); st != nil && st.canReplay {
-				// Abort this attempt (routed to ErrorHandler; the proxy
-				// closes the response body) so the retry loop delivers
-				// the request to another upstream.
-				return errWorkerMarked503
+			// Watch the body copy so a worker dying mid-response is a
+			// health event. A 101 body is the upgraded connection itself
+			// (the proxy needs it as an io.ReadWriteCloser) — never wrap.
+			if st != nil && resp.StatusCode != http.StatusSwitchingProtocols {
+				resp.Body = &bodyWatcher{rc: resp.Body, at: st}
 			}
-			// A body was already streamed to the worker; the bounce must
-			// go to the client. Strip the internal marker headers.
-			resp.Header.Del(workerBusyHeader)
-			resp.Header.Del(workerDrainingHeader)
 			return nil
 		},
 		ErrorHandler: func(_ http.ResponseWriter, r *http.Request, err error) {
@@ -484,8 +528,21 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	} else if r.Body != nil && r.Body != http.NoBody {
 		attempt.Body = io.NopCloser(r.Body)
 	}
+	// A worker dying after response headers landed surfaces as a body-copy
+	// read failure, never an ErrorHandler call: the proxy aborts the copy
+	// by panicking with http.ErrAbortHandler (the HTTP server recovers it
+	// and slams the client connection). The response is already partially
+	// written, so the client outcome is untouched — but the death must
+	// count toward health, marked here before the abort unwinds through.
+	defer func() {
+		if v := recover(); v != nil {
+			dp.markMidResponseFailure(at, r, path, st)
+			panic(v)
+		}
+	}()
 	st.proxy.ServeHTTP(w, attempt)
 	if at.err == nil {
+		dp.markMidResponseFailure(at, r, path, st)
 		return true, false
 	}
 	if errors.Is(at.err, errWorkerMarked503) {
