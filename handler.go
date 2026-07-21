@@ -8,6 +8,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
@@ -24,6 +25,10 @@ type Handler struct {
 	// non-nil (process-wide keys are illegal here).
 	Cache *CacheSettings `json:"cache,omitempty"`
 
+	// Hub overrides the global hub default/tuning for this site when
+	// non-nil.
+	Hub *HubSettings `json:"hub,omitempty"`
+
 	app    *App
 	dp     *dataPlane
 	logger *zap.Logger
@@ -31,6 +36,10 @@ type Handler struct {
 	// cacheCfg is the site's effective cache configuration; nil when the
 	// effective cache is off, so the bypass path costs one nil check.
 	cacheCfg *cacheSite
+
+	// hubCfg is the site's effective hub configuration; nil when the
+	// effective hub is off, so the bypass path costs one nil check.
+	hubCfg *hubSite
 }
 
 // CaddyModule returns the Caddy module information.
@@ -59,9 +68,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if err := h.provisionCache(); err != nil {
 		return err
 	}
+	if err := h.provisionHub(); err != nil {
+		return err
+	}
 	h.logger.Info("janus handler ready",
 		zap.Bool("ping", h.pingEnabled()),
 		zap.Bool("cache", h.cacheCfg != nil),
+		zap.Bool("hub", h.hubCfg != nil),
 	)
 	return nil
 }
@@ -84,6 +97,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte("pong\n"))
 		return err
+	}
+	// Hub interception (before cache and upstream selection, after ping):
+	// the hub claims upgrades to its path only — a non-upgrade request to
+	// the same path flows through the data plane like any other.
+	if h.hubCfg != nil && r.URL.Path == h.hubCfg.path && websocket.IsWebSocketUpgrade(r) {
+		return h.serveHub(w, r)
 	}
 	if h.dp != nil {
 		if h.cacheCfg != nil {
@@ -125,6 +144,15 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return err
 			}
 			h.Cache = cs
+		case "hub":
+			if h.Hub != nil {
+				return d.Err("duplicate hub directive in the same block")
+			}
+			hs, err := parseHubDirective(d)
+			if err != nil {
+				return err
+			}
+			h.Hub = hs
 		case "control":
 			return d.Err("control is process-wide; configure it in the global janus options block")
 		default:

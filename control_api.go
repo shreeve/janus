@@ -160,6 +160,12 @@ func (a *App) controlMux() *http.ServeMux {
 		// can never degrade the data plane.
 		mux.HandleFunc("GET "+base+"/1.0/cache", a.handleCacheStats)
 		mux.HandleFunc("GET "+base+"/1.0/cache/{$}", a.handleCacheStats)
+
+		// Hub: publish plane, membership snapshot, and counters (always on).
+		mux.HandleFunc("POST "+apps+"/{id}/hub/publish", a.handleHubPublish)
+		mux.HandleFunc("GET "+apps+"/{id}/hub", a.handleHubSnapshot)
+		mux.HandleFunc("GET "+base+"/1.0/hub", a.handleHubStats)
+		mux.HandleFunc("GET "+base+"/1.0/hub/{$}", a.handleHubStats)
 	}
 	return mux
 }

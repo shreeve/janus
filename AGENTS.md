@@ -65,9 +65,10 @@ Cold capabilities are numbered by landing order. Do not reorder the story in doc
 | 1 | **ping** | Primordial. Proves the module, TLS, site admission, and cascade. Needs nothing else. |
 | 2 | **control** | Process-wide `/1.0` listeners. Assumes the ping chassis already works. |
 | 3 | **cache** | Site-scoped micro-cache + request coalescing (cascades: yes). Sits on the Phase 4 data plane. |
-| 4+ | next | Hot work on `/1.0` (apps, upstreams, …) and any later cold capabilities. |
+| 4 | **hub** | Per-app WebSocket fan-out (cascades: yes). Sits on the Phase 4 data plane and the Phase 3 registry. |
+| 5+ | next | Hot work on `/1.0` (apps, upstreams, …) and any later cold capabilities. |
 
-`./test.sh` runs groups in this order: ping, control, apps, data, cache, heartbeat, tls, tenant.
+`./test.sh` runs groups in this order: ping, control, apps, data, cache, heartbeat, tls, hub, tenant.
 
 ## Architecture (short)
 
@@ -78,8 +79,8 @@ Cold capabilities are numbered by landing order. Do not reorder the story in doc
 
 Unknown public hosts → **404**. Registry is memory-only; tenants re-register after restart.
 
-Hub (Bam protocol ancestry) waits until host→upstream proxy and heartbeats work.
-Do not build Hub first because it is “clear.”
+Hub (capability 4, Bam protocol ancestry) terminates WebSockets at the edge and
+bridges socket events to the tenant over HTTP.
 
 ## Docs
 

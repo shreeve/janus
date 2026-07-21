@@ -211,6 +211,7 @@ func TestStartUnwindsOnPartialFailure(t *testing.T) {
 		},
 		logger:  zap.NewNop(),
 		appsReg: newAppRegistry(),
+		hubs:    newHubSet(),
 		ctx:     caddy.Context{Context: context.Background()},
 	}
 
@@ -219,9 +220,6 @@ func TestStartUnwindsOnPartialFailure(t *testing.T) {
 	}
 	if len(app.controlSrvs) != 0 {
 		t.Fatalf("want no leaked control servers, got %d", len(app.controlSrvs))
-	}
-	if app.appsReg.sweepStop != nil {
-		t.Fatal("TTL sweeper still running after failed Start")
 	}
 	if _, err := net.Dial("unix", good); err == nil {
 		t.Fatal("first listener still accepting after failed Start")

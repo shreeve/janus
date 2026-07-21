@@ -43,6 +43,19 @@
 #
 #   curl -s http://127.0.0.1:7600/1.0/cache        → hit/miss counters
 #
+# 4) hub — per-app WebSocket fan-out (site-scoped, cascades)
+#   Global hub ON (path /hub, origin same): upgrades on registered hosts
+#   terminate at Janus; frames fan out at the edge; the tenant observes
+#   through its hot-registered bridge_path and steers via
+#   POST /1.0/apps/{id}/hub/publish.
+#   catchall   *.ripdev.io   → inherit on (default tuning, origin same)
+#   api.ripdev.io            → explicit off (plain HTTP API site)
+#   hubany.ripdev.io         → origin any (token-authenticated non-browser clients)
+#   hubten/hubtwenty         → max_conns 10 / 20 (per-app floor = 10 when
+#                              one app claims both)
+#
+#   curl -s http://127.0.0.1:7600/1.0/hub          → hub counters
+#
 {
 	auto_https disable_redirects
 	skip_install_trust
@@ -62,6 +75,7 @@
 			max_bytes 64mb # process-wide pool (GLOBAL ONLY)
 			max_app_share 50 # % of max_bytes one app may hold (GLOBAL ONLY)
 		}
+		hub # 4) site-scoped default: on (path /hub, origin same)
 	}
 }
 
@@ -91,12 +105,13 @@ off.ripdev.io {
 	}
 }
 
-# Cache: explicit off beats inherited on (custom-header auth and a shared
-# cache must never meet)
+# Cache + hub: explicit off beats inherited on (custom-header auth and a
+# shared cache must never meet; a plain HTTP API site speaks no hub)
 api.ripdev.io {
 	import ripdev_tls
 	janus {
 		cache off
+		hub off
 	}
 }
 
@@ -111,12 +126,48 @@ pages.ripdev.io {
 	}
 }
 
+# Hub: origin any — token-authenticated non-browser clients (and test
+# drivers) that send no Origin header
+hubany.ripdev.io {
+	import ripdev_tls
+	janus {
+		hub {
+			origin any
+		}
+	}
+}
+
+# Hub: tightly capped sites — one app claiming both is floored at 10
+hubten.ripdev.io {
+	import ripdev_tls
+	janus {
+		hub {
+			max_conns 10
+			origin any
+		}
+	}
+}
+
+hubtwenty.ripdev.io {
+	import ripdev_tls
+	janus {
+		hub {
+			max_conns 20
+			origin any
+		}
+	}
+}
+
 # On-demand TLS — certs minted per SNI from the internal CA, but only
-# for names the registry allows (see on_demand_tls ask above)
+# for names the registry allows (see on_demand_tls ask above).
+# Hub off: this catch-all site would otherwise make EVERY host
+# hub-enabled, defeating per-host hub admission.
 https://:8443 {
 	tls {
 		on_demand
 		issuer internal
 	}
-	janus
+	janus {
+		hub off
+	}
 }

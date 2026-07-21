@@ -36,16 +36,41 @@ type ringOutcome struct {
 	reason      string
 }
 
+// ringClass separates holder budgets: ordinary client HTTP requests get
+// the 64-holder budget; hub bridge POSTs get a separate, lower-priority
+// budget of 16 per app, so bridge observation can never consume client
+// capacity. Both classes share the app's ring single-flight and
+// three-ring bound.
+type ringClass int
+
+const (
+	ringClassClient ringClass = iota
+	ringClassBridge
+)
+
+type ringClassKey struct{}
+
+func withRingClass(ctx context.Context, cl ringClass) context.Context {
+	return context.WithValue(ctx, ringClassKey{}, cl)
+}
+
+func ringClassOf(ctx context.Context) ringClass {
+	cl, _ := ctx.Value(ringClassKey{}).(ringClass)
+	return cl
+}
+
 // ringFlight is one in-progress ring; holders await done and read outcome.
 type ringFlight struct {
-	done    chan struct{}
-	outcome ringOutcome
-	waiters int
+	done          chan struct{}
+	outcome       ringOutcome
+	waiters       int // client-class holders
+	bridgeWaiters int // bridge-class holders (separate budget)
 }
 
 // awaitRing joins (or starts) the app's single outstanding ring and blocks
 // until it resolves, the waiter cap rejects us, or the client goes away.
 func (dp *dataPlane) awaitRing(ctx context.Context, appID, sockPath string) ringOutcome {
+	class := ringClassOf(ctx)
 	dp.mu.Lock()
 	f := dp.flights[appID]
 	if f == nil {
@@ -53,11 +78,19 @@ func (dp *dataPlane) awaitRing(ctx context.Context, appID, sockPath string) ring
 		dp.flights[appID] = f
 		go dp.runRing(appID, sockPath, f)
 	}
-	if f.waiters >= dp.waiterCap {
-		dp.mu.Unlock()
-		return ringOutcome{kind: ringOverflow}
+	if class == ringClassBridge {
+		if f.bridgeWaiters >= hubBridgeWaiterCap {
+			dp.mu.Unlock()
+			return ringOutcome{kind: ringOverflow}
+		}
+		f.bridgeWaiters++
+	} else {
+		if f.waiters >= dp.waiterCap {
+			dp.mu.Unlock()
+			return ringOutcome{kind: ringOverflow}
+		}
+		f.waiters++
 	}
-	f.waiters++
 	dp.mu.Unlock()
 
 	select {
@@ -65,7 +98,11 @@ func (dp *dataPlane) awaitRing(ctx context.Context, appID, sockPath string) ring
 		return f.outcome
 	case <-ctx.Done():
 		dp.mu.Lock()
-		f.waiters--
+		if class == ringClassBridge {
+			f.bridgeWaiters--
+		} else {
+			f.waiters--
+		}
 		dp.mu.Unlock()
 		return ringOutcome{kind: ringClientGone}
 	}

@@ -256,8 +256,10 @@ func marked503(resp *http.Response) bool {
 // replayable reports whether the request can be safely delivered to another
 // upstream after an attempt that received a response: with no body to
 // stream (and none chunked), nothing was consumed that a retry would need.
+// A request carrying GetBody (hub bridge POSTs, fully buffered by Janus)
+// replays by reconstructing its body per attempt.
 func replayable(r *http.Request) bool {
-	return r.ContentLength == 0 && len(r.TransferEncoding) == 0
+	return (r.ContentLength == 0 && len(r.TransferEncoding) == 0) || r.GetBody != nil
 }
 
 // sockHost encodes a socket path as a synthetic URL host so one shared
@@ -455,9 +457,14 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	// it a wrapper so the client's body (guaranteed unread on a dial error)
 	// survives for a retry on another upstream. The server closes the real
 	// body itself after the handler returns. http.NoBody needs no shield:
-	// closing it is a no-op and there is nothing to replay.
+	// closing it is a no-op and there is nothing to replay. A GetBody
+	// request (buffered bridge POST) gets a fresh body every attempt.
 	attempt := r.WithContext(context.WithValue(r.Context(), attemptKey{}, at))
-	if r.Body != nil && r.Body != http.NoBody {
+	if r.GetBody != nil {
+		if fresh, err := r.GetBody(); err == nil {
+			attempt.Body = fresh
+		}
+	} else if r.Body != nil && r.Body != http.NoBody {
 		attempt.Body = io.NopCloser(r.Body)
 	}
 	st.proxy.ServeHTTP(w, attempt)

@@ -42,7 +42,7 @@ func newClockedRegistry(t *testing.T, ttl time.Duration) (*appRegistry, *fakeClo
 
 func TestHeartbeatStampsClock(t *testing.T) {
 	r, clk := newClockedRegistry(t, 15*time.Second)
-	rec, err := r.create("shop", []string{"shop.example.com"})
+	rec, err := r.create("shop", []string{"shop.example.com"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestHeartbeatUnknownID404(t *testing.T) {
 
 func TestRegistrationCountsAsFirstHeartbeat(t *testing.T) {
 	r, clk := newClockedRegistry(t, 15*time.Second)
-	rec, err := r.create("shop", []string{"shop.example.com"})
+	rec, err := r.create("shop", []string{"shop.example.com"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestRegistrationCountsAsFirstHeartbeat(t *testing.T) {
 
 func TestTTLExpiryReapsEntryAndFreesHosts(t *testing.T) {
 	r, clk := newClockedRegistry(t, 15*time.Second)
-	rec, _ := r.create("shop", []string{"shop.example.com"})
+	rec, _ := r.create("shop", []string{"shop.example.com"}, "")
 	if _, err := r.setUpstreams(rec.ID, []Upstream{{Path: "/run/w1.sock"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestTTLExpiryReapsEntryAndFreesHosts(t *testing.T) {
 	if _, ok := r.resolveHost("shop.example.com"); ok {
 		t.Fatal("reaped app's host still resolves")
 	}
-	if _, err := r.create("shop2", []string{"shop.example.com"}); err != nil {
+	if _, err := r.create("shop2", []string{"shop.example.com"}, ""); err != nil {
 		t.Fatalf("host not freed by reap: %v", err)
 	}
 }
@@ -118,7 +118,7 @@ func TestTTLExpiryReapsEntryAndFreesHosts(t *testing.T) {
 func TestFreshHeartbeatWithEmptyUpstreamsStaysRegistered(t *testing.T) {
 	// Heartbeat ≠ readiness: alive but not routable keeps the registration.
 	r, clk := newClockedRegistry(t, 15*time.Second)
-	rec, _ := r.create("shop", []string{"shop.example.com"})
+	rec, _ := r.create("shop", []string{"shop.example.com"}, "")
 	if _, err := r.setUpstreams(rec.ID, []Upstream{}); err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +142,8 @@ func TestFreshHeartbeatWithEmptyUpstreamsStaysRegistered(t *testing.T) {
 
 func TestTTLExpiryIsPerApp(t *testing.T) {
 	r, clk := newClockedRegistry(t, 15*time.Second)
-	stale, _ := r.create("stale", []string{"stale.example.com"})
-	fresh, _ := r.create("fresh", []string{"fresh.example.com"})
+	stale, _ := r.create("stale", []string{"stale.example.com"}, "")
+	fresh, _ := r.create("fresh", []string{"fresh.example.com"}, "")
 	if _, err := r.setUpstreams(fresh.ID, []Upstream{{Path: "/run/f.sock"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestTTLExpiryIsPerApp(t *testing.T) {
 func TestSweeperReapsInBackground(t *testing.T) {
 	r := newAppRegistry()
 	r.ttl = 60 * time.Millisecond // sweep ticks every 20ms
-	rec, err := r.create("shop", []string{"shop.example.com"})
+	rec, err := r.create("shop", []string{"shop.example.com"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

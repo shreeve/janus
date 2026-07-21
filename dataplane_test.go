@@ -49,7 +49,7 @@ func startUnixHTTP(t *testing.T, handler http.Handler) string {
 
 func registerApp(t *testing.T, reg *appRegistry, host string, ups ...Upstream) string {
 	t.Helper()
-	rec, err := reg.create("app", []string{host})
+	rec, err := reg.create("app", []string{host}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

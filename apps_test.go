@@ -30,7 +30,7 @@ func TestMintIDSuffix(t *testing.T) {
 
 func TestRegistryCreateMintsPrefixedID(t *testing.T) {
 	r := newAppRegistry()
-	rec, err := r.create("shop", []string{"shop.example.com"})
+	rec, err := r.create("shop", []string{"shop.example.com"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestRegistryCreateValidation(t *testing.T) {
 		{"shop", []string{strings.Repeat("x", 254)}}, // too long
 	}
 	for _, tt := range cases {
-		_, err := r.create(tt.name, tt.hosts)
+		_, err := r.create(tt.name, tt.hosts, "")
 		var ae *apiError
 		if err == nil || !asAPIError(err, &ae) || ae.Status != http.StatusBadRequest {
 			t.Fatalf("create(%q,%v): want 400, got %v", tt.name, tt.hosts, err)
@@ -74,11 +74,11 @@ func TestRegistryCreateValidation(t *testing.T) {
 
 func TestRegistryHostFirstWins(t *testing.T) {
 	r := newAppRegistry()
-	first, err := r.create("shop", []string{"shop.example.com"})
+	first, err := r.create("shop", []string{"shop.example.com"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = r.create("rival", []string{"rival.example.com", "shop.example.com"})
+	_, err = r.create("rival", []string{"rival.example.com", "shop.example.com"}, "")
 	var ae *apiError
 	if err == nil || !asAPIError(err, &ae) || ae.Status != http.StatusConflict {
 		t.Fatalf("want 409, got %v", err)
@@ -87,11 +87,11 @@ func TestRegistryHostFirstWins(t *testing.T) {
 		t.Fatalf("conflict error must name host and holder: %q", ae.Msg)
 	}
 	// The failed create must not have claimed rival.example.com.
-	if _, err := r.create("rival", []string{"rival.example.com"}); err != nil {
+	if _, err := r.create("rival", []string{"rival.example.com"}, ""); err != nil {
 		t.Fatalf("rival host leaked from failed create: %v", err)
 	}
 	// Hostnames compare case-insensitively.
-	_, err = r.create("shout", []string{"SHOP.Example.COM"})
+	_, err = r.create("shout", []string{"SHOP.Example.COM"}, "")
 	if err == nil || !asAPIError(err, &ae) || ae.Status != http.StatusConflict {
 		t.Fatalf("case-insensitive conflict: want 409, got %v", err)
 	}
@@ -99,7 +99,7 @@ func TestRegistryHostFirstWins(t *testing.T) {
 
 func TestRegistryDeleteFreesHosts(t *testing.T) {
 	r := newAppRegistry()
-	rec, err := r.create("shop", []string{"shop.example.com"})
+	rec, err := r.create("shop", []string{"shop.example.com"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestRegistryDeleteFreesHosts(t *testing.T) {
 	if _, err := r.get(rec.ID); err == nil {
 		t.Fatal("deleted app still fetchable")
 	}
-	if _, err := r.create("shop2", []string{"shop.example.com"}); err != nil {
+	if _, err := r.create("shop2", []string{"shop.example.com"}, ""); err != nil {
 		t.Fatalf("host not freed by delete: %v", err)
 	}
 	var ae *apiError
@@ -120,13 +120,13 @@ func TestRegistryDeleteFreesHosts(t *testing.T) {
 
 func TestRegistryPatch(t *testing.T) {
 	r := newAppRegistry()
-	a, _ := r.create("shop", []string{"shop.example.com"})
-	b, _ := r.create("blog", []string{"blog.example.com"})
+	a, _ := r.create("shop", []string{"shop.example.com"}, "")
+	b, _ := r.create("blog", []string{"blog.example.com"}, "")
 
 	// Rename + swap hosts.
 	name := "store"
 	hosts := []string{"store.example.com"}
-	rec, err := r.patch(a.ID, &name, &hosts)
+	rec, err := r.patch(a.ID, &name, &hosts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,12 +134,12 @@ func TestRegistryPatch(t *testing.T) {
 		t.Fatalf("patched: %+v", rec)
 	}
 	// Old host is freed.
-	if _, err := r.create("other", []string{"shop.example.com"}); err != nil {
+	if _, err := r.create("other", []string{"shop.example.com"}, ""); err != nil {
 		t.Fatalf("old host not freed by patch: %v", err)
 	}
 	// Conflict with another app's host → 409, and nothing changes.
 	hosts = []string{"blog.example.com"}
-	_, err = r.patch(a.ID, nil, &hosts)
+	_, err = r.patch(a.ID, nil, &hosts, nil)
 	var ae *apiError
 	if err == nil || !asAPIError(err, &ae) || ae.Status != http.StatusConflict {
 		t.Fatalf("want 409, got %v", err)
@@ -153,14 +153,14 @@ func TestRegistryPatch(t *testing.T) {
 	}
 	// Re-claiming a host the app already holds is fine.
 	hosts = []string{"store.example.com", "store2.example.com"}
-	if _, err := r.patch(a.ID, nil, &hosts); err != nil {
+	if _, err := r.patch(a.ID, nil, &hosts, nil); err != nil {
 		t.Fatalf("re-claim own host: %v", err)
 	}
 	// Empty patch → 400; unknown id → 404.
-	if _, err := r.patch(a.ID, nil, nil); err == nil || !asAPIError(err, &ae) || ae.Status != http.StatusBadRequest {
+	if _, err := r.patch(a.ID, nil, nil, nil); err == nil || !asAPIError(err, &ae) || ae.Status != http.StatusBadRequest {
 		t.Fatalf("empty patch: want 400, got %v", err)
 	}
-	if _, err := r.patch("nope-000000", &name, nil); err == nil || !asAPIError(err, &ae) || ae.Status != http.StatusNotFound {
+	if _, err := r.patch("nope-000000", &name, nil, nil); err == nil || !asAPIError(err, &ae) || ae.Status != http.StatusNotFound {
 		t.Fatalf("unknown id: want 404, got %v", err)
 	}
 }
@@ -196,7 +196,7 @@ func TestValidateUpstreamsDoorbellSoleEntry(t *testing.T) {
 
 func TestRegistrySetUpstreamsAtomicSwap(t *testing.T) {
 	r := newAppRegistry()
-	rec, _ := r.create("shop", []string{"shop.example.com"})
+	rec, _ := r.create("shop", []string{"shop.example.com"}, "")
 
 	if _, err := r.setUpstreams(rec.ID, []Upstream{{Path: "/run/a.sock"}, {Path: "/run/b.sock"}}); err != nil {
 		t.Fatal(err)
@@ -245,7 +245,7 @@ func TestRegistrySetUpstreamsAtomicSwap(t *testing.T) {
 
 func TestRegistryConcurrentAccess(t *testing.T) {
 	r := newAppRegistry()
-	rec, _ := r.create("shop", []string{"shop.example.com"})
+	rec, _ := r.create("shop", []string{"shop.example.com"}, "")
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)

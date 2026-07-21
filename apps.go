@@ -60,6 +60,11 @@ type AppRecord struct {
 	Hosts     []string   `json:"hosts"`
 	Upstreams []Upstream `json:"upstreams"`
 
+	// BridgePath is the tenant's hub bridge endpoint (optional; empty =
+	// hub handshakes answer 503). Cold config never carries it: which URL
+	// the tenant serves is tenant knowledge, exactly like socket paths.
+	BridgePath string `json:"bridge_path,omitempty"`
+
 	// heartbeatAt is the app's heartbeat clock. Registration stamps it
 	// (heartbeats begin immediately after registration, so a slow cold
 	// boot is never mistaken for dead); each POST …/heartbeat re-stamps.
@@ -165,6 +170,27 @@ func validateHostname(h string) error {
 	return nil
 }
 
+// validateBridgePath checks the hub bridge endpoint: a /-prefixed path,
+// ≤256 bytes, no whitespace or control characters, no ? or # (it is a
+// path, not a URL).
+func validateBridgePath(p string) error {
+	if !strings.HasPrefix(p, "/") {
+		return errBadRequest("bridge_path %q must start with /", p)
+	}
+	if len(p) > 256 {
+		return errBadRequest("bridge_path %q is too long (max 256 bytes)", p)
+	}
+	for _, r := range p {
+		if r == '?' || r == '#' {
+			return errBadRequest("bridge_path %q must not contain %q (it is a path, not a URL)", p, string(r))
+		}
+		if r <= ' ' || r == 0x7f {
+			return errBadRequest("bridge_path %q must not contain whitespace or control characters", p)
+		}
+	}
+	return nil
+}
+
 func validateUpstreams(ups []Upstream) error {
 	doorbells := 0
 	seen := map[string]bool{}
@@ -218,9 +244,20 @@ type appRegistry struct {
 
 	// purge is the cache's purge hook, invoked (outside the registry
 	// lock, after the generation bump inside it) on every purge event:
-	// upstreams PUT, DELETE, heartbeat reap, and host claim. nil when no
-	// cache store is wired (tests).
-	purge func(appID string)
+	// upstreams PUT, DELETE, heartbeat reap, and host claim. Atomic
+	// because each config generation re-points it at its own cache store
+	// while the pooled registry keeps serving. Nil when no cache store is
+	// wired (tests).
+	purge atomic.Pointer[func(appID string)]
+
+	// hubTeardown tears the app's hub down on DELETE and TTL reap — the
+	// only events that kill a registration. Upstreams PUTs never touch
+	// hub state. Wired once by the pooled state holder.
+	hubTeardown func(appID string)
+
+	// hubHostsRemoved closes hub connections bound through hosts a PATCH
+	// removed from the app; all other membership stays.
+	hubHostsRemoved func(appID string, removed map[string]bool)
 
 	// now is the heartbeat clock source; tests inject a fake.
 	now func() time.Time
@@ -241,13 +278,30 @@ func newAppRegistry() *appRegistry {
 	}
 }
 
-func (r *appRegistry) create(name string, hosts []string) (AppRecord, error) {
+// setPurge points the purge hook at the current config generation's cache
+// store; assign-only, never unset, so a reload can never orphan purges.
+func (r *appRegistry) setPurge(fn func(appID string)) {
+	r.purge.Store(&fn)
+}
+
+func (r *appRegistry) purgeApp(id string) {
+	if fn := r.purge.Load(); fn != nil {
+		(*fn)(id)
+	}
+}
+
+func (r *appRegistry) create(name string, hosts []string, bridgePath string) (AppRecord, error) {
 	if err := validateAppName(name); err != nil {
 		return AppRecord{}, err
 	}
 	hosts, err := normalizeHosts(hosts)
 	if err != nil {
 		return AppRecord{}, err
+	}
+	if bridgePath != "" {
+		if err := validateBridgePath(bridgePath); err != nil {
+			return AppRecord{}, err
+		}
 	}
 
 	r.mu.Lock()
@@ -270,7 +324,7 @@ func (r *appRegistry) create(name string, hosts []string) (AppRecord, error) {
 		}
 	}
 	// Registration counts as the first heartbeat.
-	rec := &AppRecord{ID: id, Name: name, Hosts: hosts, Upstreams: []Upstream{}, heartbeatAt: r.now(), gen: new(atomic.Uint64)}
+	rec := &AppRecord{ID: id, Name: name, Hosts: hosts, Upstreams: []Upstream{}, BridgePath: bridgePath, heartbeatAt: r.now(), gen: new(atomic.Uint64)}
 	// Host claim is a purge event (docs/20260720-033201-capability-microcache.md
 	// O5): bump the (fresh) generation in the same critical section as the
 	// registry write; the entry drop below runs after the lock releases.
@@ -281,9 +335,7 @@ func (r *appRegistry) create(name string, hosts []string) (AppRecord, error) {
 	}
 	out := rec.clone()
 	r.mu.Unlock()
-	if r.purge != nil {
-		r.purge(id)
-	}
+	r.purgeApp(id)
 	return out, nil
 }
 
@@ -325,13 +377,19 @@ func (r *appRegistry) get(id string) (AppRecord, error) {
 	return rec.clone(), nil
 }
 
-// patch updates name and/or hosts; nil means "leave unchanged".
-func (r *appRegistry) patch(id string, name *string, hosts *[]string) (AppRecord, error) {
-	if name == nil && hosts == nil {
-		return AppRecord{}, errBadRequest("nothing to update (want name and/or hosts)")
+// patch updates name, hosts, and/or bridge_path; nil means "leave
+// unchanged" (bridgePathSet with an empty value clears the path).
+func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgePath *string) (AppRecord, error) {
+	if name == nil && hosts == nil && bridgePath == nil {
+		return AppRecord{}, errBadRequest("nothing to update (want name, hosts, and/or bridge_path)")
 	}
 	if name != nil {
 		if err := validateAppName(*name); err != nil {
+			return AppRecord{}, err
+		}
+	}
+	if bridgePath != nil && *bridgePath != "" {
+		if err := validateBridgePath(*bridgePath); err != nil {
 			return AppRecord{}, err
 		}
 	}
@@ -345,19 +403,29 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string) (AppRecord
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	rec, ok := r.apps[id]
 	if !ok {
+		r.mu.Unlock()
 		return AppRecord{}, errUnknownApp(id)
 	}
+	var removed map[string]bool
 	if hosts != nil {
 		for _, h := range newHosts {
 			if holder, taken := r.hosts[h]; taken && holder != id {
+				r.mu.Unlock()
 				return AppRecord{}, errHostConflict(h, holder)
 			}
 		}
+		kept := map[string]bool{}
+		for _, h := range newHosts {
+			kept[h] = true
+		}
+		removed = map[string]bool{}
 		for _, h := range rec.Hosts {
 			delete(r.hosts, h)
+			if !kept[h] {
+				removed[h] = true
+			}
 		}
 		for _, h := range newHosts {
 			r.hosts[h] = id
@@ -367,7 +435,17 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string) (AppRecord
 	if name != nil {
 		rec.Name = *name
 	}
-	return rec.clone(), nil
+	if bridgePath != nil {
+		rec.BridgePath = *bridgePath
+	}
+	out := rec.clone()
+	r.mu.Unlock()
+	// Removed hosts stop resolving to the app: their hub connections
+	// close through the internal mechanism (all other membership stays).
+	if len(removed) > 0 && r.hubHostsRemoved != nil {
+		r.hubHostsRemoved(id, removed)
+	}
+	return out, nil
 }
 
 // setUpstreams replaces the entire upstream list atomically.
@@ -393,9 +471,7 @@ func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error)
 	rec.gen.Add(1)
 	out := rec.clone()
 	r.mu.Unlock()
-	if r.purge != nil {
-		r.purge(id)
-	}
+	r.purgeApp(id)
 	return out, nil
 }
 
@@ -431,9 +507,11 @@ func (r *appRegistry) sweepExpired() []string {
 		}
 	}
 	r.mu.Unlock()
-	if r.purge != nil {
-		for _, id := range reaped {
-			r.purge(id)
+	for _, id := range reaped {
+		r.purgeApp(id)
+		// Reap kills the registration itself: the hub dies with it.
+		if r.hubTeardown != nil {
+			r.hubTeardown(id)
 		}
 	}
 	return reaped
@@ -489,8 +567,10 @@ func (r *appRegistry) delete(id string) error {
 	delete(r.apps, id)
 	rec.gen.Add(1) // delete is a purge event
 	r.mu.Unlock()
-	if r.purge != nil {
-		r.purge(id)
+	r.purgeApp(id)
+	// DELETE kills the registration itself: the hub dies with it.
+	if r.hubTeardown != nil {
+		r.hubTeardown(id)
 	}
 	return nil
 }
@@ -500,13 +580,35 @@ func (r *appRegistry) delete(id string) error {
 func (a *App) appsRegistry() *appRegistry { return a.appsReg }
 
 type appCreateRequest struct {
-	Name  string   `json:"name"`
-	Hosts []string `json:"hosts"`
+	Name       string   `json:"name"`
+	Hosts      []string `json:"hosts"`
+	BridgePath string   `json:"bridge_path"`
 }
 
 type appPatchRequest struct {
 	Name  *string   `json:"name"`
 	Hosts *[]string `json:"hosts"`
+
+	// BridgePath is tri-state: absent = unchanged, null = clear, string =
+	// set (validated). json.RawMessage distinguishes absent from null.
+	BridgePath json.RawMessage `json:"bridge_path"`
+}
+
+// bridgePathPatch decodes the tri-state bridge_path field: nil pointer =
+// leave unchanged; empty string = clear; value = set.
+func bridgePathPatch(raw json.RawMessage) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if string(raw) == "null" {
+		empty := ""
+		return &empty, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, errBadRequest("bridge_path must be a string or null")
+	}
+	return &s, nil
 }
 
 type upstreamsPutRequest struct {
@@ -539,7 +641,7 @@ func (a *App) handleAppsCreate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	rec, err := a.appsRegistry().create(req.Name, req.Hosts)
+	rec, err := a.appsRegistry().create(req.Name, req.Hosts, req.BridgePath)
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -566,7 +668,12 @@ func (a *App) handleAppsPatch(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	rec, err := a.appsRegistry().patch(r.PathValue("id"), req.Name, req.Hosts)
+	bp, err := bridgePathPatch(req.BridgePath)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rec, err := a.appsRegistry().patch(r.PathValue("id"), req.Name, req.Hosts, bp)
 	if err != nil {
 		writeAPIError(w, err)
 		return

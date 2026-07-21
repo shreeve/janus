@@ -30,7 +30,7 @@ func newCacheHarness(t *testing.T) *cacheHarness {
 	reg := newAppRegistry()
 	dp := newDataPlane(reg, nil)
 	store := newCacheStore(defaultCacheMaxBytes, defaultCacheAppShare)
-	reg.purge = store.purgeApp
+	reg.setPurge(store.purgeApp)
 	h := &Handler{
 		dp: dp,
 		cacheCfg: &cacheSite{
@@ -968,7 +968,7 @@ func TestHostReclaimNeverServesOldTenant(t *testing.T) {
 	// app-id validation must still refuse the old tenant's bytes.
 	uA := &countingUpstream{body: "tenant-A"}
 	sockA := startUnixHTTP(t, uA.handler())
-	recA, err := ch.reg.create("appa", []string{"claim.test"})
+	recA, err := ch.reg.create("appa", []string{"claim.test"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,13 +981,13 @@ func TestHostReclaimNeverServesOldTenant(t *testing.T) {
 		t.Fatalf("precondition: want 1 store, got %+v", s.cacheStatsBucket)
 	}
 
-	ch.reg.purge = nil // the simulated lost purge
+	ch.reg.setPurge(func(string) {}) // the simulated lost purge
 	if err := ch.reg.delete(recA.ID); err != nil {
 		t.Fatal(err)
 	}
 	uB := &countingUpstream{body: "tenant-B"}
 	sockB := startUnixHTTP(t, uB.handler())
-	recB, err := ch.reg.create("appb", []string{"claim.test"})
+	recB, err := ch.reg.create("appb", []string{"claim.test"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

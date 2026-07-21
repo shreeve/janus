@@ -65,6 +65,15 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return err
 				}
 				a.Cache = cs
+			case "hub":
+				if a.Hub != nil {
+					return d.Err("duplicate hub directive in the same block")
+				}
+				hs, err := parseHubDirective(d)
+				if err != nil {
+					return err
+				}
+				a.Hub = hs
 			case "token":
 				return d.Err("token belongs on the control line as token:… (per-listener), not as its own directive")
 			default:
