@@ -91,8 +91,8 @@ bridges socket events to the tenant over HTTP.
 
 - Timestamp prefix: `YYYYMMDD-HHMMSS-{name}.md` (or `.html`) under `docs/` only.
 - Design HTML = history. Build SPEC + capability pages = what we implement against.
-- Root **`Caddyfile`** is the working cold config while building.
-- Ship a rich `Caddyfile.example` at the end — not a parallel file during early phases.
+- [`docs/README.md`](docs/README.md) indexes what is authoritative vs history vs provenance.
+- Root **`Caddyfile`** is the working cold config; **`Caddyfile.example`** is the operator-facing example (validates standalone).
 
 ## Local HTTPS
 

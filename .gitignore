@@ -3,6 +3,8 @@
 /buildenv_*/
 *.log
 .test-*
+.DS_Store
+/testdata/fuzz/
 
 # certs/: ignore everything except the intentional ripdev.io wildcard pair (+ README)
 /certs/*
