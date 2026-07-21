@@ -18,6 +18,10 @@ CADDY_BIN="${CADDY_BIN:-$ROOT/bin/caddy}"
 CADDY_LOG="${CADDY_LOG:-$ROOT/.test-caddy.log}"
 CADDY_PID=""
 
+# testkit: the suite's Go support binary (fixture servers, WS driver,
+# JSON/string utilities). Built fresh at suite start from ./testkit.
+TESTKIT="$ROOT/.test-testkit"
+
 # --- colors ---------------------------------------------------------------
 
 RESET=$'\033[0m'
@@ -54,14 +58,15 @@ SKIP=0
 SUITE_START_NS=0
 
 now_ns() {
-	if date +%s%N >/dev/null 2>&1; then
-		date +%s%N
+	local ns
+	ns="$(date +%s%N 2>/dev/null)"
+	if [[ "$ns" =~ ^[0-9]+$ ]]; then
+		printf '%s\n' "$ns"
+	elif [[ -x "$TESTKIT" ]]; then
+		"$TESTKIT" now-ns
 	else
-		# macOS fallback: seconds + milliseconds via python
-		python3 - <<'PY'
-import time
-print(int(time.time() * 1_000_000_000))
-PY
+		# bash 5 fallback: EPOCHREALTIME is "seconds.microseconds"
+		printf '%s%s000\n' "${EPOCHREALTIME%.*}" "${EPOCHREALTIME#*.}"
 	fi
 }
 
@@ -197,6 +202,10 @@ build_caddy() {
 	}
 	mkdir -p bin
 	xcaddy build --with github.com/shreeve/janus=. --output "$CADDY_BIN"
+}
+
+build_testkit() {
+	go build -o "$TESTKIT" ./testkit
 }
 
 kill_listeners() {
@@ -545,39 +554,8 @@ start_data_upstream() {
 	printf '%s\n' "$hitfile" >>"$DATA_HITFILES_FILE"
 	# detach stdout/stderr: the runner captures case output via $( ) and
 	# would otherwise wait for this background server to exit
-	python3 - "$sock" "$name" "$hitfile" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
-import http.server, socketserver, sys
-
-sock, name, hitfile = sys.argv[1], sys.argv[2], sys.argv[3]
-
-class H(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    def _send(self, code, body):
-        self.send_response(code)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def do_GET(self):
-        self._send(200, f"upstream:{name}\n".encode())
-    def do_POST(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        data = self.rfile.read(n)
-        with open(hitfile, "ab") as f:
-            f.write(data + b"\n")
-        self._send(200, b"received:" + data + b"\n")
-    def log_message(self, *args): pass
-    def address_string(self): return "unix"
-
-class S(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-    # Burst cases dial many connections at once; the default backlog (5)
-    # refuses the overflow on macOS and Janus would mark the socket
-    # unhealthy — a fixture artifact, not the behavior under test.
-    request_queue_size = 128
-
-S(sock, H).serve_forever()
-PY
+	"$TESTKIT" upstream --sock "$sock" --name "$name" --hits "$hitfile" \
+		>>"$ROOT/.test-fixtures.log" 2>&1 &
 	printf '%s\n' "$!" >>"$DATA_PIDS_FILE"
 	local i
 	for i in $(seq 1 50); do
@@ -596,42 +574,8 @@ start_data_doorbell() {
 	: >"$ringfile"
 	printf '%s\n' "$sock" >>"$DATA_SOCKS_FILE"
 	printf '%s\n' "$ringfile" >>"$DATA_HITFILES_FILE"
-	python3 - "$sock" "$appid" "$newsock" "$ringfile" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
-import http.server, socketserver, json, sys, urllib.request
-
-sock, appid, newsock, ringfile = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-
-class H(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    def do_GET(self):
-        if self.path != "/ring":
-            self.send_response(404)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        with open(ringfile, "ab") as f:
-            f.write(b"ring\n")
-        body = json.dumps({"upstreams": [{"path": newsock}]}).encode()
-        req = urllib.request.Request(
-            f"http://127.0.0.1:7600/1.0/apps/{appid}/upstreams",
-            data=body, method="PUT",
-            headers={"Content-Type": "application/json"})
-        resp = urllib.request.urlopen(req, timeout=5)
-        assert resp.status == 200, f"PUT upstreams -> {resp.status}"
-        self.send_response(204)
-        self.end_headers()
-    def log_message(self, *args): pass
-    def address_string(self): return "unix"
-
-class S(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-    # Burst cases dial many connections at once; the default backlog (5)
-    # refuses the overflow on macOS and Janus would mark the socket
-    # unhealthy — a fixture artifact, not the behavior under test.
-    request_queue_size = 128
-
-S(sock, H).serve_forever()
-PY
+	"$TESTKIT" doorbell --sock "$sock" --app "$appid" --newsock "$newsock" --ring "$ringfile" \
+		>>"$ROOT/.test-fixtures.log" 2>&1 &
 	printf '%s\n' "$!" >>"$DATA_PIDS_FILE"
 	local i
 	for i in $(seq 1 50); do
@@ -756,7 +700,7 @@ cache_app_id() { cat "$CACHE_APP_FILE"; }
 # cache_stat KEY — one process-total counter from GET /1.0/cache
 cache_stat() {
 	capi GET /1.0/cache
-	printf '%s' "$REPLY_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"
+	printf '%s' "$REPLY_BODY" | "$TESTKIT" json get "$1"
 }
 
 # path_hits HITFILE PATH — how many requests for exactly PATH the fixture
@@ -782,96 +726,8 @@ start_cache_upstream() {
 	: >"$hitfile"
 	printf '%s\n' "$sock" >>"$DATA_SOCKS_FILE"
 	printf '%s\n' "$hitfile" >>"$DATA_HITFILES_FILE"
-	python3 - "$sock" "$hitfile" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
-import gzip, http.server, socket, socketserver, sys, time
-
-sock, hitfile = sys.argv[1], sys.argv[2]
-GZ = gzip.compress(b"compressed-body\n")
-
-class H(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    def _record(self):
-        with open(hitfile, "ab") as f:
-            f.write((self.path + "\n").encode())
-    def _send(self, code, body, headers=None):
-        self.send_response(code)
-        for k, v in (headers or {}).items():
-            self.send_header(k, v)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def do_GET(self):
-        self._record()
-        p = self.path.split("?")[0]
-        if p == "/slow":
-            time.sleep(0.5); self._send(200, b"slow-body\n")
-        elif p == "/slower":
-            time.sleep(1.5); self._send(200, b"slower-body\n")
-        elif p == "/slowcookie":
-            time.sleep(0.5); self._send(200, b"personal\n", {"Set-Cookie": "sid=1"})
-        elif p == "/setcookie":
-            self._send(200, b"cookie\n", {"Set-Cookie": "sid=1"})
-        elif p == "/nostore":
-            self._send(200, b"nostore\n", {"Cache-Control": "no-store"})
-        elif p == "/private":
-            self._send(200, b"private\n", {"Cache-Control": "private"})
-        elif p == "/badcc":
-            self._send(200, b"badcc\n", {"Cache-Control": "max-age=="})
-        elif p == "/expires":
-            self._send(200, b"expires\n", {"Expires": "Fri, 01 Jan 2100 00:00:00 GMT"})
-        elif p == "/ce":
-            self._send(200, GZ, {"Content-Encoding": "gzip"})
-        elif p == "/cevary":
-            self._send(200, GZ, {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
-        elif p == "/acao-echo":
-            self._send(200, b"acao\n",
-                       {"Access-Control-Allow-Origin": self.headers.get("Origin", "none")})
-        elif p == "/acao-star":
-            self._send(200, b"acao\n", {"Access-Control-Allow-Origin": "*"})
-        elif p == "/vary-lang":
-            lang = self.headers.get("Accept-Language", "none")
-            self._send(200, f"lang:{lang}\n".encode(), {"Vary": "Accept-Language"})
-        elif p == "/vary-star":
-            self._send(200, b"varystar\n", {"Vary": "*"})
-        elif p == "/404":
-            self._send(404, b"nope\n")
-        elif p == "/500":
-            self._send(500, b"boom\n")
-        elif p == "/busy":
-            self._send(503, b"busy\n", {"Rip-Worker-Busy": "1", "Retry-After": "0"})
-        elif p == "/truncate":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", "1000")
-            self.end_headers()
-            self.wfile.write(b"x" * 500)
-            self.wfile.flush()
-            # A real FIN mid-body: close() alone leaves the fd alive via
-            # rfile/wfile references and the peer would wait forever.
-            self.connection.shutdown(socket.SHUT_RDWR)
-            self.connection.close()
-        elif p == "/big":
-            self._send(200, b"B" * (300 * 1024))
-        else:
-            self._send(200, f"plain:{self.path}\n".encode())
-    def do_POST(self):
-        self._record()
-        n = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(n)
-        self._send(200, b"posted\n")
-    def log_message(self, *args): pass
-    def address_string(self): return "unix"
-
-class S(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-    # Burst cases dial many connections at once; the default backlog (5)
-    # refuses the overflow on macOS and Janus would mark the socket
-    # unhealthy — a fixture artifact, not the behavior under test.
-    request_queue_size = 128
-
-S(sock, H).serve_forever()
-PY
+	"$TESTKIT" cacheup --sock "$sock" --hits "$hitfile" \
+		>>"$ROOT/.test-fixtures.log" 2>&1 &
 	printf '%s\n' "$!" >>"$DATA_PIDS_FILE"
 	local i
 	for i in $(seq 1 50); do
@@ -1512,8 +1368,8 @@ case_tls_alive_not_routable_allowed() {
 # (docs/20260720-162350-hub-design.md "Acceptance sketch"). The instrument:
 # a fixture tenant with a bridge endpoint that records every POST it
 # receives (headers, frame type, body) and answers from a scriptable
-# playbook, plus /1.0/hub counters and the membership snapshot. A small
-# bun WS driver script runs sockets. The group runs under the heartbeat
+# playbook, plus /1.0/hub counters and the membership snapshot. The
+# testkit ws driver runs sockets. The group runs under the heartbeat
 # caddy (TTL 2s), so the fixture heartbeats its apps every 500ms.
 #
 # Hosts (root Caddyfile): hub1/hub2/hubdel/hubrace.ripdev.io inherit
@@ -1524,7 +1380,6 @@ case_tls_alive_not_routable_allowed() {
 HUB_SOCK="$ROOT/run/hub-tenant.sock"
 HUB_BRIDGE_LOG="$ROOT/.test-hub-bridge.jsonl"
 HUB_PLAYBOOK="$ROOT/.test-hub-playbook"
-HUB_WS="$ROOT/.test-hub-ws.py"
 HUB_PIDS_FILE="$ROOT/.test-hub-pids"
 HUB_APP_FILE="$ROOT/.test-hub-app-id"       # hubapp: hub1, hubany, api
 HUB_ISO_FILE="$ROOT/.test-hub-iso-id"       # hubiso: hub2 (per-app isolation)
@@ -1540,7 +1395,7 @@ stop_hub_fixtures() {
 			kill "$pid" 2>/dev/null || true
 		done <"$HUB_PIDS_FILE"
 	fi
-	rm -f "$HUB_PIDS_FILE" "$HUB_BRIDGE_LOG" "$HUB_PLAYBOOK" "$HUB_WS" \
+	rm -f "$HUB_PIDS_FILE" "$HUB_BRIDGE_LOG" "$HUB_PLAYBOOK" \
 		"$HUB_APP_FILE" "$HUB_ISO_FILE" "$HUB_CAP_FILE" "$HUB_SOCK" \
 		"$ROOT"/.test-hub-flag-* "$ROOT"/.test-hub-out-* "$ROOT"/.test-hub-cap-codes
 }
@@ -1558,7 +1413,7 @@ hub_playbook() {
 # hub_stat KEY — one process-total counter from GET /1.0/hub
 hub_stat() {
 	capi GET /1.0/hub
-	printf '%s' "$REPLY_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"
+	printf '%s' "$REPLY_BODY" | "$TESTKIT" json get "$1"
 }
 
 # hub_snapshot APPID — GET /1.0/apps/{id}/hub into REPLY_BODY/REPLY_CODE
@@ -1586,7 +1441,7 @@ hub_bridge_count() {
 hub_ws() {
 	local host=$1 origin=$2 cookie=$3
 	shift 3
-	REPLY_WS="$(python3 "$HUB_WS" "$host" "$origin" "$cookie" "$@" 2>&1)"
+	REPLY_WS="$("$TESTKIT" ws "$host" "$origin" "$cookie" "$@" 2>&1)"
 }
 
 # hub_ws_bg OUTFILE HOST ORIGIN COOKIE CMDS… — same, backgrounded; the
@@ -1594,7 +1449,7 @@ hub_ws() {
 hub_ws_bg() {
 	local out=$1 host=$2 origin=$3 cookie=$4
 	shift 4
-	python3 "$HUB_WS" "$host" "$origin" "$cookie" "$@" >"$out" 2>&1 &
+	"$TESTKIT" ws "$host" "$origin" "$cookie" "$@" >"$out" 2>&1 &
 	HUB_WS_PID=$!
 	printf '%s\n' "$HUB_WS_PID" >>"$HUB_PIDS_FILE"
 }
@@ -1636,82 +1491,8 @@ start_hub_tenant() {
 	shift
 	rm -f "$sock"
 	: >"$HUB_BRIDGE_LOG"
-	python3 - "$sock" "$HUB_BRIDGE_LOG" "$HUB_PLAYBOOK" "$@" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
-import http.server, json, os, socketserver, sys, threading, time, urllib.request
-
-sock, hits, playbook = sys.argv[1], sys.argv[2], sys.argv[3]
-app_ids = sys.argv[4:]
-
-def heartbeat():
-    while True:
-        for app in app_ids:
-            try:
-                req = urllib.request.Request(
-                    f"http://127.0.0.1:7600/1.0/apps/{app}/heartbeat", method="POST")
-                urllib.request.urlopen(req, timeout=2)
-            except Exception:
-                pass  # deleted/reaped apps are part of the tests
-        time.sleep(0.5)
-
-threading.Thread(target=heartbeat, daemon=True).start()
-
-lock = threading.Lock()
-
-class H(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    def _send(self, code, body, ctype="text/plain"):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def do_POST(self):
-        kind = self.headers.get("Sec-WebSocket-Frame")
-        n = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(n)
-        if kind is None:
-            self._send(200, b"plain-post\n")
-            return
-        rec = {
-            "kind": kind,
-            "path": self.path,
-            "client": self.headers.get("Janus-Hub-Client"),
-            "app": self.headers.get("Janus-Hub-App"),
-            "cookie": self.headers.get("Cookie"),
-            "has_sec_ws_key": self.headers.get("Sec-WebSocket-Key") is not None,
-            "has_connection": self.headers.get("Connection") is not None,
-            "content_type": self.headers.get("Content-Type"),
-            "body": body.decode("utf-8", "replace"),
-        }
-        with lock:
-            with open(hits, "a") as f:
-                f.write(json.dumps(rec) + "\n")
-        play = {}
-        try:
-            with open(playbook) as f:
-                play = json.load(f)
-        except Exception:
-            pass
-        act = play.get(kind, {})
-        if act.get("delay_ms"):
-            time.sleep(act["delay_ms"] / 1000.0)
-        status = act.get("status", 204)
-        body_out = act.get("body", "").encode()
-        self._send(status, body_out, "application/json")
-    def do_GET(self):
-        self._send(200, f"plain:{self.path}\n".encode())
-    def log_message(self, *args): pass
-    def address_string(self): return "unix"
-
-class S(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-    # Burst cases dial many connections at once; the default backlog (5)
-    # refuses the overflow on macOS and Janus would mark the socket
-    # unhealthy — a fixture artifact, not the behavior under test.
-    request_queue_size = 128
-
-S(sock, H).serve_forever()
-PY
+	"$TESTKIT" hubtenant --sock "$sock" --hits "$HUB_BRIDGE_LOG" --playbook "$HUB_PLAYBOOK" "$@" \
+		>>"$ROOT/.test-fixtures.log" 2>&1 &
 	printf '%s\n' "$!" >>"$HUB_PIDS_FILE"
 	local i
 	for i in $(seq 1 50); do
@@ -1727,222 +1508,13 @@ PY
 # connection id is read from the fixture's open-bridge record by the case.
 start_hub_wedge() {
 	local host=$1
-	python3 - "$host" >>"$ROOT/.test-fixtures.log" 2>&1 <<'PY' &
-import base64, os, socket, ssl, sys, time
-
-host = sys.argv[1]
-# Verification off: python's CA bundle may not carry the ripdev.io chain;
-# TLS trust is proven by the curl-based cases (no curl -k anywhere).
-ctx = ssl.create_default_context()
-ctx.check_hostname = False
-ctx.verify_mode = ssl.CERT_NONE
-raw = socket.create_connection(("127.0.0.1", 443), timeout=5)
-s = ctx.wrap_socket(raw, server_hostname=host)
-key = base64.b64encode(os.urandom(16)).decode()
-req = (f"GET /hub HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\n"
-       f"Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n"
-       f"Sec-WebSocket-Key: {key}\r\n\r\n")
-s.sendall(req.encode())
-resp = s.recv(4096)
-assert b"101" in resp.split(b"\r\n", 1)[0], resp
-time.sleep(3600)  # never read again
-PY
+	"$TESTKIT" wedge --host "$host" >>"$ROOT/.test-fixtures.log" 2>&1 &
 	printf '%s\n' "$!" >>"$HUB_PIDS_FILE"
-}
-
-write_hub_ws_driver() {
-	cat >"$HUB_WS" <<'PYWS'
-# Hub acceptance WS driver — a dependency-free RFC 6455 client. Usage:
-#   python3 ws.py <host> <origin|-> <cookie|-> <cmd…>
-# Commands:
-#   send=<json>          send a text frame
-#   sendbig=<bytes>      send {"blob":"xx…"} of roughly that many bytes
-#   binary               send a binary frame
-#   expect=<substr>      wait ≤5s for a frame containing substr; print RECV
-#   noframe=<ms>         assert no frame arrives within ms
-#   expectclose=<code>[,<substr>]  wait ≤10s for close; print CLOSE
-#   id                   loopback probe; print "ID <connection id>"
-#   touch=<file>         write a flag file (test-side coordination)
-#   waitfile=<file>      wait ≤30s for a flag file
-#   pause=<ms>           sleep
-#   close                client-initiated close 1000
-import base64, json, os, socket, ssl, struct, sys, time
-
-sys.stdout.reconfigure(line_buffering=True)  # tests read output mid-run
-
-host, origin, cookie = sys.argv[1], sys.argv[2], sys.argv[3]
-cmds = sys.argv[4:]
-
-def fail(msg):
-    print("FAIL " + msg)
-    sys.exit(1)
-
-ctx = ssl.create_default_context()
-ctx.check_hostname = False
-ctx.verify_mode = ssl.CERT_NONE
-raw = socket.create_connection(("127.0.0.1", 443), timeout=10)
-s = ctx.wrap_socket(raw, server_hostname=host)
-key = base64.b64encode(os.urandom(16)).decode()
-req = [f"GET /hub HTTP/1.1", f"Host: {host}", "Connection: Upgrade",
-       "Upgrade: websocket", "Sec-WebSocket-Version: 13",
-       f"Sec-WebSocket-Key: {key}"]
-if origin != "-":
-    req.append(f"Origin: {origin}")
-if cookie != "-":
-    req.append(f"Cookie: {cookie}")
-s.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
-
-buf = b""
-while b"\r\n\r\n" not in buf:
-    chunk = s.recv(4096)
-    if not chunk:
-        fail("connection closed during handshake")
-    buf += chunk
-head, buf = buf.split(b"\r\n\r\n", 1)
-status = head.split(b"\r\n", 1)[0].decode()
-if " 101 " not in status + " ":
-    fail(f"never opened: {status}")
-
-closed = None  # (code, reason)
-queue = []
-
-def send_frame(op, payload):
-    mask = os.urandom(4)
-    n = len(payload)
-    if n < 126:
-        hdr = struct.pack("!BB", 0x80 | op, 0x80 | n)
-    elif n < 65536:
-        hdr = struct.pack("!BBH", 0x80 | op, 0x80 | 126, n)
-    else:
-        hdr = struct.pack("!BBQ", 0x80 | op, 0x80 | 127, n)
-    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-    s.sendall(hdr + mask + masked)
-
-def recv_exact(n, deadline):
-    global buf
-    while len(buf) < n:
-        s.settimeout(max(0.01, deadline - time.time()))
-        try:
-            chunk = s.recv(65536)
-        except (TimeoutError, socket.timeout):
-            return None
-        except OSError:
-            return None
-        if not chunk:
-            return None
-        buf += chunk
-    out, buf = buf[:n], buf[n:]
-    return out
-
-def pump(timeout):
-    # Read frames until the timeout elapses or something lands.
-    global closed
-    deadline = time.time() + timeout
-    while time.time() < deadline and closed is None:
-        hdr = recv_exact(2, deadline)
-        if hdr is None:
-            return
-        b1, b2 = hdr
-        op = b1 & 0x0F
-        n = b2 & 0x7F
-        if n == 126:
-            n = struct.unpack("!H", recv_exact(2, deadline + 1) or b"\0\0")[0]
-        elif n == 127:
-            n = struct.unpack("!Q", recv_exact(8, deadline + 1) or b"\0" * 8)[0]
-        payload = recv_exact(n, deadline + 1) if n else b""
-        if payload is None:
-            return
-        if op == 1:
-            queue.append(payload.decode("utf-8", "replace"))
-            return
-        if op == 8:
-            code = struct.unpack("!H", payload[:2])[0] if len(payload) >= 2 else 1005
-            closed = (code, payload[2:].decode("utf-8", "replace"))
-            try:
-                send_frame(8, payload[:2])
-            except OSError:
-                pass
-            return
-        if op == 9:
-            send_frame(10, payload)  # pong
-
-def wait_frame(pred, timeout):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        for i, m in enumerate(queue):
-            if pred(m):
-                return queue.pop(i)
-        if closed is not None:
-            return None
-        pump(deadline - time.time())
-    return None
-
-for cmd in cmds:
-    if cmd.startswith("send="):
-        send_frame(1, cmd[5:].encode())
-    elif cmd.startswith("sendbig="):
-        send_frame(1, json.dumps({"blob": "x" * int(cmd[8:])}).encode())
-    elif cmd == "binary":
-        send_frame(2, b"\x01\x02\x03")
-    elif cmd.startswith("expect="):
-        sub = cmd[7:]
-        m = wait_frame(lambda m: sub in m, 5)
-        if m is None:
-            fail(f"no frame with {sub} (closed={closed} queue={queue})")
-        print("RECV " + m)
-    elif cmd.startswith("noframe="):
-        deadline = time.time() + int(cmd[8:]) / 1000.0
-        while time.time() < deadline:
-            pump(deadline - time.time())
-        if queue:
-            fail(f"unexpected frame {queue[0]}")
-    elif cmd.startswith("expectclose="):
-        want = cmd[12:].split(",", 1)
-        deadline = time.time() + 10
-        while closed is None and time.time() < deadline:
-            pump(deadline - time.time())
-        if closed is None:
-            fail("never closed")
-        code, reason = closed
-        if str(code) != want[0]:
-            fail(f'close {code} "{reason}" (want {want[0]})')
-        if len(want) > 1 and want[1] not in reason:
-            fail(f'close reason "{reason}" (want {want[1]})')
-        print(f"CLOSE {code} {reason}")
-    elif cmd == "id":
-        send_frame(1, b'{"__whoami!":1}')
-        m = wait_frame(lambda m: "__whoami" in m, 5)
-        if m is None:
-            fail("no whoami loopback")
-        print("ID " + json.loads(m)["<"][0])
-    elif cmd.startswith("touch="):
-        with open(cmd[6:], "w") as f:
-            f.write("1")
-    elif cmd.startswith("waitfile="):
-        f = cmd[9:]
-        t0 = time.time()
-        while not os.path.exists(f):
-            if time.time() - t0 > 30:
-                fail(f"waitfile {f}")
-            time.sleep(0.05)
-    elif cmd.startswith("pause="):
-        time.sleep(int(cmd[6:]) / 1000.0)
-    elif cmd == "close":
-        try:
-            send_frame(8, struct.pack("!H", 1000) + b"done")
-        except OSError:
-            pass
-    else:
-        fail("unknown cmd " + cmd)
-
-print("DONE")
-PYWS
 }
 
 case_hub_setup() {
 	: >"$HUB_PIDS_FILE"
 	hub_playbook ''
-	write_hub_ws_driver
 
 	# Register the three apps FIRST (ids feed the fixture's heartbeater).
 	capi POST /1.0/apps '{"name":"hubapp","hosts":["hub1.ripdev.io","hubany.ripdev.io","hubdel.ripdev.io","hubrace.ripdev.io","api.ripdev.io"],"bridge_path":"/rt/bridge"}'
@@ -2401,7 +1973,7 @@ case_hub_slow_consumer() {
 	for i in $(seq 1 50); do
 		if [[ "$(hub_bridge_count open)" -gt "$o0" ]]; then
 			wid="$(grep '"kind": "open"' "$HUB_BRIDGE_LOG" | tail -1 |
-				python3 -c 'import json,sys; print(json.load(sys.stdin)["client"])')"
+				"$TESTKIT" json get client)"
 			break
 		fi
 		sleep 0.1
@@ -2411,7 +1983,7 @@ case_hub_slow_consumer() {
 	# the writer then wedges and the 1MiB outbound queue overflows well
 	# before the write deadline.
 	local blob
-	blob="$(python3 -c 'print("x" * 100000)')"
+	blob="$("$TESTKIT" repeat x 100000)"
 	for i in $(seq 1 30); do
 		hub_publish "$(hub_app_id)" "{\"@\":[\"$wid\"],\"flood\":\"$blob\"}"
 		eq "$REPLY_CODE" "200"
@@ -2608,7 +2180,7 @@ case_hub_caddy_reload_persistence() {
 case_hub_bridge_snapshot_cap() {
 	# >32 KiB of filtered handshake headers → 431, never truncated.
 	local big
-	big="$(python3 -c 'print("c=" + "x" * 33000)')"
+	big="c=$("$TESTKIT" repeat x 33000)"
 	eq "$(hub_upgrade_code hubany.ripdev.io - "Cookie: $big")" "431"
 }
 
@@ -2736,14 +2308,7 @@ stop_tenant() {
 # tenant_upstreams — the app's current upstream list (compact JSON)
 tenant_upstreams() {
 	capi GET /1.0/apps
-	printf '%s' "$REPLY_BODY" | python3 -c '
-import json, sys
-apps = json.load(sys.stdin)
-for a in apps:
-    if "'"$TENANT_HOST"'" in a["hosts"]:
-        print(json.dumps(a["upstreams"]))
-        break
-'
+	printf '%s' "$REPLY_BODY" | "$TESTKIT" upstreams "$TENANT_HOST"
 }
 
 case_tenant_register() {
@@ -2803,7 +2368,7 @@ case_tenant_reload_fresh_code() {
 	# only upstream. Wait for the cut so the next request provably rings.
 	local i cut=""
 	for i in $(seq 1 50); do
-		if tenant_upstreams | grep -qF '"doorbell": true'; then
+		if tenant_upstreams | grep -qF '"doorbell":true'; then
 			cut=1
 			break
 		fi
@@ -2859,6 +2424,9 @@ if ! need_caddy; then
 	printf '%s\n' "$(paint "$DIM" "building $CADDY_BIN …")"
 	build_caddy || exit 1
 fi
+
+printf '%s\n' "$(paint "$DIM" "building testkit …")"
+build_testkit || exit 1
 
 printf '%s\n' "$(paint "$DIM" "starting caddy …")"
 start_caddy || exit 1

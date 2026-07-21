@@ -56,6 +56,11 @@ Permanent docs:
    outside the intentional `certs/ripdev.io.*` pair (see certs/README.md and
    `.github/secret_scanning.yml`).
 
+10. **Go, Rip, and shell — nothing else.** Implementation languages are Go,
+    Rip, and shell, everywhere in the repo: module code, test fixtures,
+    bench rigs, tooling. No python (or any other language), not even in a
+    heredoc. Test-support programs live in `./testkit` (Go).
+
 ## Capability order
 
 Cold capabilities are numbered by landing order. Do not reorder the story in docs or `test.sh`.
