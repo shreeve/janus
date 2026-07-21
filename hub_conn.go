@@ -79,6 +79,13 @@ type hubConn struct {
 	closeOnce sync.Once
 	closedCh  chan struct{} // closed when close begins; stops writer and ping loops
 
+	// closeCode/closeReason record what closeWith closed with (guarded by
+	// qmu), for the admission path's post-setup recheck: a close racing
+	// the upgrade may run before the bridge exists and needs its close
+	// notification delivered late.
+	closeCode   int
+	closeReason string
+
 	pmu         sync.Mutex
 	pongPending bool
 
@@ -112,6 +119,12 @@ func (c *hubConn) enqueue(data []byte) bool {
 		return false
 	}
 	if len(c.queue) >= hubQueueMsgCap || c.qbytes+int64(len(data)) > hubQueueByteCap {
+		// Mark the queue closed HERE, under qmu: racing fan-outs to the
+		// same wedged connection take the qclosed fast path above instead
+		// of each spawning another close and inflating slow_closes.
+		c.qclosed = true
+		c.queue = nil
+		c.qbytes = 0
 		c.qmu.Unlock()
 		c.hub.ctr.slowCloses.Add(1)
 		// The enqueuer holds hub.mu (fan-out under the membership lock);
@@ -211,27 +224,56 @@ func (c *hubConn) pongReceived() {
 	c.pmu.Unlock()
 }
 
+// attachWS binds the upgraded socket to the connection. It reports false
+// when a close (teardown, host removal, kick) already began in the window
+// between registration and upgrade — the caller owns the raw socket then,
+// because closeWith may have run before the socket existed.
+func (c *hubConn) attachWS(ws *websocket.Conn) bool {
+	c.qmu.Lock()
+	c.ws = ws
+	c.qmu.Unlock()
+	select {
+	case <-c.closedCh:
+		return false
+	default:
+		return true
+	}
+}
+
 // closeWith is the internal close-with-reason mechanism (always present;
 // serves teardown, ping timeout, slow consumers, hard protocol errors,
-// host removal, hub disable, and write failures). It sends the Close
-// frame while the socket remains writable, closes the TCP connection,
-// performs local cleanup (channels left, queue dropped), and fires the
-// close bridge (best-effort, bounded). Idempotent.
+// host removal, hub disable, and write failures). It performs local
+// cleanup synchronously (channels left, queue dropped, close bridge
+// notified), then sends the Close frame and closes the TCP connection
+// from a goroutine of its own: a wedged peer can absorb the full write
+// deadline, and teardown loops (DELETE, TTL reap, host removal, reload)
+// must never wait on one socket's buffer. Idempotent, and safe before
+// the socket exists (the open/teardown race window): ws is read under
+// qmu after closedCh closes, so a concurrent attachWS either publishes
+// the socket to us or observes the close and keeps ownership.
 func (c *hubConn) closeWith(code int, reason string) {
 	c.closeOnce.Do(func() {
+		if len(reason) > hubCloseReasonMax {
+			reason = reason[:hubCloseReasonMax]
+		}
 		c.qmu.Lock()
 		c.qclosed = true
 		c.queue = nil
 		c.qbytes = 0
+		c.closeCode, c.closeReason = code, reason
 		c.qmu.Unlock()
 		close(c.closedCh)
 
-		if len(reason) > hubCloseReasonMax {
-			reason = reason[:hubCloseReasonMax]
+		c.qmu.Lock()
+		ws := c.ws
+		c.qmu.Unlock()
+		if ws != nil {
+			go func() {
+				msg := websocket.FormatCloseMessage(code, reason)
+				_ = ws.WriteControl(websocket.CloseMessage, msg, time.Now().Add(hubWriteWait))
+				_ = ws.Close()
+			}()
 		}
-		msg := websocket.FormatCloseMessage(code, reason)
-		_ = c.ws.WriteControl(websocket.CloseMessage, msg, time.Now().Add(hubWriteWait))
-		_ = c.ws.Close()
 
 		c.hub.removeConn(c)
 		if c.bridge != nil {

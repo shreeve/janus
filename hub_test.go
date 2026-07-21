@@ -572,6 +572,84 @@ func TestHubSlowConsumerByteCap(t *testing.T) {
 	expectWSClose(t, clientWS, hubCloseTryLater, "slow consumer")
 }
 
+// TestHubSlowConsumerOverflowClosesOnce pins that racing enqueues to one
+// wedged connection trip exactly one slow-consumer close: the overflow
+// branch marks the queue closed under its own lock, so followers take the
+// closed fast path instead of each spawning a close and inflating the
+// counter.
+func TestHubSlowConsumerOverflowClosesOnce(t *testing.T) {
+	hub := newTestAppHub()
+	c := newHubConn("cccccccccccccccc", hub, "h", "", http.Header{}, 8, hubDefaultMaxFrame)
+	srvWS, clientWS := wsPair(t)
+	c.ws = srvWS
+	hub.registerConn(c)
+
+	for i := 0; i < hubQueueMsgCap; i++ {
+		if !c.enqueue([]byte(`{"n":1}`)) {
+			t.Fatalf("enqueue %d refused below the cap", i)
+		}
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if c.enqueue([]byte(`{"n":1}`)) {
+				t.Error("enqueue past the cap must refuse")
+			}
+		}()
+	}
+	wg.Wait()
+	if got := hub.ctr.slowCloses.Load(); got != 1 {
+		t.Fatalf("slow_closes: want exactly 1, got %d", got)
+	}
+	expectWSClose(t, clientWS, hubCloseTryLater, "slow consumer")
+}
+
+// TestHubCloseBeforeUpgrade pins the open/teardown race: a connection
+// registered but not yet upgraded (ws == nil) can be closed by teardown
+// without panicking, cleanup runs, and a late attachWS reports the close
+// so the admission path keeps ownership of the raw socket.
+func TestHubCloseBeforeUpgrade(t *testing.T) {
+	hs := newHubSet()
+	hub := hs.getOrCreate("app-race")
+	c := newHubConn("rrrrrrrrrrrrrrrr", hub, "h", "", http.Header{}, 8, hubDefaultMaxFrame)
+	if !hub.registerConn(c) {
+		t.Fatal("registerConn refused")
+	}
+
+	// Teardown lands in the registration→upgrade window: must not panic,
+	// must clean up, must return promptly (never waiting on a socket).
+	done := make(chan struct{})
+	go func() {
+		hs.teardownApp("app-race")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("teardown blocked on an unupgraded connection")
+	}
+	hub.mu.Lock()
+	remaining := len(hub.conns)
+	hub.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("cleanup must run without a socket: %d conns remain", remaining)
+	}
+
+	// The upgrade completes after the close: attachWS must report it.
+	srvWS, _ := wsPair(t)
+	if c.attachWS(srvWS) {
+		t.Fatal("attachWS after close must report false")
+	}
+	c.qmu.Lock()
+	code, reason := c.closeCode, c.closeReason
+	c.qmu.Unlock()
+	if code != hubCloseGoingAway || !strings.Contains(reason, "app deregistered") {
+		t.Fatalf("recorded close: %d %q", code, reason)
+	}
+}
+
 // wsPair returns a raw server/client websocket pair with no hub wiring.
 func wsPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
 	t.Helper()

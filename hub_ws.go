@@ -129,7 +129,13 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 		hub.removeConn(c)
 		return nil
 	}
-	c.ws = ws
+	if !c.attachWS(ws) {
+		// A close (teardown, host removal, kick) raced the upgrade:
+		// cleanup already ran, possibly before the socket existed — make
+		// sure the raw socket dies either way (double close is harmless).
+		_ = ws.Close()
+		return nil
+	}
 	ws.SetReadLimit(cfg.maxFrame)
 	ws.SetPongHandler(func(string) error {
 		c.pongReceived()
@@ -140,6 +146,19 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	go c.writeLoop()
 	go c.pingLoop()
 	go c.bridge.run()
+
+	// A close that began after attachWS but before the bridge existed
+	// could not deliver its close notification; recheck now that the
+	// drainer is running, so the drainer always terminates.
+	select {
+	case <-c.closedCh:
+		c.qmu.Lock()
+		code, reason := c.closeCode, c.closeReason
+		c.qmu.Unlock()
+		c.bridge.notifyClose(code, reason)
+		return nil
+	default:
+	}
 
 	// The tenant's open-response directives execute in the new
 	// connection's context before the inbound reader starts: enrollment
