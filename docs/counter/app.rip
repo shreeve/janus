@@ -1,0 +1,176 @@
+import { get, post, read, start } from '@rip-lang/server'
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+
+# The hot-reload act (act 5) edits this constant to 2 and saves.
+STEP = 1
+
+CHANNEL = '/stats/tally'
+CONTROL = 'http://127.0.0.1:7600'
+
+# Authoritative tally, persisted so it survives pool reloads. tmp/ is
+# ignored by the manager's watcher, so writes here never cause a reload.
+DIR  = "#{import.meta.dir}/tmp"
+FILE = "#{DIR}/tally"
+mkdirSync DIR, { recursive: true }
+tally = 0
+try tally = parseInt(readFileSync(FILE, 'utf8'), 10) or 0
+save = -> writeFileSync FILE, String(tally)
+
+# --- app id + membership snapshot (control plane) -----------------------------
+# The worker env carries no app id; resolve by name and cache. A 404 on the
+# snapshot means Janus restarted and the manager re-registered under a new
+# id — re-resolve once.
+appId = null
+
+resolveAppId = ->
+  res  = fetch! "#{CONTROL}/1.0/apps"
+  apps = res.json!
+  appId = apps.find((a) -> a.name is 'demo')?.id
+
+snapshot = ->
+  resolveAppId!() unless appId?
+  res = fetch! "#{CONTROL}/1.0/apps/#{appId}/hub"
+  if res.status is 404
+    resolveAppId!()
+    res = fetch! "#{CONTROL}/1.0/apps/#{appId}/hub"
+  res.json!   # { conns, channels: {"/stats/tally": N}, connections: {opaque handles} }
+
+members = ->
+  snap = snapshot!()
+  snap.channels[CHANNEL] or 0
+
+# --- routes -------------------------------------------------------------------
+
+get '/' -> PAGE   # PAGE is the HTML constant at the bottom of this file
+
+# Act 4: the micro-cache blip. Anonymous GET, storable response; Janus
+# caches it for 1s. Zero cache code here — the capability rides the site.
+get '/now' -> { now: new Date().toISOString() }
+
+# Plumbing panel: the tenant reading its own reflection off the control
+# plane. no-store keeps this poll out of the micro-cache by contract.
+get '/plumbing' ->
+  @header 'Cache-Control', 'no-store'
+  resolveAppId!() unless appId?
+  res   = fetch! "#{CONTROL}/1.0/hub"
+  stats = res.json!
+  mine  = stats.apps[appId] or {}
+  { app: appId, pid: process.pid, step: STEP,
+    conns: mine.conns, frames_in: mine.frames_in,
+    deliveries: mine.deliveries, publishes: mine.publishes }
+
+# The hub bridge: Janus POSTs every socket event here with
+# Sec-WebSocket-Frame: open | text | close. The route is TOLERANT: frames
+# it does not recognize (the ?-pings of act 3, future events) fall through
+# to the 204 at the bottom — observed, nothing to say.
+post '/rt/bridge' ->
+  kind = @req.header 'sec-websocket-frame'
+
+  # open: the admission decision, AND enrollment + greeting. The list
+  # executes in order on the new connection: join first, then deliver.
+  # The snapshot cannot include this connection yet (it registers only
+  # after this 2xx) — hence the +1.
+  if kind is 'open'
+    n = members!() + 1
+    return [
+      { '+': [CHANNEL] }
+      { 'tally!': { value: tally } }
+      { '@': [CHANNEL], 'viewers!': { count: n } }
+    ]
+
+  # close: fires after Janus's local cleanup, so the snapshot already
+  # excludes the departed connection — the count is exact.
+  if kind is 'close'
+    return { '@': [CHANNEL], 'viewers!': { count: members!() } }
+
+  return null unless kind is 'text'
+
+  # Act 1: the counter. The client's frame arrives verbatim as the JSON
+  # body; read() sees its top-level keys.
+  if read('increment')? or read('decrement')?
+    tally += STEP if read('increment')?
+    tally -= STEP if read('decrement')?
+    save()
+    # Bridge-response plane: the ORIGINATING connection is the exclusion
+    # context — the "!" suffix is REQUIRED. See the callout below.
+    return { '@': [CHANNEL], 'tally!': { value: tally } }
+
+  # Act 6: the kick. Trusted-plane "*": every resolved member — including
+  # the clicker — receives {"*":"admin kick"} then close 1000.
+  if read('kickall')?
+    return { '@': [CHANNEL], '*': 'admin kick' }
+
+  null   # ?-pings and anything else: observed, 204
+
+# --- the page ------------------------------------------------------------------
+
+PAGE = """
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Janus tour</title></head>
+<body>
+  <h1 id="tally">#{tally}</h1>
+  <button onclick="send('increment')">+</button>
+  <button onclick="send('decrement')">-</button>
+  <p id="viewers"></p>
+  <p id="rtt" style="position:fixed;top:8px;right:8px"></p>
+  <p><button onclick="now()">server time (cached 1s)</button> <span id="now"></span></p>
+  <p><button onclick="send('kickall')">admin: disconnect everyone</button> <span id="kick"></span></p>
+  <details><summary>plumbing</summary><pre id="plumbing"></pre></details>
+  <script>
+    var tallyEl = document.getElementById('tally');
+    var viewersEl = document.getElementById('viewers');
+    var rttEl = document.getElementById('rtt');
+    var nowEl = document.getElementById('now');
+    var kickEl = document.getElementById('kick');
+    var plumbingEl = document.getElementById('plumbing');
+    var ws, backoff = 500;
+
+    function connect() {
+      ws = new WebSocket('wss://' + location.host + '/hub');
+      ws.onopen = function () { backoff = 500; kickEl.textContent = ''; };
+      ws.onmessage = function (e) {
+        var msg = JSON.parse(e.data);
+        if (msg['!'] !== undefined) rttEl.textContent = (Date.now() - Number(msg['!'])) + ' ms';
+        if (msg.tally) tallyEl.textContent = msg.tally.value;
+        if (msg.viewers) viewersEl.textContent = msg.viewers.count + ' viewer(s) online';
+        if (msg['*'] !== undefined) kickEl.textContent = 'kicked: ' + msg['*'];
+      };
+      ws.onclose = function () {           // kicked, or Janus restarted:
+        setTimeout(connect, backoff);      // reconnect re-enrolls through a
+        backoff = Math.min(backoff * 2, 5000); // fresh open bridge
+      };
+    }
+
+    function send(name) {
+      if (!ws || ws.readyState !== 1) return;
+      var frame = {};
+      frame[name] = {};
+      ws.send(JSON.stringify(frame));
+    }
+
+    function now() {
+      fetch('/now').then(function (r) {
+        var v = r.headers.get('x-janus-cache'), age = r.headers.get('age');
+        r.json().then(function (j) {
+          nowEl.textContent = j.now + ' [' + v + (age !== null ? ', Age ' + age : '') + ']';
+        });
+      });
+    }
+
+    setInterval(function () {              // act 3: in-band liveness
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({'?': String(Date.now())}));
+    }, 5000);
+
+    setInterval(function () {              // plumbing poll (HTTPS, no-store)
+      fetch('/plumbing').then(function (r) { return r.json(); })
+        .then(function (j) { plumbingEl.textContent = JSON.stringify(j, null, 2); });
+    }, 2000);
+
+    connect();
+  </script>
+</body>
+</html>
+"""
+
+start()

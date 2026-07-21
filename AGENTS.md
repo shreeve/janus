@@ -90,6 +90,7 @@ bridges socket events to the tenant over HTTP.
 ## Docs
 
 - Timestamp prefix: `YYYYMMDD-HHMMSS-{name}.md` (or `.html`) under `docs/` only.
+- Runnable demo tutorials live in `docs/<name>/` subdirectories (`index.md` + artifacts); timestamped flat files remain the rule for contracts and provenance.
 - Design HTML = history. Build SPEC + capability pages = what we implement against.
 - [`docs/README.md`](docs/README.md) indexes what is authoritative vs history vs provenance.
 - Root **`Caddyfile`** is the working cold config; **`Caddyfile.example`** is the operator-facing example (validates standalone).

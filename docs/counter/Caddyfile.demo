@@ -1,0 +1,18 @@
+{
+	auto_https disable_redirects
+	skip_install_trust
+
+	janus {
+		ping # GET /ping → pong at the edge; default is off, and the rip app has no /ping route to fall through to
+		control local # http://127.0.0.1:7600 — the manager registers here; the tenant reads snapshots/counters
+		cache {
+			debug # X-Janus-Cache: HIT|MISS|COALESCED|BYPASS on every response; ttl stays the 1s default
+		}
+		hub # path /hub, origin same, max_conns 4096 — the defaults
+	}
+}
+
+demo.ripdev.io {
+	tls certs/ripdev.io.crt certs/ripdev.io.key
+	janus
+}
