@@ -3,6 +3,7 @@ package janus
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -31,6 +32,12 @@ import (
 // registration when interfaces are auto-selected or pinned: loopback and
 // IPv4 link-local never appear in answers; IPv6 link-local (fe80::/10)
 // is legitimate mDNS material and is advertised.
+//
+// Every string here must be a valid CIDR: the library's
+// dnssd.NewService checks the wrong error variable when parsing
+// BlockedIPNets (service.go), so an invalid entry is stored as a nil
+// *net.IPNet and panics at answer time instead of failing at
+// construction. TestMdnsBlockedNetsParse pins that all three parse.
 var mdnsBlockedNets = []string{"127.0.0.0/8", "::1/128", "169.254.0.0/16"}
 
 // Advertised-entry states — the pinned /1.0/mdns enum.
@@ -38,7 +45,14 @@ const (
 	mdnsStateProbing   = "probing"
 	mdnsStateAnnounced = "announced"
 	mdnsStateRenamed   = "renamed"
+	mdnsStateFailed    = "failed" // responder.Add failed; retried on the reconcile cadence
 )
+
+// mdnsReconcilePeriod is the reconcile loop's periodic pass: it retries
+// failed Adds, rebuilds a dead responder, and observes post-announce
+// conflict renames (the library renames by replacing the handle's
+// service; re-reading the handle is the only signal it offers).
+const mdnsReconcilePeriod = 5 * time.Second
 
 // Service types carried by the two registration shapes.
 const (
@@ -89,9 +103,31 @@ type mdnsEntry struct {
 	app       string // owning app id; "" = the configured name
 	typ       string
 	port      int
-	state     string // mdnsStateProbing | Announced | Renamed
-	effective string // post-probe name (differs from name on rename)
+	state     string // mdnsStateProbing | mdnsStateAnnounced | mdnsStateRenamed | mdnsStateFailed
+	effective string // last observed on-air name (differs from name on rename)
 	handle    dnssd.ServiceHandle
+}
+
+// observed derives the entry's current on-air identity from its live
+// service handle. The library renames a service on conflict by
+// replacing the handle's service — at Add for pre-announce conflicts,
+// inside reprobe for post-announce conflicts, and inside Respond's
+// startup loop for an Add that landed before the responder was running
+// — so the handle is re-read at every observation instead of trusting
+// a value cached at Add time. (The library writes the reprobe rename
+// outside its own mutex, so this read is unsynchronized with that one
+// writer: a pointer swap, observed either before or after, never torn
+// in practice — the price of the only observation mechanism offered.)
+// Entries without a handle (probing, failed) report their stored state.
+func (e *mdnsEntry) observed() (effective, state string) {
+	if e.handle == nil {
+		return e.effective, e.state
+	}
+	eff := strings.TrimSuffix(e.handle.Service().Hostname(), ".")
+	if eff == e.name {
+		return eff, mdnsStateAnnounced
+	}
+	return eff, mdnsStateRenamed
 }
 
 func mdnsEntryKey(typ, name string, port int) string {
@@ -162,15 +198,21 @@ func newMdnsAdvertiser(reg *appRegistry, logger *zap.Logger) *mdnsAdvertiser {
 }
 
 // run starts the reconcile loop (called once by the pooled state holder;
-// tests drive reconcile() directly instead).
+// tests drive reconcile() directly instead). Besides registry kicks, the
+// loop runs a periodic pass so a failed Add retries, a dead responder
+// rebuilds, and a post-announce conflict rename surfaces without waiting
+// for the next registry mutation.
 func (a *mdnsAdvertiser) run() {
 	go func() {
 		defer close(a.done)
+		ticker := time.NewTicker(mdnsReconcilePeriod)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-a.stop:
 				return
 			case <-a.kickCh:
+			case <-ticker.C:
 			}
 			a.reconcile()
 		}
@@ -217,15 +259,23 @@ func (a *mdnsAdvertiser) startResponderLocked(r dnssd.Responder, ifaces []string
 	a.runIfaces = append([]string{}, ifaces...)
 	go func() {
 		defer close(done)
-		// Respond returns the context error on orderly teardown; the
-		// ctx.Done path inside it sends the PTR goodbyes.
-		_ = r.Respond(ctx)
+		// Respond returns the context error on orderly teardown (its
+		// ctx.Done path sends the PTR goodbyes); anything else means
+		// the read loop is down — no queries are being answered — and
+		// must be loud. The closed done channel is what the reconcile
+		// loop's dead-responder check watches to rebuild.
+		if err := r.Respond(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			a.logger.Error("janus mdns responder read loop failed; rebuilding on the next reconcile pass",
+				zap.Error(err))
+		}
 	}()
 }
 
 // shutdown stops the loop and tears the live registrations down (PTR
 // goodbyes; host records age out on their TTL). Called by the pooled
-// holder's Destruct — the process is done with Janus entirely.
+// holder's Destruct — the process is done with Janus entirely. Waiting
+// for the in-flight reconcile pass can take up to the library's probe
+// cap (60s under sustained conflict) if shutdown lands mid-probe.
 func (a *mdnsAdvertiser) shutdown() {
 	a.mu.Lock()
 	a.cfg = nil
@@ -241,15 +291,42 @@ func (a *mdnsAdvertiser) shutdown() {
 // per new name, during which the library answers no queries — is
 // serialized here and never under a registry lock.
 func (a *mdnsAdvertiser) reconcile() {
-	// Phase 1: teardown when disabled or when the pinned interface set
-	// changed (the answer set itself changed — a deliberate full flap).
+	// Phase 1: teardown. A responder whose Respond loop died on its own
+	// is discarded and rebuilt from zero — nothing was withdrawn, so the
+	// withdraws counter does not move. Disabling, or changing the pinned
+	// interface set (the answer set itself changed), is a deliberate
+	// full teardown with goodbyes.
 	a.mu.Lock()
 	cfg := a.cfg
+	respondDied := false
+	if a.responder != nil {
+		select {
+		case <-a.respondDone:
+			// The read loop exited without being cancelled: no queries
+			// are being answered no matter what Add returns. Rebuild.
+			respondDied = true
+			a.cancel()
+			a.responder = nil
+			a.cancel, a.respondDone, a.runIfaces = nil, nil, nil
+			a.entries = map[string]*mdnsEntry{}
+			a.skipped = map[string]bool{}
+		default:
+		}
+	}
 	needTeardown := a.responder != nil &&
 		(cfg == nil || !mdnsIfacesEqual(a.runIfaces, cfg.ifaces))
 	if needTeardown {
 		cancel, doneCh := a.cancel, a.respondDone
-		n := len(a.entries)
+		// Only entries that reached the responder (a live handle) are
+		// counted as withdrawn: the ctx-cancel goodbye covers managed
+		// services only, and an entry still mid-probe was never on the
+		// air — the counters count responder operations, not entries.
+		n := 0
+		for _, e := range a.entries {
+			if e.handle != nil {
+				n++
+			}
+		}
 		a.entries = map[string]*mdnsEntry{}
 		a.skipped = map[string]bool{}
 		a.responder = nil
@@ -262,12 +339,16 @@ func (a *mdnsAdvertiser) reconcile() {
 	} else {
 		a.mu.Unlock()
 	}
+	if respondDied {
+		a.logger.Error("janus mdns responder died; rebuilding and re-announcing every name")
+	}
 	if cfg == nil {
 		return
 	}
 
 	// Phase 2: ensure a responder is running, then diff desired against
-	// live under the lock.
+	// live under the lock. Entries whose Add failed re-enter the add set
+	// — the periodic pass is the retry cadence.
 	a.mu.Lock()
 	if a.cfg != cfg {
 		a.mu.Unlock()
@@ -277,7 +358,10 @@ func (a *mdnsAdvertiser) reconcile() {
 		r, err := a.newResponder()
 		if err != nil {
 			a.mu.Unlock()
-			a.logger.Error("janus mdns: responder socket", zap.Error(err))
+			// Start already returned (this is a rebuild or an interface
+			// flap), so a hard error is impossible here: stay loud and
+			// let the periodic pass retry.
+			a.logger.Error("janus mdns: responder socket; retrying on the reconcile cadence", zap.Error(err))
 			return
 		}
 		a.startResponderLocked(r, cfg.ifaces)
@@ -293,10 +377,15 @@ func (a *mdnsAdvertiser) reconcile() {
 		}
 	}
 	for k, tmpl := range desired {
-		if _, ok := a.entries[k]; !ok {
+		e, ok := a.entries[k]
+		switch {
+		case !ok:
 			tmpl.state = mdnsStateProbing
 			a.entries[k] = tmpl
 			adds = append(adds, tmpl)
+		case e.state == mdnsStateFailed:
+			e.state = mdnsStateProbing
+			adds = append(adds, e)
 		}
 	}
 	a.mu.Unlock()
@@ -305,9 +394,14 @@ func (a *mdnsAdvertiser) reconcile() {
 	for _, e := range removes {
 		if e.handle != nil {
 			responder.Remove(e.handle)
+			a.withdraws.Add(1)
+			a.logger.Info("janus mdns withdrew", zap.String("name", e.name), zap.String("app", e.app))
+		} else {
+			// Never reached the responder (probing or failed): nothing
+			// to remove, nothing to count.
+			a.logger.Info("janus mdns dropped un-announced entry",
+				zap.String("name", e.name), zap.String("app", e.app), zap.String("state", e.state))
 		}
-		a.withdraws.Add(1)
-		a.logger.Info("janus mdns withdrew", zap.String("name", e.name), zap.String("app", e.app))
 	}
 	for _, e := range adds {
 		label := strings.TrimSuffix(e.name, ".local")
@@ -321,7 +415,7 @@ func (a *mdnsAdvertiser) reconcile() {
 			BlockedIPNets: mdnsBlockedNets,
 		})
 		if err != nil {
-			a.dropEntry(e)
+			a.markFailed(e)
 			a.logger.Error("janus mdns service", zap.String("name", e.name), zap.Error(err))
 			continue
 		}
@@ -332,21 +426,23 @@ func (a *mdnsAdvertiser) reconcile() {
 			a.mu.Unlock()
 			if err == nil && handle != nil {
 				responder.Remove(handle)
+				a.withdraws.Add(1)
 			}
 			continue
 		}
 		if err != nil {
-			delete(a.entries, e.key()) // a later kick retries
+			// The entry stays, visibly failed on /1.0/mdns, and the
+			// periodic pass retries — a transient probe failure never
+			// leaves a configured name silently unadvertised.
+			e.state = mdnsStateFailed
 			a.mu.Unlock()
-			a.logger.Error("janus mdns advertise failed", zap.String("name", e.name), zap.Error(err))
+			a.logger.Error("janus mdns advertise failed; retrying on the reconcile cadence",
+				zap.String("name", e.name), zap.Error(err))
 			continue
 		}
 		e.handle = handle
-		e.effective = strings.TrimSuffix(handle.Service().Hostname(), ".")
-		if e.effective == e.name {
-			e.state = mdnsStateAnnounced
-		} else {
-			e.state = mdnsStateRenamed
+		e.effective, e.state = e.observed()
+		if e.state == mdnsStateRenamed {
 			a.logger.Warn("janus mdns name conflict: announced under a renamed identity",
 				zap.String("configured", e.name),
 				zap.String("effective", e.effective),
@@ -359,12 +455,42 @@ func (a *mdnsAdvertiser) reconcile() {
 			zap.String("app", e.app),
 		)
 	}
+
+	// Phase 4: observe live handles. Post-announce conflicts rename a
+	// service inside the library (reprobe replaces the handle's
+	// service), and an Add that raced the responder's startup is probed
+	// — and possibly renamed — inside Respond's startup loop; neither
+	// path reports back, so the handle is the observation mechanism.
+	// A newly observed rename updates the stored state and logs WARN
+	// once, on this pass or the next periodic one.
+	a.mu.Lock()
+	type rename struct{ configured, effective string }
+	var renames []rename
+	for _, e := range a.entries {
+		eff, state := e.observed()
+		if eff == e.effective && state == e.state {
+			continue
+		}
+		if state == mdnsStateRenamed && eff != e.effective {
+			renames = append(renames, rename{e.name, eff})
+		}
+		e.effective, e.state = eff, state
+	}
+	a.mu.Unlock()
+	for _, r := range renames {
+		a.logger.Warn("janus mdns name conflict: announced under a renamed identity",
+			zap.String("configured", r.configured),
+			zap.String("effective", r.effective),
+		)
+	}
 }
 
-func (a *mdnsAdvertiser) dropEntry(e *mdnsEntry) {
+// markFailed marks an entry failed (still visible on /1.0/mdns; the
+// periodic pass retries it) unless it was withdrawn mid-flight.
+func (a *mdnsAdvertiser) markFailed(e *mdnsEntry) {
 	a.mu.Lock()
 	if a.entries[e.key()] == e {
-		delete(a.entries, e.key())
+		e.state = mdnsStateFailed
 	}
 	a.mu.Unlock()
 }
@@ -405,24 +531,33 @@ func (a *mdnsAdvertiser) desiredLocked(cfg *mdnsConfig) map[string]*mdnsEntry {
 
 // effectiveName is the configured name's post-conflict identity (the
 // configured name itself until probing settles or when mdns is off).
+// Derived from the live handle so a post-announce rename is reflected
+// immediately, not on the next reconcile pass.
 func (a *mdnsAdvertiser) effectiveName(configured string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, e := range a.entries {
-		if e.app == "" && e.name == configured && e.effective != "" {
-			return e.effective
+		if e.app == "" && e.name == configured {
+			if eff, _ := e.observed(); eff != "" {
+				return eff
+			}
 		}
 	}
 	return configured
 }
 
 // snapshot is the advertiser's point-in-time state: configured-name
-// entry first, then app entries by name.
+// entry first, then app entries by name. Each entry's effective name
+// and state are derived from its live handle at snapshot time (the
+// observed() contract), so /1.0/mdns is truthful about a post-announce
+// rename even between reconcile passes.
 func (a *mdnsAdvertiser) snapshot(configured string) mdnsAdvSnapshot {
 	a.mu.Lock()
 	entries := make([]mdnsEntry, 0, len(a.entries))
 	for _, e := range a.entries {
-		entries = append(entries, *e)
+		c := *e
+		c.effective, c.state = e.observed()
+		entries = append(entries, c)
 	}
 	skipped := len(a.skipped)
 	a.mu.Unlock()
@@ -534,12 +669,20 @@ func (a *App) stopMdns() error {
 // requests arbitrarily.
 func (a *App) checkMdnsListenCollision() error {
 	httpAppI, err := a.ctx.AppIfConfigured("http")
-	if err != nil || httpAppI == nil {
+	if err != nil {
+		if errors.Is(err, caddy.ErrNotConfigured) {
+			return nil // no http app in this config — no server to collide with
+		}
+		// The collision gate is load-bearing; a failure to load the
+		// http app must not silently disable it.
+		return fmt.Errorf("janus mdns: front-door collision check: loading http app: %w", err)
+	}
+	if httpAppI == nil {
 		return nil
 	}
 	ha, ok := httpAppI.(*caddyhttp.App)
 	if !ok {
-		return nil
+		return fmt.Errorf("janus mdns: front-door collision check: http app is %T, not *caddyhttp.App", httpAppI)
 	}
 	for name, srv := range ha.Servers {
 		for _, l := range srv.Listen {
@@ -569,8 +712,54 @@ func mdnsListenCollides(frontDoor, serverListen string) bool {
 	if uint(port) < na.StartPort || uint(port) > na.EndPort {
 		return false
 	}
+	return mdnsListenHostsOverlap(host, na.Host)
+}
+
+// mdnsListenHostsOverlap reports whether two listen hosts can bind the
+// same address. Wildcards overlap everything; otherwise a hostname
+// listen (e.g. "localhost" vs "127.0.0.1") hides address equality from
+// a string compare, so both sides resolve to address sets and overlap
+// on any shared address. This runs at Start, where the contract's
+// promise is the precise named-server error, not a raw OS bind failure.
+func mdnsListenHostsOverlap(a, b string) bool {
 	wild := func(h string) bool { return h == "" || h == "0.0.0.0" || h == "::" }
-	return wild(host) || wild(na.Host) || host == na.Host
+	if wild(a) || wild(b) {
+		return true
+	}
+	if a == b {
+		return true
+	}
+	for _, x := range mdnsListenHostAddrs(a) {
+		for _, y := range mdnsListenHostAddrs(b) {
+			if x == y {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mdnsListenHostAddrs normalizes one listen host to its address set: an
+// IP literal is itself (canonicalized), a hostname resolves. A hostname
+// that does not resolve falls back to the literal — the bind that
+// follows fails loudly on its own.
+func mdnsListenHostAddrs(h string) []string {
+	if ip := net.ParseIP(h); ip != nil {
+		return []string{ip.String()}
+	}
+	addrs, err := net.LookupHost(h)
+	if err != nil {
+		return []string{h}
+	}
+	out := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if ip := net.ParseIP(addr); ip != nil {
+			out = append(out, ip.String())
+			continue
+		}
+		out = append(out, addr)
+	}
+	return out
 }
 
 // --- the front door -------------------------------------------------------------

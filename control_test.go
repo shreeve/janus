@@ -392,6 +392,10 @@ func TestControlAPIHandlers(t *testing.T) {
 	if root["ping"] != true {
 		t.Fatalf("ping: %v", root["ping"])
 	}
+	// mdns is presence-shaped like ping: the boolean rides GET /1.0.
+	if root["mdns"] != false {
+		t.Fatalf("mdns: %v", root["mdns"])
+	}
 
 	rr = httptest.NewRecorder()
 	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/1.0/health", nil))

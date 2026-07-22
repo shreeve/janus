@@ -2449,13 +2449,17 @@ mdns_hb() {
 	fi
 }
 
-# mdns_wait_advertised NAME — poll until NAME appears in advertised
+# mdns_wait_advertised NAME — poll until NAME appears in the advertised
+# array. Matched by the name+state field adjacency of an advertised
+# entry, never the top-level "name" field (which always matches the
+# configured name, advertised or not); "failed" does not count.
 mdns_wait_advertised() {
 	local name=$1 i
 	for i in $(seq 1 100); do
 		mdns_hb
 		capi GET /1.0/mdns
-		if printf '%s' "$REPLY_BODY" | grep -qF "\"name\":\"$name\""; then
+		if printf '%s' "$REPLY_BODY" |
+			grep -qE "\"name\":\"$name\",\"state\":\"(probing|announced|renamed)\""; then
 			return 0
 		fi
 		sleep 0.1
@@ -2464,13 +2468,13 @@ mdns_wait_advertised() {
 	return 1
 }
 
-# mdns_wait_gone NAME — poll until NAME leaves advertised
+# mdns_wait_gone NAME — poll until NAME leaves the advertised array
 mdns_wait_gone() {
 	local name=$1 i
 	for i in $(seq 1 100); do
 		mdns_hb
 		capi GET /1.0/mdns
-		if ! printf '%s' "$REPLY_BODY" | grep -qF "\"name\":\"$name\""; then
+		if ! printf '%s' "$REPLY_BODY" | grep -qE "\"name\":\"$name\",\"state\":\""; then
 			return 0
 		fi
 		sleep 0.1
@@ -2479,14 +2483,15 @@ mdns_wait_gone() {
 	return 1
 }
 
-# mdns_wait_settled — poll until no entry is still probing (announces /
-# withdraws quiesce so counter deltas are attributable)
+# mdns_wait_settled — poll until no entry is still probing or awaiting
+# an Add retry (announces / withdraws quiesce so counter deltas are
+# attributable)
 mdns_wait_settled() {
 	local i
 	for i in $(seq 1 100); do
 		mdns_hb
 		capi GET /1.0/mdns
-		if ! printf '%s' "$REPLY_BODY" | grep -qF '"state":"probing"'; then
+		if ! printf '%s' "$REPLY_BODY" | grep -qE '"state":"(probing|failed)"'; then
 			return 0
 		fi
 		sleep 0.2
@@ -2503,6 +2508,9 @@ stop_mdns_canon() {
 }
 
 case_mdns_state() {
+	# GET /1.0 carries the mdns boolean beside ping (presence-shaped).
+	capi GET /1.0
+	json_has "$REPLY_BODY" '"mdns":true'
 	capi GET /1.0/mdns
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"enabled":true'
@@ -2524,13 +2532,13 @@ case_mdns_state() {
 case_mdns_front_door() {
 	local hdrs body
 	hdrs="$(curl -sS -D - -o /dev/null --max-time 5 "$MDNS_URL/" | tr -d '\r')"
-	json_has "$hdrs" '200'
+	json_has "$hdrs" 'HTTP/1.1 200'
 	json_has "$hdrs" 'no-store'
 	body="$(http_body "$MDNS_URL/")"
 	json_has "$body" 'Janus'
 	json_has "$body" '/status.json'
 	hdrs="$(curl -sS -D - -o /dev/null --max-time 5 "$MDNS_URL/status.json" | tr -d '\r')"
-	json_has "$hdrs" '200'
+	json_has "$hdrs" 'HTTP/1.1 200'
 	json_has "$hdrs" 'no-store'
 	body="$(http_body "$MDNS_URL/status.json")"
 	json_has "$body" '"name":"janus.local"'
@@ -2753,6 +2761,9 @@ case_mdns_reload_teardown() {
 		sleep 0.1
 	done
 	ok "-n \"$ok_state\"" "/1.0/mdns never reported enabled:false: $REPLY_BODY"
+	# The GET /1.0 boolean tracks presence in the live config.
+	capi GET /1.0
+	json_has "$REPLY_BODY" '"mdns":false'
 	local closed=""
 	for i in $(seq 1 50); do
 		if ! curl -sS -o /dev/null --max-time 1 "$MDNS_URL/" 2>/dev/null; then

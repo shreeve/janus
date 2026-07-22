@@ -3,6 +3,7 @@ package janus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -264,17 +265,37 @@ func TestMdnsDesiredSet(t *testing.T) {
 
 // --- fake responder ---------------------------------------------------------------
 
-type fakeHandle struct{ srv dnssd.Service }
+type fakeHandle struct {
+	mu  sync.Mutex
+	srv dnssd.Service
+}
 
 func (h *fakeHandle) UpdateText(map[string]string, dnssd.Responder) {}
-func (h *fakeHandle) Service() dnssd.Service                        { return h.srv }
+
+func (h *fakeHandle) Service() dnssd.Service {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.srv
+}
+
+// rename models the library's post-announce conflict path: reprobe
+// replaces the handle's service with a renamed one, and nothing reports
+// back — the handle is the only observable.
+func (h *fakeHandle) rename(host string) {
+	h.mu.Lock()
+	h.srv.Host = host
+	h.mu.Unlock()
+}
 
 type fakeResponder struct {
 	mu       sync.Mutex
 	adds     []string
 	removes  []string
-	renameTo map[string]string // desired host label → renamed label
+	handles  map[string]*fakeHandle // original host label → live handle
+	renameTo map[string]string      // desired host label → renamed label
+	addErrs  map[string]int         // host label → remaining Add failures
 	addDelay time.Duration
+	die      chan struct{} // closed → Respond returns a non-cancel error
 }
 
 func (f *fakeResponder) Add(srv dnssd.Service) (dnssd.ServiceHandle, error) {
@@ -283,21 +304,39 @@ func (f *fakeResponder) Add(srv dnssd.Service) (dnssd.ServiceHandle, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if n := f.addErrs[srv.Host]; n > 0 {
+		f.addErrs[srv.Host] = n - 1
+		return nil, errors.New("probe socket failed")
+	}
 	f.adds = append(f.adds, srv.Host+"."+srv.Domain)
+	orig := srv.Host
 	if to, ok := f.renameTo[srv.Host]; ok {
 		srv.Host = to
 	}
-	return &fakeHandle{srv}, nil
+	h := &fakeHandle{srv: srv}
+	if f.handles == nil {
+		f.handles = map[string]*fakeHandle{}
+	}
+	f.handles[orig] = h
+	return h, nil
 }
 
 func (f *fakeResponder) Remove(h dnssd.ServiceHandle) {
+	srv := h.Service()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	srv := h.Service()
 	f.removes = append(f.removes, srv.Host+"."+srv.Domain)
 }
 
 func (f *fakeResponder) Respond(ctx context.Context) error {
+	if f.die != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-f.die:
+			return errors.New("responder read loop failed")
+		}
+	}
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -425,6 +464,193 @@ func TestMdnsConflictRenameSurfaces(t *testing.T) {
 	}
 	if adv.effectiveName("janus.local") != "janus-2.local" {
 		t.Fatalf("effectiveName accessor: %q", adv.effectiveName("janus.local"))
+	}
+}
+
+// TestMdnsPostAnnounceRenameSurfaces pins the blocker fix: a conflict
+// rename that happens AFTER announcement (the library's reprobe path
+// replaces the handle's service and reports nothing back) surfaces on
+// /1.0/mdns — at snapshot time immediately, and in the stored state on
+// the next reconcile pass — never silently.
+func TestMdnsPostAnnounceRenameSurfaces(t *testing.T) {
+	reg := newAppRegistry()
+	fake := &fakeResponder{}
+	adv := newTestAdvertiser(t, reg, fake)
+	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+		t.Fatal(err)
+	}
+	adv.reconcile()
+	if snap := adv.snapshot("janus.local"); snap.entries[0].State != mdnsStateAnnounced {
+		t.Fatalf("pre-rename: %+v", snap.entries)
+	}
+
+	// The LAN develops a conflict after announcement: the library
+	// reprobes and renames inside the handle.
+	fake.mu.Lock()
+	h := fake.handles["janus"]
+	fake.mu.Unlock()
+	h.rename("janus-2")
+
+	// Snapshot-time derivation: truthful before any reconcile pass runs.
+	snap := adv.snapshot("janus.local")
+	if snap.entries[0].State != mdnsStateRenamed || snap.entries[0].Effective != "janus-2.local" {
+		t.Fatalf("post-rename snapshot: %+v", snap.entries)
+	}
+	if snap.effectiveName != "janus-2.local" {
+		t.Fatalf("post-rename effectiveName: %q", snap.effectiveName)
+	}
+	if adv.effectiveName("janus.local") != "janus-2.local" {
+		t.Fatalf("effectiveName accessor: %q", adv.effectiveName("janus.local"))
+	}
+
+	// The periodic pass folds the observation into the stored state
+	// (and logs the WARN) without moving the responder.
+	a0, r0 := fake.counts()
+	adv.reconcile()
+	if a1, r1 := fake.counts(); a1 != a0 || r1 != r0 {
+		t.Fatalf("observation pass moved the responder: adds %d→%d removes %d→%d", a0, a1, r0, r1)
+	}
+	adv.mu.Lock()
+	e := adv.entries[mdnsEntryKey(mdnsTypeFrontDoor, "janus.local", 80)]
+	state, eff := e.state, e.effective
+	adv.mu.Unlock()
+	if state != mdnsStateRenamed || eff != "janus-2.local" {
+		t.Fatalf("stored state after observation: %s / %s", state, eff)
+	}
+}
+
+// TestMdnsFailedAddRetries pins the must-fix: a failed responder.Add
+// leaves the entry visible on /1.0/mdns as "failed" (never silently
+// absent) and the next reconcile pass — the periodic cadence in
+// production — retries it to convergence.
+func TestMdnsFailedAddRetries(t *testing.T) {
+	reg := newAppRegistry()
+	fake := &fakeResponder{addErrs: map[string]int{"janus": 1}}
+	adv := newTestAdvertiser(t, reg, fake)
+	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+		t.Fatal(err)
+	}
+	adv.reconcile()
+	snap := adv.snapshot("janus.local")
+	if len(snap.entries) != 1 || snap.entries[0].State != mdnsStateFailed {
+		t.Fatalf("after failed Add: %+v", snap.entries)
+	}
+	if snap.announces != 0 || snap.withdraws != 0 {
+		t.Fatalf("failed Add moved counters: %d/%d", snap.announces, snap.withdraws)
+	}
+	adv.reconcile() // the retry pass
+	snap = adv.snapshot("janus.local")
+	if len(snap.entries) != 1 || snap.entries[0].State != mdnsStateAnnounced {
+		t.Fatalf("after retry: %+v", snap.entries)
+	}
+	if snap.announces != 1 || snap.withdraws != 0 {
+		t.Fatalf("retry counters: %d/%d", snap.announces, snap.withdraws)
+	}
+}
+
+// TestMdnsDeadResponderRebuilds pins the Respond-error fix: a responder
+// whose read loop dies with a real error is detected on the reconcile
+// cadence, discarded, and rebuilt — every name re-announces on the new
+// responder, and the withdraws counter never moves (nothing was removed
+// cleanly).
+func TestMdnsDeadResponderRebuilds(t *testing.T) {
+	reg := newAppRegistry()
+	die := make(chan struct{})
+	first := &fakeResponder{die: die}
+	second := &fakeResponder{}
+	built := 0
+	adv := newMdnsAdvertiser(reg, nil)
+	adv.newResponder = func() (dnssd.Responder, error) {
+		built++
+		if built == 1 {
+			return first, nil
+		}
+		return second, nil
+	}
+	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+		t.Fatal(err)
+	}
+	adv.reconcile()
+	if snap := adv.snapshot("janus.local"); snap.entries[0].State != mdnsStateAnnounced {
+		t.Fatalf("pre-death: %+v", snap.entries)
+	}
+
+	// The read loop dies; wait for the Respond goroutine to exit so the
+	// dead-responder check observes the closed done channel.
+	close(die)
+	adv.mu.Lock()
+	done := adv.respondDone
+	adv.mu.Unlock()
+	<-done
+
+	adv.reconcile()
+	if built != 2 {
+		t.Fatalf("responder never rebuilt: %d constructions", built)
+	}
+	snap := adv.snapshot("janus.local")
+	if len(snap.entries) != 1 || snap.entries[0].State != mdnsStateAnnounced {
+		t.Fatalf("post-rebuild: %+v", snap.entries)
+	}
+	if a, _ := second.counts(); a != 1 {
+		t.Fatalf("name never re-announced on the new responder: %d adds", a)
+	}
+	if snap.withdraws != 0 {
+		t.Fatalf("death rebuild counted withdraws: %d", snap.withdraws)
+	}
+}
+
+// TestMdnsTeardownCountsOnlyAnnounced pins the counter semantics: the
+// disable teardown counts a withdraw only for entries that actually
+// reached the responder — an entry sitting in "failed" was never on the
+// air and never counts.
+func TestMdnsTeardownCountsOnlyAnnounced(t *testing.T) {
+	reg := newAppRegistry()
+	fake := &fakeResponder{addErrs: map[string]int{"shop": 1000}}
+	adv := newTestAdvertiser(t, reg, fake)
+	if _, err := reg.create("shop", []string{"shop.local"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+		t.Fatal(err)
+	}
+	adv.reconcile()
+	snap := adv.snapshot("janus.local")
+	if len(snap.entries) != 2 {
+		t.Fatalf("setup: %+v", snap.entries)
+	}
+	if err := adv.configure(nil); err != nil {
+		t.Fatal(err)
+	}
+	adv.reconcile()
+	snap = adv.snapshot("janus.local")
+	if snap.withdraws != 1 {
+		t.Fatalf("teardown withdraws = %d, want 1 (announced front door only)", snap.withdraws)
+	}
+}
+
+// TestMdnsBlockedNetsParse pins the block list against a library trap:
+// dnssd.NewService checks the wrong error variable when parsing
+// BlockedIPNets, so an invalid CIDR would be stored as nil and panic at
+// answer time. All three entries must parse.
+func TestMdnsBlockedNetsParse(t *testing.T) {
+	srv, err := dnssd.NewService(dnssd.Config{
+		Name:          "janus",
+		Type:          mdnsTypeFrontDoor,
+		Domain:        "local",
+		Host:          "janus",
+		Port:          80,
+		BlockedIPNets: mdnsBlockedNets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.Blocked) != len(mdnsBlockedNets) {
+		t.Fatalf("blocked nets: %d, want %d", len(srv.Blocked), len(mdnsBlockedNets))
+	}
+	for i, n := range srv.Blocked {
+		if n == nil {
+			t.Fatalf("blocked net %d (%q) parsed to nil", i, mdnsBlockedNets[i])
+		}
 	}
 }
 
@@ -660,6 +886,8 @@ func TestMdnsListenCollision(t *testing.T) {
 		{":80", "127.0.0.1:80", true},
 		{"127.0.0.1:80", "192.168.1.1:80", false},
 		{"127.0.0.1:80", "127.0.0.1:80", true},
+		{"localhost:80", "127.0.0.1:80", true}, // hostname listens resolve
+		{"127.0.0.1:80", "localhost:80", true},
 		{":7680", ":80", false},
 		{":80", ":443", false},
 		{":8443", ":8000-9000", true},

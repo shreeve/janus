@@ -147,8 +147,20 @@ function renderApps(apps, advertised) {
       "No apps registered — tenants register via POST /1.0/apps."));
     return;
   }
+  // advertised carries on-air (post-conflict) names; a conflict rename
+  // appends -<digits> to the label (shop.local → shop-2.local), so a
+  // renamed host still gets its badge.
   var adv = {};
   (advertised || []).forEach(function (n) { adv[n] = true; });
+  function isAdvertised(h) {
+    if (adv[h]) return true;
+    var label = h.replace(/\.local$/, "");
+    if (label === h) return false;
+    return (advertised || []).some(function (n) {
+      return n.lastIndexOf(label + "-", 0) === 0 &&
+        /^-\d+\.local$/.test(n.slice(label.length));
+    });
+  }
   var table = el("table");
   var head = el("tr");
   ["App", "Hosts", "Upstreams", "Heartbeat"].forEach(function (h) {
@@ -167,7 +179,7 @@ function renderApps(apps, advertised) {
       var a = el("a", null, h);
       a.href = "https://" + h + "/";
       line.appendChild(a);
-      if (adv[h]) line.appendChild(el("span", "badge", ".local"));
+      if (isAdvertised(h)) line.appendChild(el("span", "badge", ".local"));
       hosts.appendChild(line);
     });
     tr.appendChild(hosts);
