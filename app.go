@@ -173,10 +173,17 @@ func (a *App) Stop() error {
 }
 
 // Cleanup releases the app's reference on the pooled state; the last
-// release (process shutdown) destructs it.
+// release (process shutdown) destructs it. A release that leaves other
+// generations holding the state is either a successful reload's old
+// generation retiring or an aborted reload's new generation being torn
+// down — the advertiser tells them apart and ERROR-logs the aborted
+// case's config divergence.
 func (a *App) Cleanup() error {
 	if a.state != nil {
-		_, err := janusPool.Delete(janusStateKey)
+		deleted, err := janusPool.Delete(janusStateKey)
+		if !deleted {
+			a.state.mdns.generationRetired(a)
+		}
 		return err
 	}
 	return nil

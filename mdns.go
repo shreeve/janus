@@ -83,6 +83,34 @@ type mdnsConfig struct {
 	port   int    // front-door port (the _http._tcp SRV port)
 	ifaces []string
 	apps   bool
+
+	// listen and canonical do not drive the advertiser; they ride along
+	// so the aborted-reload divergence log can state the full front-door
+	// posture of both generations.
+	listen    string
+	canonical string
+}
+
+// equal reports whether two desired configurations are the same mdns
+// posture (nil = disabled). An aborted reload whose mdns settings match
+// the surviving generation's has no divergence to report.
+func (c *mdnsConfig) equal(o *mdnsConfig) bool {
+	if c == nil || o == nil {
+		return c == o
+	}
+	return c.name == o.name && c.port == o.port && c.apps == o.apps &&
+		c.listen == o.listen && c.canonical == o.canonical &&
+		mdnsIfacesEqual(c.ifaces, o.ifaces)
+}
+
+// describe renders a configuration for the divergence log: every knob
+// an operator would compare, on one line.
+func (c *mdnsConfig) describe() string {
+	if c == nil {
+		return "disabled"
+	}
+	return fmt.Sprintf("name=%s listen=%s apps=%t interfaces=%v canonical=%q",
+		c.name, c.listen, c.apps, c.ifaces, c.canonical)
 }
 
 func mdnsIfacesEqual(a, b []string) bool {
@@ -166,6 +194,8 @@ type mdnsAdvertiser struct {
 
 	mu          sync.Mutex
 	cfg         *mdnsConfig // desired; nil = disabled
+	lastGen     any         // the config generation whose configure last took hold
+	prevCfg     *mdnsConfig // the configuration that configure replaced
 	entries     map[string]*mdnsEntry
 	skipped     map[string]bool // multi-label .local hosts currently registered
 	responder   dnssd.Responder
@@ -232,8 +262,11 @@ func (a *mdnsAdvertiser) kickReconcile() {
 // configure sets the desired configuration (nil disables). Enabling
 // creates the responder synchronously so a 5353 socket failure is a hard
 // Start error; everything else — including teardown — converges on the
-// reconcile goroutine.
-func (a *mdnsAdvertiser) configure(cfg *mdnsConfig) error {
+// reconcile goroutine. gen identifies the calling config generation (the
+// *App); generationRetired uses it to recognize the aborted-reload
+// signature. On the error path nothing is recorded: the previous
+// generation's settings stay on the air and no divergence exists.
+func (a *mdnsAdvertiser) configure(gen any, cfg *mdnsConfig) error {
 	a.mu.Lock()
 	if cfg != nil && a.responder == nil {
 		r, err := a.newResponder()
@@ -243,10 +276,46 @@ func (a *mdnsAdvertiser) configure(cfg *mdnsConfig) error {
 		}
 		a.startResponderLocked(r, cfg.ifaces)
 	}
+	a.prevCfg = a.cfg
 	a.cfg = cfg
+	a.lastGen = gen
 	a.mu.Unlock()
 	a.kickReconcile()
 	return nil
+}
+
+// mdnsAbortedReloadMsg is the divergence ERROR's message, pinned by
+// TestMdnsAbortedReloadDetection.
+const mdnsAbortedReloadMsg = "janus mdns: aborted config reload left the pooled advertiser running the aborted generation's settings; the surviving config expects the settings it was reloading away from; rollback is not performed — mdns reconciles on the next successful reload"
+
+// generationRetired is the aborted-reload detector, called by
+// App.Cleanup when a config generation releases its pooled-state
+// reference while another generation survives (janusPool.Delete
+// returned deleted == false). On a successful reload the retiring
+// generation is the old one and the surviving new generation has
+// already reconfigured the advertiser, so the identity check fails and
+// nothing logs; process shutdown is the last reference and never
+// reaches here; first boot retires nothing. Only an aborted reload
+// retires the generation that configured last while an older one
+// survives — the advertiser keeps running the aborted settings, and
+// that divergence is ERROR-logged with both configurations. Rollback is
+// deliberately not performed (owner ruling): state reconciles on the
+// next successful reload.
+func (a *mdnsAdvertiser) generationRetired(gen any) {
+	a.mu.Lock()
+	if a.lastGen != gen {
+		a.mu.Unlock()
+		return
+	}
+	running, expected := a.cfg, a.prevCfg
+	a.mu.Unlock()
+	if running.equal(expected) {
+		return // identical mdns settings on both generations: no divergence
+	}
+	a.logger.Error(mdnsAbortedReloadMsg,
+		zap.String("running", running.describe()),
+		zap.String("expected", expected.describe()),
+	)
 }
 
 // startResponderLocked installs a responder and starts its Respond loop.
@@ -595,7 +664,7 @@ func (a *mdnsAdvertiser) snapshot(configured string) mdnsAdvSnapshot {
 func (a *App) startMdns() error {
 	adv := a.state.mdns
 	if a.Mdns == nil {
-		return adv.configure(nil)
+		return adv.configure(a, nil)
 	}
 	ms := a.Mdns
 	for _, ifn := range ms.Interfaces {
@@ -638,12 +707,14 @@ func (a *App) startMdns() error {
 	)
 
 	cfg := &mdnsConfig{
-		name:   ms.Name,
-		port:   ms.listenPort(),
-		ifaces: append([]string{}, ms.Interfaces...),
-		apps:   ms.appsOn(),
+		name:      ms.Name,
+		port:      ms.listenPort(),
+		ifaces:    append([]string{}, ms.Interfaces...),
+		apps:      ms.appsOn(),
+		listen:    ms.Listen,
+		canonical: ms.Canonical,
 	}
-	if err := adv.configure(cfg); err != nil {
+	if err := adv.configure(a, cfg); err != nil {
 		_ = a.stopMdns()
 		return err
 	}

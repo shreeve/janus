@@ -11,7 +11,11 @@ import (
 	"time"
 
 	"github.com/brutella/dnssd"
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // --- parse ---------------------------------------------------------------------
@@ -363,7 +367,7 @@ func TestMdnsReconcileTransitions(t *testing.T) {
 	fake := &fakeResponder{}
 	adv := newTestAdvertiser(t, reg, fake)
 	cfg := &mdnsConfig{name: "janus.local", port: 80, apps: true}
-	if err := adv.configure(cfg); err != nil {
+	if err := adv.configure(t, cfg); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -388,7 +392,7 @@ func TestMdnsReconcileTransitions(t *testing.T) {
 
 	// No-diff pass: zero responder calls (the no-flap pin).
 	a0, r0 := fake.counts()
-	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -423,7 +427,7 @@ func TestMdnsReconcileTransitions(t *testing.T) {
 	}
 
 	// Name change: old front entry withdraws, new probes.
-	if err := adv.configure(&mdnsConfig{name: "edge.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "edge.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -434,7 +438,7 @@ func TestMdnsReconcileTransitions(t *testing.T) {
 
 	// Disable: teardown clears everything and counts the withdrawals.
 	w0 := snap.withdraws
-	if err := adv.configure(nil); err != nil {
+	if err := adv.configure(t, nil); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -451,7 +455,7 @@ func TestMdnsConflictRenameSurfaces(t *testing.T) {
 	reg := newAppRegistry()
 	fake := &fakeResponder{renameTo: map[string]string{"janus": "janus-2"}}
 	adv := newTestAdvertiser(t, reg, fake)
-	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -476,7 +480,7 @@ func TestMdnsPostAnnounceRenameSurfaces(t *testing.T) {
 	reg := newAppRegistry()
 	fake := &fakeResponder{}
 	adv := newTestAdvertiser(t, reg, fake)
-	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -527,7 +531,7 @@ func TestMdnsFailedAddRetries(t *testing.T) {
 	reg := newAppRegistry()
 	fake := &fakeResponder{addErrs: map[string]int{"janus": 1}}
 	adv := newTestAdvertiser(t, reg, fake)
-	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -567,7 +571,7 @@ func TestMdnsDeadResponderRebuilds(t *testing.T) {
 		}
 		return second, nil
 	}
-	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -610,7 +614,7 @@ func TestMdnsTeardownCountsOnlyAnnounced(t *testing.T) {
 	if _, err := reg.create("shop", []string{"shop.local"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -618,7 +622,7 @@ func TestMdnsTeardownCountsOnlyAnnounced(t *testing.T) {
 	if len(snap.entries) != 2 {
 		t.Fatalf("setup: %+v", snap.entries)
 	}
-	if err := adv.configure(nil); err != nil {
+	if err := adv.configure(t, nil); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -658,7 +662,7 @@ func TestMdnsSkippedGaugeLifecycle(t *testing.T) {
 	reg := newAppRegistry()
 	fake := &fakeResponder{}
 	adv := newTestAdvertiser(t, reg, fake)
-	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	adv.reconcile()
@@ -689,7 +693,7 @@ func TestMdnsNotifyNeverBlocks(t *testing.T) {
 	reg.mdnsNotify = adv.kickReconcile
 	adv.run()
 	defer adv.shutdown()
-	if err := adv.configure(&mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now()
@@ -713,6 +717,190 @@ func TestMdnsNotifyNeverBlocks(t *testing.T) {
 			t.Fatalf("never converged: %+v", snap.entries)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// --- aborted-reload detection -----------------------------------------------------
+
+// TestMdnsAbortedReloadDetection pins the owner ruling on the
+// failed-reload flag: an aborted config reload leaves the pooled
+// advertiser running the aborted generation's settings (rollback is
+// deliberately not performed), and the aborted generation's teardown —
+// it is still the advertiser's most recent configurer while an older
+// generation survives — ERROR-logs the divergence with both
+// configurations. The normal paths (successful reload handover, process
+// shutdown, first boot, and an abort whose mdns settings match the
+// survivor's) never log it.
+func TestMdnsAbortedReloadDetection(t *testing.T) {
+	cfgA := &mdnsConfig{name: "janus.local", port: 80, apps: true, listen: ":80"}
+	cfgB := &mdnsConfig{name: "edge.local", port: 7680, apps: false, listen: ":7680",
+		canonical: "https://janus.lan.ripdev.io"}
+	newObserved := func() (*mdnsAdvertiser, *observer.ObservedLogs) {
+		core, logs := observer.New(zapcore.DebugLevel)
+		adv := newMdnsAdvertiser(newAppRegistry(), zap.New(core))
+		adv.newResponder = func() (dnssd.Responder, error) { return &fakeResponder{}, nil }
+		return adv, logs
+	}
+	divergence := func(logs *observer.ObservedLogs) []observer.LoggedEntry {
+		return logs.FilterMessage(mdnsAbortedReloadMsg).All()
+	}
+	genA, genB := "generation-A", "generation-B"
+
+	t.Run("aborted reload fires", func(t *testing.T) {
+		adv, logs := newObserved()
+		if err := adv.configure(genA, cfgA); err != nil {
+			t.Fatal(err)
+		}
+		adv.reconcile()
+		if err := adv.configure(genB, cfgB); err != nil {
+			t.Fatal(err)
+		}
+		adv.generationRetired(genB) // B torn down while A survives
+		entries := divergence(logs)
+		if len(entries) != 1 {
+			t.Fatalf("divergence logs = %d, want 1", len(entries))
+		}
+		e := entries[0]
+		if e.Level != zapcore.ErrorLevel {
+			t.Fatalf("level = %v, want ERROR", e.Level)
+		}
+		fields := e.ContextMap()
+		running, _ := fields["running"].(string)
+		expected, _ := fields["expected"].(string)
+		for _, want := range []string{"name=edge.local", "listen=:7680", "apps=false",
+			`canonical="https://janus.lan.ripdev.io"`} {
+			if !strings.Contains(running, want) {
+				t.Errorf("running %q missing %q", running, want)
+			}
+		}
+		for _, want := range []string{"name=janus.local", "listen=:80", "apps=true"} {
+			if !strings.Contains(expected, want) {
+				t.Errorf("expected %q missing %q", expected, want)
+			}
+		}
+	})
+
+	t.Run("aborted reload that disabled mdns fires", func(t *testing.T) {
+		adv, logs := newObserved()
+		if err := adv.configure(genA, cfgA); err != nil {
+			t.Fatal(err)
+		}
+		adv.reconcile()
+		if err := adv.configure(genB, nil); err != nil {
+			t.Fatal(err)
+		}
+		adv.generationRetired(genB)
+		entries := divergence(logs)
+		if len(entries) != 1 {
+			t.Fatalf("divergence logs = %d, want 1", len(entries))
+		}
+		if running, _ := entries[0].ContextMap()["running"].(string); running != "disabled" {
+			t.Fatalf("running = %q, want %q", running, "disabled")
+		}
+	})
+
+	t.Run("successful handover stays silent", func(t *testing.T) {
+		adv, logs := newObserved()
+		if err := adv.configure(genA, cfgA); err != nil {
+			t.Fatal(err)
+		}
+		adv.reconcile()
+		if err := adv.configure(genB, cfgB); err != nil {
+			t.Fatal(err)
+		}
+		adv.reconcile()
+		adv.generationRetired(genA) // the old generation retires; B configured last
+		if n := len(divergence(logs)); n != 0 {
+			t.Fatalf("handover logged %d divergences", n)
+		}
+	})
+
+	t.Run("process shutdown stays silent", func(t *testing.T) {
+		adv, logs := newObserved()
+		adv.run()
+		if err := adv.configure(genA, cfgA); err != nil {
+			t.Fatal(err)
+		}
+		adv.shutdown() // last reference: generationRetired is never invoked
+		if n := len(divergence(logs)); n != 0 {
+			t.Fatalf("shutdown logged %d divergences", n)
+		}
+	})
+
+	t.Run("first boot stays silent", func(t *testing.T) {
+		adv, logs := newObserved()
+		if err := adv.configure(genA, cfgA); err != nil {
+			t.Fatal(err)
+		}
+		adv.reconcile()
+		if n := len(divergence(logs)); n != 0 {
+			t.Fatalf("first boot logged %d divergences", n)
+		}
+	})
+
+	t.Run("identical-settings abort stays silent", func(t *testing.T) {
+		adv, logs := newObserved()
+		if err := adv.configure(genA, cfgA); err != nil {
+			t.Fatal(err)
+		}
+		adv.reconcile()
+		same := &mdnsConfig{name: "janus.local", port: 80, apps: true, listen: ":80"}
+		if err := adv.configure(genB, same); err != nil {
+			t.Fatal(err)
+		}
+		adv.generationRetired(genB) // nothing diverged; a false ERROR would be its own bug
+		if n := len(divergence(logs)); n != 0 {
+			t.Fatalf("identical-settings abort logged %d divergences", n)
+		}
+	})
+}
+
+// TestMdnsAbortedReloadDetectionThroughCleanup pins the seam itself:
+// App.Cleanup invokes the detector only when the pool release leaves a
+// surviving generation (janusPool.Delete returns deleted == false); the
+// last release destructs the pooled state with no divergence log.
+func TestMdnsAbortedReloadDetectionThroughCleanup(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	load := func() *janusState {
+		stI, _, err := janusPool.LoadOrNew(janusStateKey, func() (caddy.Destructor, error) {
+			return newJanusState(logger, time.Hour)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stI.(*janusState)
+	}
+
+	st := load() // generation A provisions
+	st.mdns.newResponder = func() (dnssd.Responder, error) { return &fakeResponder{}, nil }
+	appA := &App{state: st}
+	if err := st.mdns.configure(appA, &mdnsConfig{name: "janus.local", port: 80, listen: ":80"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if load() != st { // generation B provisions: same holder, second reference
+		t.Fatal("pool returned a different holder")
+	}
+	appB := &App{state: st}
+	if err := st.mdns.configure(appB, &mdnsConfig{name: "edge.local", port: 80, listen: ":80"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The reload aborts: B releases its reference while A survives.
+	if err := appB.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(logs.FilterMessage(mdnsAbortedReloadMsg).All()); n != 1 {
+		t.Fatalf("aborted-generation cleanup: %d divergence logs, want 1", n)
+	}
+
+	// Process shutdown: the last reference destructs, no new divergence.
+	if err := appA.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(logs.FilterMessage(mdnsAbortedReloadMsg).All()); n != 1 {
+		t.Fatalf("final cleanup: %d divergence logs, want %d", n, 1)
 	}
 }
 
