@@ -1,4 +1,4 @@
-# Janus — capability order: (1) ping, (2) control, …
+# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns
 #
 # *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
 #
@@ -56,6 +56,17 @@
 #
 #   curl -s http://127.0.0.1:7600/1.0/hub          → hub counters
 #
+# 5) mdns — LAN presence (process-wide, like control)
+#   Enabling announces this machine and its app list to the local
+#   network, and serves the read-only status front door on every
+#   interface. janus.local + every registered single-label .local host
+#   advertise over multicast DNS; the front door renders the registry,
+#   cache, and hub at a glance. listen :7680 here so the dev config
+#   (and ./test.sh) runs unprivileged; production default is :80.
+#
+#   curl -s http://127.0.0.1:7600/1.0/mdns             → advertiser state
+#   curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
+#
 {
 	auto_https disable_redirects
 	skip_install_trust
@@ -76,6 +87,9 @@
 			max_app_share 50 # % of max_bytes one app may hold (GLOBAL ONLY)
 		}
 		hub # 4) site-scoped default: on (path /hub, origin same)
+		mdns { # 5) process-wide LAN presence
+			listen :7680 # dev/test port; default :80 (dual-stack)
+		}
 	}
 }
 

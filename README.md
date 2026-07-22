@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, and edge-terminated WebSocket fan-out, driven by a JSON control API.</strong>
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, edge-terminated WebSocket fan-out, and zero-config LAN presence over mDNS, driven by a JSON control API.</strong>
 </p>
 
 ---
@@ -19,6 +19,7 @@ Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Ja
 		control local
 		cache
 		hub
+		mdns
 	}
 }
 
@@ -68,6 +69,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 2 | **control** | Opens the `/1.0` listeners (internal/local/public) | [`capability-control`](docs/20260718-203749-capability-control.md) |
 | 3 | **cache** | Site-scoped micro-cache + request coalescing on the data plane | [`capability-microcache`](docs/20260720-033201-capability-microcache.md) |
 | 4 | **hub** | Per-app WebSocket fan-out terminated at the edge; tenants observe and steer over HTTP | [`capability-hub`](docs/20260720-162350-hub-design.md) |
+| 5 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS, and the read-only status front door | [`capability-mdns`](docs/20260722-034619-capability-mdns.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -79,7 +81,7 @@ xcaddy build \
   --output ./bin/caddy
 
 go test ./...
-./test.sh   # 9 groups, 112 cases, in capability order: ping, control, apps, data, cache, heartbeat, tls, hub, tenant
+./test.sh   # 10 groups, 127 cases, in capability order: ping, control, apps, data, cache, heartbeat, tls, hub, tenant, mdns
 ```
 
 ### 1. ping (data plane)
@@ -126,6 +128,15 @@ curl -s http://127.0.0.1:7600/1.0/hub       # fan-out / bridge counters
 curl -s -X POST -H 'Content-Type: application/json' \
   --data '{"@":["/lobby"],"news":{"v":1}}' \
   http://127.0.0.1:7600/1.0/apps/$APP_ID/hub/publish
+```
+
+### 5. mdns
+
+Opt-in LAN presence: `janus.local` (and every registered single-label `.local` host) answers over multicast DNS with no DNS server or client install, and a plain-HTTP front door serves a read-only, self-contained status page — registry, worker health, heartbeat freshness, cache and hub counters, socket paths redacted. An optional `canonical` origin turns the page into a hand-off ramp to real HTTPS, with a built-in diagnostic for router DNS-rebinding filters.
+
+```bash
+curl -s http://127.0.0.1:7600/1.0/mdns      # advertiser state (names, states, counters)
+curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 ```
 
 ## Build and run
@@ -177,6 +188,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
       "ping": true,
       "cache": { "enabled": true, "ttl": "1s" },
       "hub": { "enabled": true, "path": "/hub", "max_conns": 4096 },
+      "mdns": { "name": "janus.local", "listen": ":80" },
       "heartbeat_ttl": "15s"
     },
     "http": {
@@ -219,6 +231,10 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `hub_ws.go` | Hub WebSocket edge (admission, upgrade, reader) |
 | `hub_bridge.go` | Hub tenant bridge (per-connection FIFO, open/text/close POSTs) |
 | `hub_config.go` | `hub` directive: parse, cascade, site table, floors |
+| `mdns.go` | mDNS advertiser (pooled, reconcile goroutine) + status front door |
+| `mdns_config.go` | `mdns` directive: parse, provision, validation |
+| `mdns.html` | Embedded status page (self-contained; zero external resources) |
+| `control_mdns.go` | mDNS control surface (`GET /1.0/mdns`) |
 | `testkit/` | Go test-support program: fixtures + WS driver for `test.sh` |
 | `bench/` | Committed bench harness (baseline, leak probe, hub arm) |
 | `Caddyfile` | Working cold config (multi-site cascade demos) |

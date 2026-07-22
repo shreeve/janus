@@ -2,6 +2,7 @@ package janus
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -32,6 +33,11 @@ type App struct {
 	// Hub is the global default for the site-scoped hub capability
 	// (per-app WebSocket fan-out). Default: off. Sites may override.
 	Hub *HubSettings `json:"hub,omitempty"`
+
+	// Mdns is the process-wide LAN-presence capability: the advertised
+	// .local identity, per-app .local advertising, and the plain-HTTP
+	// front door. Default: off (nil).
+	Mdns *MdnsSettings `json:"mdns,omitempty"`
 
 	// HeartbeatTTL is how long a registered app may go without a
 	// heartbeat before its registration is reaped (same effect as
@@ -65,6 +71,10 @@ type App struct {
 	// cache is the one process-wide micro-cache pool. Always constructed
 	// (the /1.0/cache counters are always on); sites opt in via cascade.
 	cache *cacheStore
+
+	// mdnsSrv is this config generation's front-door HTTP server; the
+	// pooled advertiser itself lives in state.mdns.
+	mdnsSrv *http.Server
 }
 
 // CaddyModule returns the Caddy module information.
@@ -96,6 +106,9 @@ func (a *App) Provision(ctx caddy.Context) error {
 	a.dp = a.state.dp
 	a.hubs = a.state.hubs
 	if err := a.provisionCacheStore(); err != nil {
+		return err
+	}
+	if err := a.provisionMdns(); err != nil {
 		return err
 	}
 	if len(a.Control) == 0 {
@@ -134,14 +147,29 @@ func (a *App) Start() error {
 		}
 		return err
 	}
+	if err := a.startMdns(); err != nil {
+		if serr := a.stopControlListeners(); serr != nil {
+			a.logger.Error("janus control unwind", zap.Error(serr))
+		}
+		if serr := a.stopMdns(); serr != nil {
+			a.logger.Error("janus mdns unwind", zap.Error(serr))
+		}
+		return err
+	}
 	return nil
 }
 
 // Stop stops the Janus app. Pooled state (registry sweeper, hubs, open
-// sockets) deliberately survives: a config reload stops the old app while
-// the new one is already serving the same pooled state.
+// sockets, the mdns advertiser) deliberately survives: a config reload
+// stops the old app while the new one is already serving the same pooled
+// state.
 func (a *App) Stop() error {
-	return a.stopControlListeners()
+	cerr := a.stopControlListeners()
+	merr := a.stopMdns()
+	if cerr != nil {
+		return cerr
+	}
+	return merr
 }
 
 // Cleanup releases the app's reference on the pooled state; the last

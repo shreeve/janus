@@ -75,6 +75,15 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return err
 				}
 				a.Hub = hs
+			case "mdns":
+				if a.Mdns != nil {
+					return d.Err("duplicate mdns directive in the same block")
+				}
+				ms, err := parseMdnsDirective(d)
+				if err != nil {
+					return err
+				}
+				a.Mdns = ms
 			case "heartbeat_ttl":
 				if a.HeartbeatTTL != 0 {
 					return d.Err("duplicate heartbeat_ttl directive")

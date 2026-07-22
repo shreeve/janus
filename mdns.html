@@ -1,0 +1,282 @@
+<!doctype html>
+<!-- Janus mdns front door — embedded, self-contained (zero external
+     resources; the offline-LAN story depends on it). Every dynamic value
+     renders as a DOM text node, never markup. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Janus</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --text: #e6e9ef; --dim: #8b93a3; --accent: #7aa2f7;
+    --ok: #4fd6a5; --warn: #e8b75f; --bad: #f27878;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  header h1 { font-size: 22px; margin: 0; letter-spacing: .3px; }
+  header .name { color: var(--accent); font-family: ui-monospace, Menlo, monospace; }
+  .sub { color: var(--dim); margin: 0 0 22px; font-size: 13px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 16px;
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .12em; color: var(--dim);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 10px 6px 0; vertical-align: top; }
+  th { color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--line); }
+  td { border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .dim { color: var(--dim); }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--bad); }
+  .badge {
+    display: inline-block; padding: 0 7px; margin-left: 6px;
+    border: 1px solid var(--line); border-radius: 999px;
+    font-size: 11px; color: var(--accent); vertical-align: 1px;
+  }
+  .stats { display: flex; flex-wrap: wrap; gap: 26px; }
+  .stat .v { font-size: 20px; font-weight: 600; }
+  .stat .k { font-size: 12px; color: var(--dim); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .empty { color: var(--dim); padding: 8px 0; }
+  #diagnostic { display: none; border-color: var(--warn); }
+  #diagnostic h2 { color: var(--warn); }
+  #diagnostic p { margin: 8px 0; }
+  #diagnostic table td { font-size: 13px; }
+  #stale { display: none; color: var(--bad); font-size: 13px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Janus <span class="name" id="hdr-name"></span></h1>
+  </header>
+  <p class="sub" id="hdr-sub">read-only status &middot; refreshes every 10s</p>
+  <div id="stale">status.json unreachable — showing the last snapshot</div>
+
+  <div class="card" id="diagnostic">
+    <h2>Canonical name unreachable from this device</h2>
+    <p>This page tried to reach <span class="mono" id="diag-target"></span>
+       and got no answer within a few seconds.</p>
+    <p>That name resolves to a <strong>private LAN address</strong>, and many
+       routers&rsquo; DNS-rebinding protection silently refuses exactly that —
+       the symptom is a timeout, never an error. The one-line fix, per router:</p>
+    <table>
+      <tr><td class="mono">Fritz!Box</td><td>Home Network &rarr; Network &rarr; Network Settings &rarr; DNS Rebind Protection &rarr; add the domain as an exception</td></tr>
+      <tr><td class="mono">pfSense / OPNsense</td><td>System &rarr; Advanced (Unbound: Services &rarr; DNS Resolver) &rarr; add a private-domains entry for the domain</td></tr>
+      <tr><td class="mono">OpenWrt</td><td>dnsmasq option <span class="mono">rebind_domain</span> (Network &rarr; DHCP and DNS &rarr; whitelist the domain)</td></tr>
+      <tr><td class="mono">Pi-hole</td><td><span class="mono">misc.dnsmasq_lines</span>: <span class="mono">rebind-domain-ok=/&lt;domain&gt;/</span></td></tr>
+      <tr><td class="mono">Google WiFi</td><td>No whitelist exists — keep using this .local page, or use Caddy&rsquo;s <span class="mono">tls internal</span> with a per-device trust install</td></tr>
+    </table>
+    <p class="dim">The dashboard below keeps working either way.</p>
+  </div>
+
+  <div class="card">
+    <h2>Apps</h2>
+    <div id="apps"></div>
+  </div>
+
+  <div class="card">
+    <h2>Cache</h2>
+    <div class="stats" id="cache-stats"></div>
+  </div>
+
+  <div class="card">
+    <h2>Hub</h2>
+    <div class="stats" id="hub-stats"></div>
+  </div>
+
+  <div class="card">
+    <h2>mDNS</h2>
+    <div class="stats" id="mdns-stats"></div>
+    <div id="mdns-names" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// Rendering discipline: every dynamic value lands via textContent (or an
+// element property like href built from a validated hostname), never as
+// raw markup — registry-derived strings cannot become HTML here.
+
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function stat(value, label, cls) {
+  var s = el("div", "stat");
+  s.appendChild(el("div", "v" + (cls ? " " + cls : ""), String(value)));
+  s.appendChild(el("div", "k", label));
+  return s;
+}
+
+function clearChildren(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function fmtAge(ms) {
+  if (ms < 0) return "–";
+  if (ms < 1000) return "just now";
+  var s = Math.round(ms / 1000);
+  if (s < 90) return s + "s ago";
+  return Math.round(s / 60) + "m ago";
+}
+
+function renderApps(apps, advertised) {
+  var root = document.getElementById("apps");
+  clearChildren(root);
+  if (!apps || apps.length === 0) {
+    root.appendChild(el("div", "empty",
+      "No apps registered — tenants register via POST /1.0/apps."));
+    return;
+  }
+  // advertised carries on-air (post-conflict) names; a conflict rename
+  // appends -<digits> to the label (shop.local → shop-2.local), so a
+  // renamed host still gets its badge.
+  var adv = {};
+  (advertised || []).forEach(function (n) { adv[n] = true; });
+  function isAdvertised(h) {
+    if (adv[h]) return true;
+    var label = h.replace(/\.local$/, "");
+    if (label === h) return false;
+    return (advertised || []).some(function (n) {
+      return n.lastIndexOf(label + "-", 0) === 0 &&
+        /^-\d+\.local$/.test(n.slice(label.length));
+    });
+  }
+  var table = el("table");
+  var head = el("tr");
+  ["App", "Hosts", "Upstreams", "Heartbeat"].forEach(function (h) {
+    head.appendChild(el("th", null, h));
+  });
+  table.appendChild(head);
+  apps.forEach(function (app) {
+    var tr = el("tr");
+    var name = el("td");
+    name.appendChild(el("div", null, app.name));
+    name.appendChild(el("div", "mono dim", app.id));
+    tr.appendChild(name);
+    var hosts = el("td");
+    (app.hosts || []).forEach(function (h) {
+      var line = el("div", "mono");
+      var a = el("a", null, h);
+      a.href = "https://" + h + "/";
+      line.appendChild(a);
+      if (isAdvertised(h)) line.appendChild(el("span", "badge", ".local"));
+      hosts.appendChild(line);
+    });
+    tr.appendChild(hosts);
+    var up = el("td");
+    var total = app.upstreams ? app.upstreams.total : 0;
+    var healthy = app.upstreams ? app.upstreams.healthy : 0;
+    var cls = total === 0 ? "dim" : (healthy === total ? "ok" : (healthy === 0 ? "bad" : "warn"));
+    up.appendChild(el("span", cls, healthy + " / " + total + " healthy"));
+    tr.appendChild(up);
+    tr.appendChild(el("td", null, fmtAge(app.heartbeat_age_ms)));
+    table.appendChild(tr);
+  });
+  root.appendChild(table);
+}
+
+function renderCounters(data) {
+  var c = document.getElementById("cache-stats");
+  clearChildren(c);
+  var cache = data.cache || {};
+  c.appendChild(stat(cache.hits || 0, "hits"));
+  c.appendChild(stat(cache.misses || 0, "misses"));
+  c.appendChild(stat(cache.coalesced || 0, "coalesced"));
+  c.appendChild(stat(cache.bypass || 0, "bypass"));
+  var h = document.getElementById("hub-stats");
+  clearChildren(h);
+  var hub = data.hub || {};
+  h.appendChild(stat(hub.conns || 0, "connections"));
+  h.appendChild(stat(hub.channels || 0, "channels"));
+  var m = document.getElementById("mdns-stats");
+  clearChildren(m);
+  m.appendChild(stat((data.advertised || []).length, "advertised names"));
+  m.appendChild(stat(data.skipped_hosts || 0, "skipped hosts"));
+  var names = document.getElementById("mdns-names");
+  clearChildren(names);
+  (data.advertised || []).forEach(function (n) {
+    names.appendChild(el("span", "mono badge", n));
+  });
+  if (data.canonical) {
+    var line = el("div", "dim");
+    line.style.marginTop = "8px";
+    line.appendChild(document.createTextNode("canonical: "));
+    var a = el("a", "mono", data.canonical);
+    a.href = data.canonical;
+    line.appendChild(a);
+    names.appendChild(line);
+  }
+}
+
+function render(data) {
+  document.getElementById("hdr-name").textContent = data.effective_name || data.name || "";
+  if (data.effective_name && data.name && data.effective_name !== data.name) {
+    document.getElementById("hdr-sub").textContent =
+      "configured as " + data.name + " — renamed after an mDNS conflict · refreshes every 10s";
+  }
+  renderApps(data.apps, data.advertised);
+  renderCounters(data);
+}
+
+var stale = document.getElementById("stale");
+function refresh() {
+  fetch("/status.json", { cache: "no-store" })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      stale.style.display = "none";
+      render(data);
+      maybeHandoff(data.canonical);
+    })
+    .catch(function () { stale.style.display = "block"; });
+}
+
+// Canonical hand-off: probe client-side (the server cannot know whether
+// THIS client's resolver filters the name — no server 3xx, ever), then
+// redirect on success or explain on failure. Loop guard: never probe
+// when this page is already served at the canonical origin.
+var handoffDone = false;
+function maybeHandoff(canonical) {
+  if (handoffDone || !canonical) return;
+  handoffDone = true;
+  var origin;
+  try { origin = new URL(canonical).origin; } catch (e) { return; }
+  if (location.origin === origin) return;
+  var ctl = new AbortController();
+  var timer = setTimeout(function () { ctl.abort(); }, 3000);
+  fetch(origin, { mode: "no-cors", cache: "no-store", signal: ctl.signal })
+    .then(function () {
+      clearTimeout(timer);
+      location.replace(canonical);
+    })
+    .catch(function () {
+      clearTimeout(timer);
+      document.getElementById("diag-target").textContent = canonical;
+      document.getElementById("diagnostic").style.display = "block";
+    });
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

@@ -13,9 +13,11 @@
 //
 // Capabilities land in order: ping (1) proves the chassis, control (2)
 // serves /1.0, cache (3) is a site-scoped micro-cache with request
-// coalescing, and hub (4) terminates WebSockets at the edge and fans
-// JSON directive frames out per app while the tenant observes and
-// steers over plain HTTP.
+// coalescing, hub (4) terminates WebSockets at the edge and fans JSON
+// directive frames out per app while the tenant observes and steers
+// over plain HTTP, and mdns (5) advertises janus.local plus registered
+// .local app hosts over multicast DNS and serves the read-only status
+// front door.
 //
 // The registry, data plane, and hub state live in pooled process state
 // (caddy.UsagePool), so a Caddy config reload never drops a registration

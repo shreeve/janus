@@ -8,11 +8,12 @@ state (`caddy.UsagePool`) — a config reload never drops a registration
 or a WebSocket. Everything is memory-only by contract: a restart
 empties the registry and tenants re-register.
 
-**Era: stewardship.** Feature-complete at v1.0.0 — all four cold
-capabilities shipped, every build-spec box ticked. Ongoing work is fix,
+**Era: stewardship.** Feature-complete at v1.0.0 — every build-spec
+box ticked; five cold capabilities shipped. Ongoing work is fix,
 harden, measure. New behavior arrives as a capability through the
 proven loop: **design contract → adversarial review → revise →
-implement → pin in tests → measure**.
+implement → pin in tests → measure** (mdns, capability 5, is the
+first post-v1.0.0 product of that loop).
 
 ## The Rules
 
@@ -30,7 +31,7 @@ implement → pin in tests → measure**.
    values, defaults, and hard errors — same grammar as stock Caddy.
 
 4. **Capabilities are the unit of cold work.** Numbered by landing
-   order; the story (ping → control → cache → hub → …) never reorders
+   order; the story (ping → control → cache → hub → mdns → …) never reorders
    in docs or `test.sh`. A new one starts at "When adding a capability"
    below — contract doc and adversarial review before code.
 
@@ -79,10 +80,11 @@ implement → pin in tests → measure**.
 | 2 | **control** | Process-wide `/1.0` listeners: `internal` / `local` / `public`, per-line `token:` / `cert:` / `key:`. |
 | 3 | **cache** | Site-scoped micro-cache + request coalescing, generation-fenced (cascades: yes). |
 | 4 | **hub** | Edge-terminated WebSocket fan-out with the Bam directive grammar; the tenant observes and steers over HTTP (cascades: yes). |
-| 5+ | next | Future capabilities, each through the loop above. |
+| 5 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS; the read-only status front door with the canonical hand-off (cascades: no — process-wide). |
+| 6+ | next | Future capabilities, each through the loop above. |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,
-cache, heartbeat, tls, hub, tenant.
+cache, heartbeat, tls, hub, tenant, mdns.
 
 ## Architecture (short)
 

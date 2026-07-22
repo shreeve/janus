@@ -411,6 +411,34 @@ func (dp *dataPlane) pruneState() {
 	dp.mu.Unlock()
 }
 
+// upstreamHealth reports how many of the given upstreams are currently
+// selectable — the mdns status surface's health read. Doorbell entries
+// count toward the total and as healthy (they are excluded from health
+// marking by design); a socket with no state entry has never failed and
+// counts healthy. Reads the same atomic unhealthyUntil state the request
+// path uses; never called on a hot path.
+func (dp *dataPlane) upstreamHealth(ups []Upstream) (total, healthy int) {
+	now := time.Now().UnixNano()
+	dp.mu.Lock()
+	defer dp.mu.Unlock()
+	for i := range ups {
+		total++
+		if ups[i].Doorbell {
+			healthy++
+			continue
+		}
+		st := dp.state[ups[i].Path]
+		if st == nil {
+			healthy++
+			continue
+		}
+		if until := st.unhealthyUntil.Load(); until == 0 || now >= until {
+			healthy++
+		}
+	}
+	return total, healthy
+}
+
 // attemptState is one proxy attempt's per-request state, carried on the
 // outbound request context so per-socket ReverseProxy structs are reusable.
 type attemptState struct {

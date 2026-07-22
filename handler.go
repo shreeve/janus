@@ -155,6 +155,8 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			h.Hub = hs
 		case "control":
 			return d.Err("control is process-wide; configure it in the global janus options block")
+		case "mdns":
+			return d.Err("mdns is process-wide; configure it in the global janus options block")
 		default:
 			return d.Errf("unrecognized janus subdirective: %s", d.Val())
 		}
