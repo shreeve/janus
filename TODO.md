@@ -23,18 +23,3 @@ completed work.
       non-goal until a use case demands them). Until then, every token
       a control listener accepts is trusted across all apps visible on
       that listener.
-
----
-
-## P3 — defensible either way, needs a forcing reason
-
-Taste calls deliberately left alone by the post-ship review pass. Each
-is fine as it stands; touch one only when something forces the choice.
-
-- [ ] Splitting `apps.go` (registry + HTTP handlers in one file).
-- [ ] The `janusState` name for the pooled process-state holder
-      (`state.go`).
-- [ ] Per-file license headers (the repo relies on the root `LICENSE`).
-- [ ] Directive-order slot: `janus` registers `Before "respond"`;
-      `Before "reverse_proxy"` is the other defensible slot
-      (`caddyfile.go`).
