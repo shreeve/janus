@@ -3,6 +3,7 @@ module github.com/shreeve/janus
 go 1.25.1
 
 require (
+	github.com/brutella/dnssd v1.2.15-0.20260227152348-8c9d3cd68d00
 	github.com/caddyserver/caddy/v2 v2.11.4
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gorilla/websocket v1.5.3
@@ -99,6 +100,8 @@ require (
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/tailscale/tscert v0.0.0-20251216020129-aea342f6d747 // indirect
 	github.com/urfave/cli v1.22.17 // indirect
+	github.com/vishvananda/netlink v1.3.1 // indirect
+	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

@@ -265,6 +265,13 @@ type appRegistry struct {
 	// DELETE, and heartbeat reap.
 	pruneUpstreams func()
 
+	// mdnsNotify pings the mdns advertiser's reconcile loop after every
+	// event that changes the registered host set: create, host-changing
+	// PATCH, DELETE, and TTL reap. Invoked outside the lock; the hook is
+	// a non-blocking channel send by construction — no registry mutation
+	// ever waits on multicast I/O. Wired once by the pooled state holder.
+	mdnsNotify func()
+
 	// now is the heartbeat clock source; tests inject a fake.
 	now func() time.Time
 
@@ -342,6 +349,9 @@ func (r *appRegistry) create(name string, hosts []string, bridgePath string) (Ap
 	out := rec.clone()
 	r.mu.Unlock()
 	r.purgeApp(id)
+	if r.mdnsNotify != nil {
+		r.mdnsNotify()
+	}
 	return out, nil
 }
 
@@ -474,6 +484,9 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgePath
 	if len(removed) > 0 && r.hubHostsRemoved != nil {
 		r.hubHostsRemoved(id, removed)
 	}
+	if hosts != nil && r.mdnsNotify != nil {
+		r.mdnsNotify()
+	}
 	return out, nil
 }
 
@@ -549,6 +562,9 @@ func (r *appRegistry) sweepExpired() []string {
 	if len(reaped) > 0 && r.pruneUpstreams != nil {
 		r.pruneUpstreams()
 	}
+	if len(reaped) > 0 && r.mdnsNotify != nil {
+		r.mdnsNotify()
+	}
 	return reaped
 }
 
@@ -610,7 +626,24 @@ func (r *appRegistry) delete(id string) error {
 	if r.pruneUpstreams != nil {
 		r.pruneUpstreams()
 	}
+	if r.mdnsNotify != nil {
+		r.mdnsNotify()
+	}
 	return nil
+}
+
+// heartbeatAges reports each registered app's age since its last
+// heartbeat — the mdns status surface's freshness read (an age, never a
+// wall-clock timestamp; /1.0/apps stays unchanged). Read lock only.
+func (r *appRegistry) heartbeatAges() map[string]time.Duration {
+	now := r.now()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]time.Duration, len(r.apps))
+	for id, rec := range r.apps {
+		out[id] = now.Sub(rec.heartbeatAt)
+	}
+	return out
 }
 
 // --- HTTP handlers ---------------------------------------------------------

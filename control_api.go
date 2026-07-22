@@ -172,6 +172,11 @@ func (a *App) controlMux() *http.ServeMux {
 		mux.HandleFunc("GET "+apps+"/{id}/hub", a.handleHubSnapshot)
 		mux.HandleFunc("GET "+base+"/1.0/hub", a.handleHubStats)
 		mux.HandleFunc("GET "+base+"/1.0/hub/{$}", a.handleHubStats)
+
+		// mDNS advertiser state, always on: {"enabled": false} when the
+		// capability is off, the full advertiser view when on.
+		mux.HandleFunc("GET "+base+"/1.0/mdns", a.handleMdnsState)
+		mux.HandleFunc("GET "+base+"/1.0/mdns/{$}", a.handleMdnsState)
 	}
 	return mux
 }
@@ -215,6 +220,7 @@ func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
 		"api_version": "1.0",
 		"type":        "janus",
 		"ping":        cascadeBool(nil, a.Ping, false),
+		"mdns":        a.Mdns != nil,
 		"control":     a.controlPublicInfo(),
 	})
 }

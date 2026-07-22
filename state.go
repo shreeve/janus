@@ -25,6 +25,7 @@ type janusState struct {
 	registry *appRegistry
 	hubs     *hubSet
 	dp       *dataPlane
+	mdns     *mdnsAdvertiser
 	logger   *zap.Logger
 }
 
@@ -50,14 +51,18 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 		registry: reg,
 		hubs:     newHubSet(),
 		dp:       newDataPlane(reg, logger.Named("dataplane")),
+		mdns:     newMdnsAdvertiser(reg, logger.Named("mdns")),
 		logger:   logger,
 	}
 	// DELETE and TTL reap tear the app's hub down; PATCH host removal
 	// closes the removed hosts' connections. Wired once — the hub set and
-	// the registry live and die together in this holder.
+	// the registry live and die together in this holder. The mdns hook is
+	// a non-blocking ping to the advertiser's reconcile loop.
 	reg.hubTeardown = st.hubs.teardownApp
 	reg.hubHostsRemoved = st.hubs.hostsRemoved
 	reg.pruneUpstreams = st.dp.pruneState
+	reg.mdnsNotify = st.mdns.kickReconcile
+	st.mdns.run()
 	reg.startSweeper(logger.Named("registry"))
 	return st, nil
 }
@@ -66,6 +71,10 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 // released: the process is done with Janus entirely.
 func (st *janusState) Destruct() error {
 	st.registry.stopSweeper()
+	// Orderly departure: every mdns registration withdraws (PTR
+	// goodbyes; host records age out on their TTL) before the responder
+	// stops.
+	st.mdns.shutdown()
 	for _, h := range st.hubs.snapshotAll() {
 		st.hubs.teardownApp(h.id)
 	}
