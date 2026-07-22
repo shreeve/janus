@@ -744,6 +744,6 @@ Choices this demo makes, and why — adjust with eyes open:
 11. **Every act is verified against shipped code; none is aspirational.**
     Kick-reaches-the-clicker is confirmed in `hub.go` (kick recipients
     resolve from `@`; sender exclusion applies to events only). The
-    snapshot shape is confirmed in `hub_control.go`/`hub.go`.
+    snapshot shape is confirmed in `control_hub.go`/`hub.go`.
     Edge-answered `?`/`!` and its bridge observation are confirmed in the
     hub contract and its acceptance sketch.

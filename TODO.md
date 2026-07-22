@@ -31,9 +31,6 @@ completed work.
 Taste calls deliberately left alone by the post-ship review pass. Each
 is fine as it stands; touch one only when something forces the choice.
 
-- [ ] Control-handler file placement asymmetry: the hub's control
-      handlers live in `hub_control.go` while everything else's live
-      in `control_api.go`.
 - [ ] Splitting `apps.go` (registry + HTTP handlers in one file).
 - [ ] The `janusState` name for the pooled process-state holder
       (`state.go`).

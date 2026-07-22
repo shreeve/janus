@@ -204,6 +204,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `cascade.go` | Cascade helpers shared by every site-scoped capability |
 | `control.go` | Control listener config (`control internal/local/public`, `token:…`) |
 | `control_api.go` | Control listeners + `/1.0` mux (meta, health, tls/ask) |
+| `control_hub.go` | Hub control surface (publish, snapshot, counters) |
 | `apps.go` | Hot apps registry (CRUD, upstreams, bridge_path, heartbeats, TTL sweep) |
 | `dataplane.go` | Host → worker-socket proxying (least-conn, health, marked 503s) |
 | `ring.go` | Doorbell ring: single-flight wake-up for dirty apps |
@@ -216,7 +217,6 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `hub_ws.go` | Hub WebSocket edge (admission, upgrade, reader) |
 | `hub_bridge.go` | Hub tenant bridge (per-connection FIFO, open/text/close POSTs) |
 | `hub_config.go` | `hub` directive: parse, cascade, site table, floors |
-| `hub_control.go` | Hub control surface (publish, snapshot, counters) |
 | `testkit/` | Go test-support program: fixtures + WS driver for `test.sh` |
 | `bench/` | Committed bench harness (baseline, leak probe, hub arm) |
 | `Caddyfile` | Working cold config (multi-site cascade demos) |
