@@ -17,10 +17,7 @@ import (
 // nothing cascades and there is nothing for `off` to beat.
 
 // Built-in defaults.
-const (
-	mdnsDefaultName   = "janus.local"
-	mdnsDefaultListen = ":80" // dual-stack — the portless-URL product
-)
+const mdnsDefaultName = "janus.local"
 
 // MdnsSettings configures the process-wide mdns capability: the
 // advertised `.local` identity, per-app advertising, and the plain-HTTP
@@ -44,8 +41,12 @@ type MdnsSettings struct {
 	// Apps controls per-app `.local` advertising. Default: on.
 	Apps *bool `json:"apps,omitempty"`
 
-	// Listen is the front-door address ("[host]:port"). Default: ":80"
-	// (dual-stack).
+	// Listen selects the front door's mode. Unset (the default) is
+	// shared mode: the front door rides inside the HTTP app's plain-HTTP
+	// port server behind a normal site block (http://*.local { janus })
+	// and the janus site handler decides per request. Set ("[host]:port")
+	// is dedicated mode: Janus opens its own listener at that address
+	// with the strict Host allowlist.
 	Listen string `json:"listen,omitempty"`
 
 	// canonicalHost is the canonical origin's hostname, derived at
@@ -58,8 +59,13 @@ func (ms *MdnsSettings) appsOn() bool {
 	return ms.Apps == nil || *ms.Apps
 }
 
-// listenPort is the front-door port, derived at provision from the
-// validated Listen value.
+// shared reports whether the front door rides inside the HTTP app's
+// plain-HTTP port server (no listen — the default) rather than a
+// dedicated listener.
+func (ms *MdnsSettings) shared() bool { return ms.Listen == "" }
+
+// listenPort is the dedicated front-door port, derived at provision
+// from the validated Listen value; 0 in shared mode.
 func (ms *MdnsSettings) listenPort() int {
 	_, portStr, err := net.SplitHostPort(ms.Listen)
 	if err != nil {
@@ -236,8 +242,10 @@ func validateMdnsInterfaces(vals []string) error {
 	return nil
 }
 
-// validateMdnsListen checks the front-door address: "[host]:port" with
-// a port in 1–65535. An empty host is the dual-stack default.
+// validateMdnsListen checks a dedicated front-door address:
+// "[host]:port" with a port in 1–65535. An empty host is the
+// dual-stack default. (An absent listen is shared mode, not an empty
+// address — this validator never sees it.)
 func validateMdnsListen(v string) (string, error) {
 	_, portStr, err := net.SplitHostPort(v)
 	if err != nil {
@@ -281,13 +289,12 @@ func (a *App) provisionMdns() error {
 			return fmt.Errorf("janus mdns interface: %w", err)
 		}
 	}
-	if ms.Listen == "" {
-		ms.Listen = mdnsDefaultListen
+	if ms.Listen != "" {
+		listen, err := validateMdnsListen(ms.Listen)
+		if err != nil {
+			return fmt.Errorf("janus mdns listen: %w", err)
+		}
+		ms.Listen = listen
 	}
-	listen, err := validateMdnsListen(ms.Listen)
-	if err != nil {
-		return fmt.Errorf("janus mdns listen: %w", err)
-	}
-	ms.Listen = listen
 	return nil
 }

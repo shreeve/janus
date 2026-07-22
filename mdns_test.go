@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"github.com/brutella/dnssd"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -160,11 +163,18 @@ func TestProvisionMdnsDefaultsAndJSONPath(t *testing.T) {
 	if err := app.provisionMdns(); err != nil {
 		t.Fatal(err)
 	}
-	if app.Mdns.Name != "janus.local" || app.Mdns.Listen != ":80" || !app.Mdns.appsOn() {
+	// listen unset is the default — shared mode, the front door inside
+	// the HTTP app's plain-HTTP port server.
+	if app.Mdns.Name != "janus.local" || !app.Mdns.shared() || !app.Mdns.appsOn() {
 		t.Fatalf("defaults: %+v", app.Mdns)
 	}
-	if app.Mdns.listenPort() != 80 {
-		t.Fatalf("listenPort: %d", app.Mdns.listenPort())
+	// listen set is dedicated mode with the port derived from it.
+	app = &App{Mdns: &MdnsSettings{Listen: ":7680"}}
+	if err := app.provisionMdns(); err != nil {
+		t.Fatal(err)
+	}
+	if app.Mdns.shared() || app.Mdns.listenPort() != 7680 {
+		t.Fatalf("dedicated: shared=%v port=%d", app.Mdns.shared(), app.Mdns.listenPort())
 	}
 	// The native JSON path gets the same rejections as the Caddyfile.
 	for _, bad := range []*MdnsSettings{
@@ -927,8 +937,11 @@ func newTestMdnsApp(t *testing.T, ms *MdnsSettings) *App {
 	return app
 }
 
+// TestMdnsFrontDoorRouting pins the dedicated-mode front door (listen
+// set): its own listener, the strict Host allowlist with 421 for
+// everything not mine, and the 404/405 route discipline.
 func TestMdnsFrontDoorRouting(t *testing.T) {
-	app := newTestMdnsApp(t, &MdnsSettings{Canonical: "https://janus.lan.ripdev.io"})
+	app := newTestMdnsApp(t, &MdnsSettings{Canonical: "https://janus.lan.ripdev.io", Listen: ":7680"})
 	h := app.mdnsFrontDoor()
 	cases := []struct {
 		method, path, host string
@@ -1057,6 +1070,187 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 	for _, required := range []string{"/status.json", "No apps registered", "textContent", "no-cors", "location.replace"} {
 		if !strings.Contains(page, required) {
 			t.Errorf("status page is missing %q", required)
+		}
+	}
+}
+
+// --- shared mode -----------------------------------------------------------------
+
+// newTestSharedMdnsApp wires a shared-mode app (no listen): the decider
+// compares against HTTP port 80, and the pooled advertiser carries a
+// conflict-renamed configured name plus one hot-advertised app host.
+func newTestSharedMdnsApp(t *testing.T) *App {
+	t.Helper()
+	app := newTestMdnsApp(t, &MdnsSettings{Canonical: "https://janus.lan.ripdev.io"})
+	if !app.Mdns.shared() {
+		t.Fatal("no listen must mean shared mode")
+	}
+	app.enableSharedFrontDoor(80)
+	adv := app.state.mdns
+	adv.mu.Lock()
+	front := &mdnsEntry{name: "janus.local", typ: mdnsTypeFrontDoor, port: 80,
+		state: mdnsStateRenamed, effective: "janus-2.local"}
+	adv.entries[front.key()] = front
+	shop := &mdnsEntry{name: "shop.local", app: "shop-x7k2p9", typ: mdnsTypeAppHost, port: 443,
+		state: mdnsStateAnnounced, effective: "shop.local"}
+	adv.entries[shop.key()] = shop
+	adv.mu.Unlock()
+	return app
+}
+
+// TestMdnsSharedHostMine pins the shared-mode live front-door set:
+// configured name, effective (renamed) name, currently-advertised
+// .local app hosts, and the canonical hostname are mine; IP literals
+// and every other host are someone else's turn (never 421 — the
+// decider passes them through).
+func TestMdnsSharedHostMine(t *testing.T) {
+	app := newTestSharedMdnsApp(t)
+	cases := map[string]bool{
+		"janus.local":         true,  // configured
+		"janus-2.local":       true,  // effective after a conflict rename
+		"shop.local":          true,  // hot-advertised app host
+		"janus.lan.ripdev.io": true,  // canonical hostname (loop-guard page serves there)
+		"127.0.0.1":           false, // IP literal: contract trade — pass-through in shared mode
+		"::1":                 false,
+		"192.168.1.10":        false,
+		"other.ripdev.io":     false,
+		"janus-3.local":       false,
+	}
+	for host, want := range cases {
+		if got := app.mdnsSharedHostMine(host); got != want {
+			t.Errorf("mine(%q) = %v, want %v", host, got, want)
+		}
+	}
+}
+
+// TestMdnsSharedDecider pins the janus site handler as the shared-mode
+// decider on the plain-HTTP port: front-door Hosts get the front door
+// exactly as the dedicated listener serves it (page, /status.json,
+// 404/405 discipline); everything else passes through to the next
+// handler on the same server (the auto-HTTPS redirects) — never 421.
+func TestMdnsSharedDecider(t *testing.T) {
+	app := newTestSharedMdnsApp(t)
+	h := &Handler{app: app, dp: app.dp, logger: zap.NewNop()}
+	serve := func(method, path, host string, port int) (*httptest.ResponseRecorder, bool, error) {
+		req := httptest.NewRequest(method, "http://placeholder"+path, nil)
+		req.Host = host
+		req = req.WithContext(context.WithValue(req.Context(),
+			http.LocalAddrContextKey, &net.TCPAddr{IP: net.IPv4zero, Port: port}))
+		nextCalled := false
+		next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+			nextCalled = true
+			w.WriteHeader(http.StatusTeapot) // a marker no janus path emits
+			return nil
+		})
+		rr := httptest.NewRecorder()
+		err := h.ServeHTTP(rr, req, next)
+		return rr, nextCalled, err
+	}
+
+	mineCases := []struct {
+		method, path, host string
+		want               int
+	}{
+		{"GET", "/", "janus.local", 200},
+		{"GET", "/status.json", "janus.local", 200},
+		{"HEAD", "/status.json", "janus.local", 200},
+		{"GET", "/", "janus-2.local", 200},          // renamed-mine
+		{"GET", "/", "shop.local", 200},             // hot-advertised-mine
+		{"GET", "/", "janus.lan.ripdev.io", 200},    // canonical-mine
+		{"GET", "/", "janus.local:80", 200},         // port stripped before the check
+		{"POST", "/status.json", "janus.local", 405},
+		{"PUT", "/", "janus.local", 405},
+		{"GET", "/anything-else", "janus.local", 404},
+	}
+	for _, tc := range mineCases {
+		rr, nextCalled, err := serve(tc.method, tc.path, tc.host, 80)
+		if err != nil {
+			t.Errorf("%s %s (Host %s): %v", tc.method, tc.path, tc.host, err)
+			continue
+		}
+		if nextCalled {
+			t.Errorf("%s %s (Host %s) passed through instead of serving the front door", tc.method, tc.path, tc.host)
+		}
+		if rr.Code != tc.want {
+			t.Errorf("%s %s (Host %s) = %d, want %d", tc.method, tc.path, tc.host, rr.Code, tc.want)
+		}
+	}
+
+	// Not mine: pass through to next — including IP literals (the
+	// shared-mode trade) — and never a 421.
+	for _, host := range []string{"other.ripdev.io", "evil.example.com", "a.b.local",
+		"127.0.0.1", "192.168.1.10", "[::1]"} {
+		rr, nextCalled, err := serve("GET", "/", host, 80)
+		if err != nil {
+			t.Errorf("Host %s: %v", host, err)
+			continue
+		}
+		if !nextCalled || rr.Code != http.StatusTeapot {
+			t.Errorf("Host %s = %d (next called %v), want pass-through", host, rr.Code, nextCalled)
+		}
+	}
+
+	// Another plain-HTTP port is not the shared front door: the decider
+	// stays out and the data plane serves (unknown host → 404, next
+	// never consulted).
+	rr, nextCalled, err := serve("GET", "/", "janus.local", 8080)
+	var herr caddyhttp.HandlerError
+	if !errors.As(err, &herr) || herr.StatusCode != 404 {
+		t.Fatalf("off-port request: err %v (code %d)", err, rr.Code)
+	}
+	if nextCalled {
+		t.Fatal("off-port request passed through the decider")
+	}
+}
+
+// TestMdnsSharedCoverage pins the hard Start error: shared mode with no
+// http-port janus route whose host matcher covers the configured name
+// refuses the config, and the error names the exact block to paste.
+// Wildcard, explicit, and catch-all matchers all satisfy the check.
+func TestMdnsSharedCoverage(t *testing.T) {
+	server := func(listen string, patterns ...string) *caddyhttp.Server {
+		var sets caddyhttp.MatcherSets
+		if len(patterns) > 0 {
+			sets = caddyhttp.MatcherSets{{caddyhttp.MatchHost(patterns)}}
+		}
+		return &caddyhttp.Server{
+			Listen: []string{listen},
+			Routes: caddyhttp.RouteList{{
+				MatcherSets: sets,
+				Handlers:    []caddyhttp.MiddlewareHandler{&Handler{}},
+			}},
+		}
+	}
+	cases := []struct {
+		name string
+		ha   *caddyhttp.App
+		want bool
+	}{
+		{"wildcard covers", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": server(":80", "*.local")}}, true},
+		{"explicit covers", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": server(":80", "janus.local")}}, true},
+		{"catch-all covers", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": server(":80")}}, true},
+		{"wrong host does not cover", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": server(":80", "example.com")}}, false},
+		{"janus site on another port does not cover", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": server(":8080", "*.local")}}, false},
+		{"no servers at all", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{}}, false},
+		{"no janus route on the http port", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": {Listen: []string{":80"}, Routes: caddyhttp.RouteList{}}}}, false},
+	}
+	for _, tc := range cases {
+		if got := mdnsSharedSiteCovers(tc.ha, 80, "janus.local"); got != tc.want {
+			t.Errorf("%s: covers = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// The error text names the paste-this block and the dedicated remedy.
+	err := mdnsSharedCoverageErr(80, "janus.local")
+	for _, want := range []string{"janus.local", ":80", mdnsSharedPasteBlock, "`listen`"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("coverage error %q missing %q", err.Error(), want)
 		}
 	}
 }

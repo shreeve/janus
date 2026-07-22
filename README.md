@@ -188,7 +188,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
       "ping": true,
       "cache": { "enabled": true, "ttl": "1s" },
       "hub": { "enabled": true, "path": "/hub", "max_conns": 4096 },
-      "mdns": { "name": "janus.local", "listen": ":80" },
+      "mdns": { "name": "janus.local" },
       "heartbeat_ttl": "15s"
     },
     "http": {
