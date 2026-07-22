@@ -114,6 +114,9 @@ section 1. DNS for `*.ripdev.io` resolves to `127.0.0.1` and the trusted
 wildcard cert is committed in the janus repo's `certs/` — HTTPS on
 localhost works out of the box.
 
+Every command below spells the checkouts as `~/src/janus` and `~/src/rip`;
+substitute your own paths if they live elsewhere.
+
 **Build the Janus caddy binary** (from `~/src/janus`):
 
 ```bash
@@ -567,6 +570,11 @@ Edit one line in `~/counter-demo/app.rip` and save:
 ```coffee
 STEP = 2
 ```
+
+Mind which file you edit: the manager's watcher sees only the copy in
+`~/counter-demo/` — the running app directory. Editing the repo's
+`docs/counter/app.rip` (the shipped artifact this copy came from) changes
+nothing until you copy it over.
 
 The manager's watcher fires; the save settles (~150ms) and the changed
 content hash triggers the reload epoch: one doorbell PUT replaces the
