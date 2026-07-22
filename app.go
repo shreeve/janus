@@ -72,9 +72,18 @@ type App struct {
 	// (the /1.0/cache counters are always on); sites opt in via cascade.
 	cache *cacheStore
 
-	// mdnsSrv is this config generation's front-door HTTP server; the
-	// pooled advertiser itself lives in state.mdns.
+	// mdnsSrv is this config generation's front-door HTTP server
+	// (dedicated mode only); the pooled advertiser itself lives in
+	// state.mdns.
 	mdnsSrv *http.Server
+
+	// mdnsSharedPort and mdnsSharedRoutes wire the shared-mode front
+	// door (mdns with no listen): janus site handlers on the HTTP app's
+	// plain-HTTP port serve mdnsSharedRoutes for front-door Hosts and
+	// pass everything else through. Set at Start by startMdns; zero in
+	// dedicated mode and with mdns off.
+	mdnsSharedPort   int
+	mdnsSharedRoutes http.Handler
 }
 
 // CaddyModule returns the Caddy module information.

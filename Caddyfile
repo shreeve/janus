@@ -61,14 +61,17 @@
 #   network, and serves the read-only status front door on every
 #   interface. janus.local + every registered single-label .local host
 #   advertise over multicast DNS; the front door renders the registry,
-#   cache, and hub at a glance. listen :7680 here so the dev config
-#   (and ./test.sh) runs unprivileged; production default is :80.
+#   cache, and hub at a glance. listen :7680 pins dedicated mode here so
+#   the dev config (and ./test.sh) runs unprivileged; the production
+#   default (no listen) is shared mode — the front door rides inside
+#   the :80 HTTP server behind an http://*.local site block (see
+#   Caddyfile.example).
 #
 #   curl -s http://127.0.0.1:7600/1.0/mdns             → advertiser state
 #   curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 #
 {
-	auto_https disable_redirects
+	auto_https disable_redirects # the redirect server would bind :80; this dev/CI config runs unprivileged
 	skip_install_trust
 
 	on_demand_tls {
@@ -88,7 +91,7 @@
 		}
 		hub # 4) site-scoped default: on (path /hub, origin same)
 		mdns { # 5) process-wide LAN presence
-			listen :7680 # dev/test port; default :80 (dual-stack)
+			listen :7680 # dedicated dev/test listener; default (no listen) shares the :80 HTTP server
 		}
 	}
 }

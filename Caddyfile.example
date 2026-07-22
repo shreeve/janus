@@ -36,13 +36,6 @@
 		ask http://127.0.0.1:7600/1.0/tls/ask
 	}
 
-	# The mdns front door below owns :80 (the portless http://janus.local/
-	# is the product). Caddy's automatic HTTP→HTTPS redirect server would
-	# also bind :80 — Janus refuses that collision loudly at startup — so
-	# redirects are off here. Prefer the redirects? Move the front door
-	# instead: mdns { listen :7680 }.
-	auto_https disable_redirects
-
 	janus {
 		# 1) ping — site-scoped, cascades. Global on means every site
 		# below answers GET /ping with pong unless it says `ping off`:
@@ -117,16 +110,24 @@
 		# off) on a box with a public address. janus.local answers with
 		# no DNS server or client install; every registered single-label
 		# .local host advertises the moment its registration lands, and
-		# withdraws on DELETE or heartbeat reap. Advertiser state:
+		# withdraws on DELETE or heartbeat reap. With no `listen`, the
+		# front door rides inside the normal :80 HTTP server behind the
+		# http://*.local site block below — auto-HTTPS redirects stay
+		# enabled, and janus decides per request. Advertiser state:
 		# GET /1.0/mdns.
 		mdns {
 			name janus.local # default; <label>.local only
 			canonical https://janus.lan.example.com # optional: probe + hand-off to real HTTPS; diagnostic page when a rebinding filter eats the name
 			apps on # default: registered .local hosts advertise too
-			listen :80 # default; dual-stack. Move it when :80 is taken
+			# listen :7680                 # optional: a dedicated front-door listener instead of the shared :80
 			# interface en0                # optional pinning; default: every multicast-capable interface, live
 		}
 	}
+}
+
+# The mdns front door: front-door names serve the status page here; every other host falls through to the automatic HTTP→HTTPS redirects.
+http://*.local {
+	janus
 }
 
 # The main site — the empty janus block admits the host and inherits

@@ -87,10 +87,22 @@ func (h *Handler) pingEnabled() bool {
 	return cascadeBool(h.Ping, global, false)
 }
 
-// ServeHTTP handles admitted requests: site-scoped /ping answers first when
-// enabled; everything else routes through the data plane (registry hosts →
+// ServeHTTP handles admitted requests: on the plain-HTTP port with the
+// mdns front door in shared mode, the handler is the front-door decider
+// (mine serves the front door, not-mine passes through to the next
+// route on the same server — the auto-HTTPS redirects — never 421);
+// everywhere else, site-scoped /ping answers first when enabled and
+// everything else routes through the data plane (registry hosts →
 // upstreams; unknown hosts → 404).
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.Handler) error {
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	if h.app != nil && h.app.mdnsSharedRoutes != nil &&
+		r.TLS == nil && requestLocalPort(r) == h.app.mdnsSharedPort {
+		if h.app.mdnsSharedHostMine(normalizeHostHeader(r.Host)) {
+			h.app.mdnsSharedRoutes.ServeHTTP(w, r)
+			return nil
+		}
+		return next.ServeHTTP(w, r)
+	}
 	if h.pingEnabled() && (r.URL.Path == "/ping" || r.URL.Path == "/ping/") {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")

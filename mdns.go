@@ -109,8 +109,12 @@ func (c *mdnsConfig) describe() string {
 	if c == nil {
 		return "disabled"
 	}
+	listen := c.listen
+	if listen == "" {
+		listen = fmt.Sprintf("shared(:%d)", c.port)
+	}
 	return fmt.Sprintf("name=%s listen=%s apps=%t interfaces=%v canonical=%q",
-		c.name, c.listen, c.apps, c.ifaces, c.canonical)
+		c.name, listen, c.apps, c.ifaces, c.canonical)
 }
 
 func mdnsIfacesEqual(a, b []string) bool {
@@ -598,6 +602,25 @@ func (a *mdnsAdvertiser) desiredLocked(cfg *mdnsConfig) map[string]*mdnsEntry {
 	return out
 }
 
+// carriesHost reports whether the advertiser currently carries host —
+// as a desired name or as an observed on-air identity (a conflict
+// rename answers to the renamed name). The shared-mode front-door
+// decider reads this per request, so a hot registration is claimed the
+// moment its entry lands and released the moment it withdraws.
+func (a *mdnsAdvertiser) carriesHost(host string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.entries {
+		if e.name == host {
+			return true
+		}
+		if eff, _ := e.observed(); eff == host {
+			return true
+		}
+	}
+	return false
+}
+
 // effectiveName is the configured name's post-conflict identity (the
 // configured name itself until probing settles or when mdns is off).
 // Derived from the live handle so a post-announce rename is reflected
@@ -657,10 +680,12 @@ func (a *mdnsAdvertiser) snapshot(configured string) mdnsAdvSnapshot {
 
 // --- App wiring: Start / Stop -------------------------------------------------
 
-// startMdns is App.Start's mdns leg: hard checks (pinned interfaces,
-// HTTP-app collision), the front-door bind, and the advertiser handoff.
-// With mdns absent it converges the pooled advertiser to disabled (a
-// reload that removed mdns is a real teardown).
+// startMdns is App.Start's mdns leg: hard checks (pinned interfaces;
+// site coverage in shared mode, HTTP-app collision in dedicated mode),
+// the front door (the shared decider or the dedicated bind), and the
+// advertiser handoff. With mdns absent it converges the pooled
+// advertiser to disabled (a reload that removed mdns is a real
+// teardown).
 func (a *App) startMdns() error {
 	adv := a.state.mdns
 	if a.Mdns == nil {
@@ -672,43 +697,63 @@ func (a *App) startMdns() error {
 			return fmt.Errorf("janus mdns: pinned interface %q does not exist on this machine: %w", ifn, err)
 		}
 	}
-	if err := a.checkMdnsListenCollision(); err != nil {
-		return err
-	}
 
-	// Bind through Caddy's listener API so the front-door socket pools
-	// across config swaps (the control-listener model): an unchanged
-	// address is reused, never rebound.
-	na, err := caddy.ParseNetworkAddress("tcp/" + ms.Listen)
-	if err != nil {
-		return fmt.Errorf("janus mdns: listen address %q: %w", ms.Listen, err)
-	}
-	lnAny, err := na.Listen(a.ctx, 0, net.ListenConfig{})
-	if err != nil {
-		return fmt.Errorf("janus mdns: front door bind %s: %w", ms.Listen, err)
-	}
-	ln, ok := lnAny.(net.Listener)
-	if !ok {
-		return fmt.Errorf("janus mdns: listen %s: %T is not a stream listener", ms.Listen, lnAny)
-	}
-	srv := &http.Server{
-		Handler:           a.mdnsFrontDoor(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	a.mdnsSrv = srv
-	go func() {
-		if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
-			a.logger.Error("janus mdns front door stopped", zap.Error(serveErr))
+	port := ms.listenPort()
+	if ms.shared() {
+		// Shared mode: the front door rides inside the HTTP app's
+		// plain-HTTP port server; the janus site handler is the
+		// per-request decider. A configuration with no janus site
+		// covering the configured name on that port would leave the
+		// front door silently unreachable — hard Start error instead.
+		sharedPort, err := a.checkMdnsSharedCoverage()
+		if err != nil {
+			return err
 		}
-	}()
-	a.logger.Info("janus mdns front door listening",
-		zap.String("listen", ms.Listen),
-		zap.String("name", ms.Name),
-	)
+		a.enableSharedFrontDoor(sharedPort)
+		port = sharedPort
+		a.logger.Info("janus mdns front door shared",
+			zap.Int("http_port", sharedPort),
+			zap.String("name", ms.Name),
+		)
+	} else {
+		if err := a.checkMdnsListenCollision(); err != nil {
+			return err
+		}
+
+		// Bind through Caddy's listener API so the front-door socket
+		// pools across config swaps (the control-listener model): an
+		// unchanged address is reused, never rebound.
+		na, err := caddy.ParseNetworkAddress("tcp/" + ms.Listen)
+		if err != nil {
+			return fmt.Errorf("janus mdns: listen address %q: %w", ms.Listen, err)
+		}
+		lnAny, err := na.Listen(a.ctx, 0, net.ListenConfig{})
+		if err != nil {
+			return fmt.Errorf("janus mdns: front door bind %s: %w", ms.Listen, err)
+		}
+		ln, ok := lnAny.(net.Listener)
+		if !ok {
+			return fmt.Errorf("janus mdns: listen %s: %T is not a stream listener", ms.Listen, lnAny)
+		}
+		srv := &http.Server{
+			Handler:           a.mdnsFrontDoor(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		a.mdnsSrv = srv
+		go func() {
+			if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+				a.logger.Error("janus mdns front door stopped", zap.Error(serveErr))
+			}
+		}()
+		a.logger.Info("janus mdns front door listening",
+			zap.String("listen", ms.Listen),
+			zap.String("name", ms.Name),
+		)
+	}
 
 	cfg := &mdnsConfig{
 		name:      ms.Name,
-		port:      ms.listenPort(),
+		port:      port,
 		ifaces:    append([]string{}, ms.Interfaces...),
 		apps:      ms.appsOn(),
 		listen:    ms.Listen,
@@ -734,10 +779,136 @@ func (a *App) stopMdns() error {
 	return err
 }
 
-// checkMdnsListenCollision refuses a front-door address that an HTTP-app
-// server in the same config also listens on: Caddy's listener pooling
-// would otherwise share the socket between two servers and split
-// requests arbitrarily.
+// mdnsSharedPasteBlock is the exact site block the shared-coverage
+// Start error tells the operator to paste — the canonical shared-mode
+// operator config.
+const mdnsSharedPasteBlock = "http://*.local {\n\tjanus\n}"
+
+// mdnsSharedCoverageErr is the shared-mode hard Start error: no janus
+// site on the HTTP port covers the configured name, so the front door
+// would be silently unreachable.
+func mdnsSharedCoverageErr(httpPort int, name string) error {
+	return fmt.Errorf("janus mdns: shared front door: no janus site on the HTTP port (:%d) has a host matcher covering %s; add this site block:\n\n%s\n\nor pin a dedicated front-door address with `listen`",
+		httpPort, name, mdnsSharedPasteBlock)
+}
+
+// checkMdnsSharedCoverage verifies at Start (the HTTP app is provisioned
+// by now — the hub site-table seam) that some janus site on the HTTP
+// app's plain-HTTP port covers the configured name, and returns that
+// port. Wildcard and explicit host matchers both satisfy it.
+func (a *App) checkMdnsSharedCoverage() (int, error) {
+	httpAppI, err := a.ctx.AppIfConfigured("http")
+	if err != nil {
+		if errors.Is(err, caddy.ErrNotConfigured) {
+			// No HTTP app: nothing serves the shared port at all.
+			return 0, mdnsSharedCoverageErr(80, a.Mdns.Name)
+		}
+		// The coverage gate is load-bearing; a failure to load the
+		// http app must not silently disable it.
+		return 0, fmt.Errorf("janus mdns: shared front-door coverage check: loading http app: %w", err)
+	}
+	if httpAppI == nil {
+		return 0, mdnsSharedCoverageErr(80, a.Mdns.Name)
+	}
+	ha, ok := httpAppI.(*caddyhttp.App)
+	if !ok {
+		return 0, fmt.Errorf("janus mdns: shared front-door coverage check: http app is %T, not *caddyhttp.App", httpAppI)
+	}
+	port := ha.HTTPPort
+	if port == 0 {
+		port = 80
+	}
+	if !mdnsSharedSiteCovers(ha, port, a.Mdns.Name) {
+		return 0, mdnsSharedCoverageErr(port, a.Mdns.Name)
+	}
+	return port, nil
+}
+
+// mdnsSharedSiteCovers reports whether any janus site route on a server
+// listening on the HTTP port has a host matcher covering name (a
+// catch-all janus route covers everything).
+func mdnsSharedSiteCovers(ha *caddyhttp.App, httpPort int, name string) bool {
+	for _, srv := range ha.Servers {
+		if !mdnsServerListensOnPort(srv, httpPort) {
+			continue
+		}
+		var entries []hubSiteEntry
+		collectHubRoutes(srv.Routes, nil, &entries)
+		for _, e := range entries {
+			if entryMatchesHost(e, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mdnsServerListensOnPort reports whether one HTTP server binds the
+// given TCP port on any of its listen addresses.
+func mdnsServerListensOnPort(srv *caddyhttp.Server, port int) bool {
+	for _, l := range srv.Listen {
+		na, err := caddy.ParseNetworkAddress(l)
+		if err != nil || na.IsUnixNetwork() {
+			continue
+		}
+		if uint(port) >= na.StartPort && uint(port) <= na.EndPort {
+			return true
+		}
+	}
+	return false
+}
+
+// enableSharedFrontDoor wires the shared-mode decider: the HTTP port the
+// janus site handlers compare the request's local port against, and the
+// front-door routes they serve for front-door Hosts.
+func (a *App) enableSharedFrontDoor(port int) {
+	a.mdnsSharedPort = port
+	a.mdnsSharedRoutes = a.mdnsRoutes()
+}
+
+// requestLocalPort is the TCP port the request's connection was
+// accepted on (net/http stamps it on every served request); 0 when
+// absent. The shared-mode decider compares it against the HTTP port so
+// a janus site on some other plain-HTTP port stays pure data plane.
+func requestLocalPort(r *http.Request) int {
+	addr, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if addr == nil {
+		return 0
+	}
+	if ta, ok := addr.(*net.TCPAddr); ok {
+		return ta.Port
+	}
+	_, portStr, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return 0
+	}
+	port, _ := strconv.Atoi(portStr)
+	return port
+}
+
+// mdnsSharedHostMine is the shared-mode decider's Host membership: the
+// live front-door set is the configured name, the effective
+// (post-conflict) name, every currently-carried .local app host, and
+// the canonical hostname when set (the redirect loop guard serves the
+// page at the canonical name too). IP literals are deliberately NOT
+// mine — http://<lan-ip>/ passes through to the HTTP server's other
+// routes (contract trade; dedicated mode serves IP literals).
+func (a *App) mdnsSharedHostMine(host string) bool {
+	ms := a.Mdns
+	if host == ms.Name {
+		return true
+	}
+	if ms.canonicalHost != "" && host == ms.canonicalHost {
+		return true
+	}
+	return a.state.mdns.carriesHost(host)
+}
+
+// checkMdnsListenCollision refuses a dedicated front-door address that
+// an HTTP-app server in the same config also listens on: Caddy's
+// listener pooling would otherwise share the socket between two servers
+// and split requests arbitrarily. Dedicated mode only — shared mode
+// rides inside the HTTP server on purpose.
 func (a *App) checkMdnsListenCollision() error {
 	httpAppI, err := a.ctx.AppIfConfigured("http")
 	if err != nil {
@@ -759,7 +930,8 @@ func (a *App) checkMdnsListenCollision() error {
 		for _, l := range srv.Listen {
 			if mdnsListenCollides(a.Mdns.Listen, l) {
 				return fmt.Errorf("janus mdns: front door %s collides with HTTP server %q listening on %s; "+
-					"use `auto_https disable_redirects`, move or remove that site, or move the front door with `listen`",
+					"drop `listen` to serve the front door inside that server (shared mode), "+
+					"move the front door with `listen`, or move or remove that site",
 					a.Mdns.Listen, name, l)
 			}
 		}
@@ -838,27 +1010,37 @@ func mdnsListenHostAddrs(h string) []string {
 //go:embed mdns.html
 var mdnsPageHTML []byte
 
-// mdnsFrontDoor is the front-door handler: the Host allowlist gate, then
+// mdnsRoutes is the front door's route set, identical in both modes:
 // exactly two read-only routes. Unknown path → 404, known path with
 // another method → 405 — enforced by routing, not convention.
-func (a *App) mdnsFrontDoor() http.Handler {
+func (a *App) mdnsRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", a.mdnsServePage)
 	mux.HandleFunc("GET /status.json", a.mdnsServeStatus)
+	return mux
+}
+
+// mdnsFrontDoor is the dedicated-mode front-door handler: the Host
+// allowlist gate (421 for everything not mine — the listener serves
+// nothing else), then the routes. Shared mode never uses it: there the
+// janus site handler is the decider and not-mine passes through to the
+// HTTP server's other routes instead of 421.
+func (a *App) mdnsFrontDoor() http.Handler {
+	routes := a.mdnsRoutes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := normalizeHostHeader(r.Host)
 		if !a.mdnsHostAllowed(host) {
 			http.Error(w, "misdirected request: this host is not served here", http.StatusMisdirectedRequest)
 			return
 		}
-		mux.ServeHTTP(w, r)
+		routes.ServeHTTP(w, r)
 	})
 }
 
-// mdnsHostAllowed is the front door's Host allowlist: the configured
-// name, the effective (post-conflict) name, the canonical hostname when
-// set, and any IP literal. Everything else — notably a DNS-rebinding
-// attacker's own domain resolving here — answers 421.
+// mdnsHostAllowed is the dedicated front door's Host allowlist: the
+// configured name, the effective (post-conflict) name, the canonical
+// hostname when set, and any IP literal. Everything else — notably a
+// DNS-rebinding attacker's own domain resolving here — answers 421.
 func (a *App) mdnsHostAllowed(host string) bool {
 	bare := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	if net.ParseIP(bare) != nil {

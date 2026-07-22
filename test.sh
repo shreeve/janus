@@ -2426,7 +2426,10 @@ case_tenant_sigterm_deregisters() {
 # sends or receives a multicast packet: the group asserts the ADVERTISER'S
 # STATE (via /1.0/mdns — counters, the pinned state enum, the skipped
 # gauge) and the FRONT DOOR'S behavior (direct HTTP to the listener).
-# The root Caddyfile pins `listen :7680` so the group runs unprivileged.
+# The root Caddyfile pins `listen :7680` — DEDICATED mode — so the group
+# runs unprivileged; the shared-mode decider (default, front door inside
+# the :80 HTTP server) needs a privileged bind and is pinned in the
+# Go-test layer instead.
 # The group runs under the heartbeat caddy (TTL 2s): cases that span time
 # heartbeat their apps; the reap case deliberately does not.
 
@@ -2515,6 +2518,7 @@ case_mdns_state() {
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"enabled":true'
 	json_has "$REPLY_BODY" '"name":"janus.local"'
+	json_has "$REPLY_BODY" '"mode":"dedicated"' # listen set — the root Caddyfile's unprivileged fixture
 	json_has "$REPLY_BODY" '"front_door":":7680"'
 	json_has "$REPLY_BODY" '"announces"'
 	json_has "$REPLY_BODY" '"withdraws"'
