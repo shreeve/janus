@@ -24,6 +24,16 @@ index says which is which.
 | [`20260720-143705-bench-harness.md`](20260720-143705-bench-harness.md) | Bench rig runbook (the runnable harness is `../bench/`) |
 | `20260720-*-bench-raw-*.txt` | Raw provenance for the ledger's entries — never edited |
 
+## Tutorials (runnable, living)
+
+Tutorial directories (`docs/<name>/`) are the exception to append-only:
+they are living docs that track the shipped code, each an `index.md`
+plus its runnable artifacts.
+
+| Doc | Role |
+| --- | --- |
+| [`counter/index.md`](counter/index.md) | The realtime counter demo: all four capabilities end to end with a Rip tenant (`app.rip` and `Caddyfile.demo` ship alongside) |
+
 ## Design history (kept, superseded by the contracts above)
 
 | Doc | Role |

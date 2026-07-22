@@ -200,6 +200,8 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | --- | --- |
 | `app.go` | Process-wide `janus` app (control, global defaults, pooled state) |
 | `handler.go` | Site `http.handlers.janus` (admission + site overrides) |
+| `caddyfile.go` | Caddyfile wiring: global `janus` block + site directive parsing, directive order |
+| `doc.go` | Package overview (the `go doc` face of the module) |
 | `state.go` | Pooled process state (registry, data plane, hubs survive reloads) |
 | `cascade.go` | Cascade helpers shared by every site-scoped capability |
 | `control.go` | Control listener config (`control internal/local/public`, `token:…`) |
