@@ -154,8 +154,6 @@ Benchmarks: [`bench/README.md`](bench/README.md) — measures, never gates.
 
 ## Pointers
 
-- [TODO.md](TODO.md) — deferred design/correctness items; promote one
-  to a contract doc before working it.
 - `HANDOFF.md` — optional untracked session snapshot; never committed.
 - [certs/README.md](certs/README.md) — the intentional public
   `*.ripdev.io` TLS material.
