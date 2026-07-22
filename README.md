@@ -34,6 +34,72 @@ This repository is a Go module. Caddy is a dependency, not a git submodule. A Ja
 
 **License:** Apache License 2.0 (same family as Caddy’s source).
 
+## What Janus is — and is not
+
+Every capability in Janus has a famous neighbor; the mix has none. The
+novel contract is admission itself: **the app announces itself to its
+own edge.** A tenant POSTs its name and hosts to `/1.0/apps`,
+heartbeats, and publishes worker unix sockets — and with that one
+registration it has TLS and ACME, HTTP/1–3, host routing, health-aware
+least-conn balancing, an app-steerable micro-cache, edge-terminated
+WebSocket fan-out, and LAN presence, with zero per-app edge
+configuration. That is the router contract of a PaaS — the shape of
+Fly's proxy or Heroku's router — in one self-hosted binary, with the
+running app as the source of truth and heartbeat reaping as the
+garbage collector: an app that stops heartbeating simply ceases to
+exist at the edge. The nearest historical relative is Phusion
+Passenger, the app-aware web server — but Passenger manages processes
+for its supported languages and learns about apps from the web
+server's own config; Janus speaks a JSON API and learns about apps
+from the apps.
+
+Each neighbor is better at being itself. The honest comparison:
+
+| Neighbor | What it does better | What Janus does instead |
+| --- | --- | --- |
+| **Traefik** | Provider ecosystem — routing derived from Docker labels, Kubernetes Ingress/CRD/Gateway API, Consul, Nomad, ECS — plus a deep middleware catalog and a community that dwarfs this module | Apps register themselves over plain HTTP; no container runtime, orchestrator, or label convention required — a bare process on a unix socket is a first-class tenant |
+| **Varnish** | Cache policy as a product: VCL compiled to native code, grace mode, ESI, bans, now native TLS | A deliberately small micro-cache — 1s default TTL, request coalescing, generation-fenced purge on every upstream swap, hard bypass on `Cookie`/`Authorization` — honest speed for dynamic anonymous GETs, not a policy engine |
+| **Pushpin** | Protocol range for realtime: HTTP streaming, long-polling, SSE, SockJS, WebSocket-over-HTTP against a stateless backend | The same architectural instinct — connections held at the proxy, tenant on plain HTTP — plus registry integration (an app's hub lives and dies with its registration) and a validated per-frame directive grammar executed at the edge |
+| **Caddy** | Everything it already is: listeners, ACME, HTTP/1–3, the Caddyfile, the admin API, the module ecosystem — all of it remains available beside Janus in the same process | A second axis of dynamism: Caddy's admin API pushes operator config; the Janus registry pulls state from running apps, and a registration never touches the config |
+
+Traefik answers "what is my orchestrator running?"; Janus answers
+"what is announcing itself to me right now?" — the second question
+needs no infrastructure underneath the app. Varnish is the right tool
+when cache policy is the point; the Janus cache exists to make a
+stampede on a dynamic page cost the worker ~1 request per second, and
+it measures ~410x on capacity-bound routes and 1.6–1.8x on trivial
+ones (the [performance ledger](docs/20260719-165500-rip-server-performance.md)
+holds every number with raw provenance — sustained hub fan-out is
+~0.4M deliveries/s, roughly independent of room size, with zero socket
+drops across a config reload). Pushpin proved the edge-held-connection
+pattern at Fastly scale; the hub is that pattern folded into the
+registry. And Caddy is not a competitor at all: Janus is a Caddy
+module, and every stock directive works unchanged next to it.
+
+**Janus is not:**
+
+- **a reverse-proxy configuration language.** There is no parallel
+  grammar — capabilities are normal Caddyfile directives with legal
+  values, defaults, and hard errors, same as stock Caddy.
+- **a persistent store.** Memory-only by contract: a restart empties
+  the registry and tenants re-register. Nothing is written to disk.
+- **a container orchestrator.** Janus never starts, stops, or
+  supervises a process. Tenants run themselves; Janus routes to what
+  is alive.
+- **a CDN or cache appliance.** The micro-cache shields workers from
+  request volume; it does not do cache hierarchies, edge networks, or
+  operator-authored policy.
+- **a service mesh.** One edge, inward-facing unix sockets — no
+  sidecars, no inter-service mTLS fabric, no traffic policy between
+  tenants.
+
+The same binary spans the whole distance: `janus.local` answering a
+phone on a bare LAN with no DNS and no client install, and a
+production edge with ACME certificates and HTTP/3 — the difference is
+only Caddyfile. And with rip-server as the tenant, the same app file
+that runs standalone on a laptop registers, heartbeats, and pools
+behind Janus in production, unchanged.
+
 ## Requirements
 
 - **Go** — current stable release ([go.dev/dl](https://go.dev/dl/))
