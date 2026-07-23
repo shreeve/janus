@@ -43,12 +43,12 @@ var authPageTmpl = template.Must(template.New("auth").Parse(authPageHTML))
 // authPageData feeds the embedded two-state page: User empty renders the
 // login form; User set renders the signed-in status page.
 type authPageData struct {
-	Host     string
-	User     string
-	Since    string
-	CSRF     string
-	ReturnTo string
-	Error    string
+	Host  string
+	User  string
+	Since string
+	CSRF  string
+	To    string
+	Error string
 }
 
 // --- the g1 codec ---------------------------------------------------------------
@@ -479,7 +479,7 @@ func (st *authStore) verifyCredential(password, blob string, known bool) bool {
 //
 // Signed double-submit: the token is nonce.HMAC(key, nonce) with the
 // per-boot key (domain-separated from the session HMAC). GET plants it
-// in a hidden field and the short-lived __Host-janus_auth_csrf cookie;
+// in a hidden field and the short-lived __Host-janus_csrf cookie;
 // POST requires cookie == field and a valid signature, compared in
 // constant time. Stateless, which suits a pre-auth form; a restart
 // rotates the key and pre-restart forms fail CSRF — the user reloads.
@@ -514,21 +514,21 @@ func (st *authStore) csrfOK(r *http.Request) bool {
 	if err != nil || c.Value == "" {
 		return false
 	}
-	field := r.PostForm.Get("_csrf")
+	field := r.PostForm.Get("csrf")
 	if field == "" {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(field)) == 1 && st.validCSRF(field)
 }
 
-// --- return_to --------------------------------------------------------------------
+// --- to ---------------------------------------------------------------------------
 
-// safeReturnTo admits same-origin paths only (v3's safeReturnTo, ported
+// safeTo admits same-origin paths only (v3's safeReturnTo, ported
 // exactly): under 2048 bytes, a single leading '/', no '//' or '/\'
 // prefix, and no control character, whitespace, or backslash anywhere.
 // Anything else collapses to "/" — there is no open-redirect budget.
-func safeReturnTo(raw string) string {
-	if raw == "" || len(raw) >= authReturnToCap {
+func safeTo(raw string) string {
+	if raw == "" || len(raw) >= authToCap {
 		return "/"
 	}
 	if raw[0] != '/' {
@@ -583,8 +583,8 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	if !ok {
 		w.Header().Set("Cache-Control", "no-store")
 		if authBrowserShaped(r) {
-			http.Redirect(w, r, "/auth?return_to="+
-				url.QueryEscape(safeReturnTo(r.URL.RequestURI())), http.StatusFound)
+			http.Redirect(w, r, "/auth?to="+
+				url.QueryEscape(safeTo(r.URL.RequestURI())), http.StatusFound)
 			return r, true, nil
 		}
 		// No WWW-Authenticate: the wall speaks cookies, not Bearer.
@@ -624,7 +624,7 @@ func (h *Handler) authSessionUser(r *http.Request) (string, bool) {
 // be unpassable — 421 with a plain body, and one ERROR log per site.
 func (h *Handler) authRejectPlainHTTP(w http.ResponseWriter, r *http.Request) error {
 	if h.authCfg.plainHTTPLogged.CompareAndSwap(false, true) {
-		h.logger.Error("janus auth: guarded site reached over plain HTTP — the __Host-janus_auth cookie cannot be set without HTTPS; answering 421 (add 'auth off' to this site block or serve it over HTTPS)",
+		h.logger.Error("janus auth: guarded site reached over plain HTTP — the __Host-janus cookie cannot be set without HTTPS; answering 421 (add 'auth off' to this site block or serve it over HTTPS)",
 			zap.String("host", normalizeHostHeader(r.Host)),
 		)
 	}
@@ -707,7 +707,7 @@ func (h *Handler) serveAuthPage(w http.ResponseWriter, r *http.Request) error {
 		data.User = user
 		data.Since = issuedAt.Local().Format("15:04")
 	} else {
-		data.ReturnTo = safeReturnTo(r.URL.Query().Get("return_to"))
+		data.To = safeTo(r.URL.Query().Get("to"))
 	}
 	return h.renderAuthPage(w, http.StatusOK, data)
 }
@@ -755,7 +755,7 @@ func (h *Handler) serveAuthPost(w http.ResponseWriter, r *http.Request) error {
 		http.Error(w, "malformed or oversized form body", http.StatusBadRequest)
 		return nil
 	}
-	for _, k := range []string{"user", "password", "_csrf"} {
+	for _, k := range []string{"user", "password", "csrf"} {
 		if len(r.PostForm[k]) > 1 {
 			http.Error(w, "duplicated form field "+strconv.Quote(k), http.StatusBadRequest)
 			return nil
@@ -785,7 +785,7 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request) error 
 		return nil
 	}
 	name := strings.ToLower(rawUser)
-	returnTo := safeReturnTo(r.PostForm.Get("return_to"))
+	to := safeTo(r.PostForm.Get("to"))
 
 	throttleKey := authClientKey(r.RemoteAddr) + "\x00" + name
 	if blocked, retryAfter := st.throttleCheck(throttleKey); blocked {
@@ -815,10 +815,10 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request) error 
 		// disclosed. The re-rendered form reuses the submitted CSRF
 		// pair (cookie untouched, still within its window).
 		return h.renderAuthPage(w, http.StatusUnauthorized, authPageData{
-			Host:     normalizeHostHeader(r.Host),
-			CSRF:     r.PostForm.Get("_csrf"),
-			ReturnTo: returnTo,
-			Error:    "Invalid credentials",
+			Host:  normalizeHostHeader(r.Host),
+			CSRF:  r.PostForm.Get("csrf"),
+			To:    to,
+			Error: "Invalid credentials",
 		})
 	}
 
@@ -830,7 +830,7 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request) error 
 	st.logins.Add(1)
 	authSetCookie(w, authCookieName, token, 0)
 	authClearCookie(w, authCSRFCookieName)
-	http.Redirect(w, r, returnTo, http.StatusSeeOther)
+	http.Redirect(w, r, to, http.StatusSeeOther)
 	return nil
 }
 

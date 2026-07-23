@@ -25,15 +25,15 @@ import (
 const (
 	authDefaultTTL = 8 * time.Hour
 
-	authCookieName     = "__Host-janus_auth"
-	authCSRFCookieName = "__Host-janus_auth_csrf"
+	authCookieName     = "__Host-janus"
+	authCSRFCookieName = "__Host-janus_csrf"
 	authCSRFCookieAge  = 600 // seconds
 
 	// Cheap caps enforced before any argon2 work.
 	authBodyCap     = 64 << 10
 	authUserCap     = 256
 	authPasswordCap = 1024
-	authReturnToCap = 2048
+	authToCap       = 2048
 
 	// Login throttle: fixed window per (client key, username).
 	authThrottleLimit  = 5

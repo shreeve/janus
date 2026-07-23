@@ -55,7 +55,7 @@
   <p class="who">Signed in as <strong>{{.User}}</strong></p>
   <p class="since">since {{.Since}}</p>
   <form method="post" action="/auth">
-    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
     <button type="submit">Sign out</button>
   </form>
 {{else}}
@@ -63,8 +63,8 @@
   <p class="host">{{.Host}}</p>
   {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
   <form method="post" action="/auth" autocomplete="on">
-    <input type="hidden" name="_csrf" value="{{.CSRF}}">
-    <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="to" value="{{.To}}">
     <label for="u">User</label>
     <input id="u" name="user" autocomplete="username" autofocus required>
     <label for="p">Password</label>

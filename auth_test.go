@@ -99,7 +99,7 @@ func (ah *authHarness) wall(t *testing.T, r *http.Request) (*httptest.ResponseRe
 	return rr, out
 }
 
-var csrfFieldRE = regexp.MustCompile(`name="_csrf" value="([^"]+)"`)
+var csrfFieldRE = regexp.MustCompile(`name="csrf" value="([^"]+)"`)
 
 // getLoginForm GETs /auth and returns the CSRF token (cookie == field is
 // asserted).
@@ -111,7 +111,7 @@ func (ah *authHarness) getLoginForm(t *testing.T, host string) string {
 	}
 	m := csrfFieldRE.FindStringSubmatch(rr.Body.String())
 	if m == nil {
-		t.Fatalf("no _csrf field in login form: %s", rr.Body.String())
+		t.Fatalf("no csrf field in login form: %s", rr.Body.String())
 	}
 	cookie := authCookieValue(rr, authCSRFCookieName)
 	if cookie != m[1] {
@@ -135,7 +135,7 @@ func (ah *authHarness) login(t *testing.T, host, user, password string) string {
 	t.Helper()
 	csrf := ah.getLoginForm(t, host)
 	rr := ah.postForm(t, host, url.Values{
-		"_csrf":    {csrf},
+		"csrf":     {csrf},
 		"user":     {user},
 		"password": {password},
 	}, csrf)
@@ -249,7 +249,7 @@ func TestAuthParseHardErrors(t *testing.T) {
 		jblock("auth {\n user alice g2:" + strings.Repeat("A", 64) + "\n}"),
 		jblock("auth {\n user alice g1:not-base64!!\n}"),
 		jblock("auth {\n user alice g1:" + strings.Repeat("A", 44) + "\n}"), // 33 bytes
-		jblock("auth {\n user alice " + padded + "\n}"),                    // padding
+		jblock("auth {\n user alice " + padded + "\n}"),                     // padding
 		jblock("auth {\n ttl\n}"),
 		jblock("auth {\n ttl 0\n}"),
 		jblock("auth {\n ttl -5m\n}"),
@@ -318,10 +318,10 @@ func TestG1Rejections(t *testing.T) {
 	}
 }
 
-// --- safeReturnTo -------------------------------------------------------------------
+// --- safeTo -------------------------------------------------------------------------
 
-func TestSafeReturnTo(t *testing.T) {
-	long := "/" + strings.Repeat("a", authReturnToCap)
+func TestSafeTo(t *testing.T) {
+	long := "/" + strings.Repeat("a", authToCap)
 	cases := []struct {
 		raw, want string
 	}{
@@ -344,8 +344,8 @@ func TestSafeReturnTo(t *testing.T) {
 		{long, "/"},
 	}
 	for _, tc := range cases {
-		if got := safeReturnTo(tc.raw); got != tc.want {
-			t.Errorf("safeReturnTo(%q) = %q, want %q", tc.raw, got, tc.want)
+		if got := safeTo(tc.raw); got != tc.want {
+			t.Errorf("safeTo(%q) = %q, want %q", tc.raw, got, tc.want)
 		}
 	}
 }
@@ -403,7 +403,7 @@ func TestAuthEndpointDispatch(t *testing.T) {
 		}
 		// Sign-out: POST with neither user nor password.
 		out := authReq(http.MethodPost, "app.test", "/auth",
-			strings.NewReader(url.Values{"_csrf": {csrf}}.Encode()),
+			strings.NewReader(url.Values{"csrf": {csrf}}.Encode()),
 			"Content-Type", "application/x-www-form-urlencoded")
 		out.AddCookie(&http.Cookie{Name: authCSRFCookieName, Value: csrf})
 		out.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
@@ -421,7 +421,7 @@ func TestAuthEndpointDispatch(t *testing.T) {
 
 	t.Run("signing out a dead session is a success", func(t *testing.T) {
 		csrf := ah.getLoginForm(t, "app.test")
-		rr := ah.postForm(t, "app.test", url.Values{"_csrf": {csrf}}, csrf)
+		rr := ah.postForm(t, "app.test", url.Values{"csrf": {csrf}}, csrf)
 		if rr.Code != http.StatusSeeOther {
 			t.Fatalf("dead-session sign-out: %d", rr.Code)
 		}
@@ -434,7 +434,7 @@ func TestAuthEndpointDispatch(t *testing.T) {
 			{"user": {""}, "password": {""}},
 		} {
 			csrf := ah.getLoginForm(t, "app.test")
-			vals.Set("_csrf", csrf)
+			vals.Set("csrf", csrf)
 			rr := ah.postForm(t, "app.test", vals, csrf)
 			if rr.Code != http.StatusUnauthorized {
 				t.Fatalf("%v: want 401 re-prompt, got %d", vals, rr.Code)
@@ -449,7 +449,7 @@ func TestAuthEndpointDispatch(t *testing.T) {
 		session := ah.login(t, "app.test", "alice", "open-sesame")
 		csrf := ah.getLoginForm(t, "app.test")
 		r := authReq(http.MethodPost, "app.test", "/auth",
-			strings.NewReader(url.Values{"_csrf": {csrf}, "user": {"alice"}, "password": {"wrong"}}.Encode()),
+			strings.NewReader(url.Values{"csrf": {csrf}, "user": {"alice"}, "password": {"wrong"}}.Encode()),
 			"Content-Type", "application/x-www-form-urlencoded")
 		r.AddCookie(&http.Cookie{Name: authCSRFCookieName, Value: csrf})
 		r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
@@ -465,9 +465,9 @@ func TestAuthEndpointDispatch(t *testing.T) {
 	t.Run("duplicated fields → 400", func(t *testing.T) {
 		csrf := ah.getLoginForm(t, "app.test")
 		for _, body := range []string{
-			"user=a&user=b&password=x&_csrf=" + url.QueryEscape(csrf),
-			"user=a&password=x&password=y&_csrf=" + url.QueryEscape(csrf),
-			"user=a&password=x&_csrf=" + url.QueryEscape(csrf) + "&_csrf=" + url.QueryEscape(csrf),
+			"user=a&user=b&password=x&csrf=" + url.QueryEscape(csrf),
+			"user=a&password=x&password=y&csrf=" + url.QueryEscape(csrf),
+			"user=a&password=x&csrf=" + url.QueryEscape(csrf) + "&csrf=" + url.QueryEscape(csrf),
 		} {
 			r := authReq(http.MethodPost, "app.test", "/auth", strings.NewReader(body),
 				"Content-Type", "application/x-www-form-urlencoded")
@@ -511,7 +511,7 @@ func TestAuthEndpointDispatch(t *testing.T) {
 		csrf := ah.getLoginForm(t, "app.test")
 		before := authKDFRuns.Load()
 		rr := ah.postForm(t, "app.test", url.Values{
-			"_csrf":    {csrf},
+			"csrf":     {csrf},
 			"user":     {strings.Repeat("a", authUserCap+1)},
 			"password": {"x"},
 		}, csrf)
@@ -537,7 +537,7 @@ func TestAuthEndpointDispatch(t *testing.T) {
 		csrf := ah.getLoginForm(t, "app.test")
 		other := ah.getLoginForm(t, "app.test")
 		rr = ah.postForm(t, "app.test", url.Values{
-			"_csrf": {csrf}, "user": {"alice"}, "password": {"open-sesame"},
+			"csrf": {csrf}, "user": {"alice"}, "password": {"open-sesame"},
 		}, other)
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("csrf mismatch: want 403, got %d", rr.Code)
@@ -545,7 +545,7 @@ func TestAuthEndpointDispatch(t *testing.T) {
 		// Forged token (valid shape, wrong signature).
 		forged := "AAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 		rr = ah.postForm(t, "app.test", url.Values{
-			"_csrf": {forged}, "user": {"alice"}, "password": {"open-sesame"},
+			"csrf": {forged}, "user": {"alice"}, "password": {"open-sesame"},
 		}, forged)
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("forged csrf: want 403, got %d", rr.Code)
@@ -567,10 +567,10 @@ func TestAuthEndpointDispatch(t *testing.T) {
 		}
 	})
 
-	t.Run("return_to carried through login and sanitized", func(t *testing.T) {
-		rr, _ := ah.wall(t, authReq(http.MethodGet, "app.test", "/auth?return_to=%2Freports%3Fq%3D1", nil))
-		if !strings.Contains(rr.Body.String(), `name="return_to" value="/reports?q=1"`) {
-			t.Fatalf("return_to not carried into the form: %s", rr.Body.String())
+	t.Run("to carried through login and sanitized", func(t *testing.T) {
+		rr, _ := ah.wall(t, authReq(http.MethodGet, "app.test", "/auth?to=%2Freports%3Fq%3D1", nil))
+		if !strings.Contains(rr.Body.String(), `name="to" value="/reports?q=1"`) {
+			t.Fatalf("to not carried into the form: %s", rr.Body.String())
 		}
 		for target, want := range map[string]string{
 			"/reports?q=1":   "/reports?q=1",
@@ -580,11 +580,11 @@ func TestAuthEndpointDispatch(t *testing.T) {
 		} {
 			csrf := ah.getLoginForm(t, "app.test")
 			rr := ah.postForm(t, "app.test", url.Values{
-				"_csrf": {csrf}, "user": {"alice"}, "password": {"open-sesame"},
-				"return_to": {target},
+				"csrf": {csrf}, "user": {"alice"}, "password": {"open-sesame"},
+				"to": {target},
 			}, csrf)
 			if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != want {
-				t.Fatalf("return_to %q: %d → %q, want %q", target, rr.Code, rr.Header().Get("Location"), want)
+				t.Fatalf("to %q: %d → %q, want %q", target, rr.Code, rr.Header().Get("Location"), want)
 			}
 		}
 	})
@@ -609,13 +609,13 @@ func TestAuthEndpointDispatch(t *testing.T) {
 func TestAuthWallFork(t *testing.T) {
 	ah := newAuthHarness(t, aliceUsers(t), 0)
 
-	t.Run("browser-shaped → 302 with return_to", func(t *testing.T) {
+	t.Run("browser-shaped → 302 with to", func(t *testing.T) {
 		rr, _ := ah.wall(t, authReq(http.MethodGet, "app.test", "/reports?q=1", nil,
 			"Accept", "text/html,application/xhtml+xml"))
 		if rr.Code != http.StatusFound {
 			t.Fatalf("want 302, got %d", rr.Code)
 		}
-		if loc := rr.Header().Get("Location"); loc != "/auth?return_to=%2Freports%3Fq%3D1" {
+		if loc := rr.Header().Get("Location"); loc != "/auth?to=%2Freports%3Fq%3D1" {
 			t.Fatalf("Location %q", loc)
 		}
 		if rr.Header().Get("Cache-Control") != "no-store" {
@@ -926,7 +926,7 @@ func TestAuthSessionStore(t *testing.T) {
 	if st.sessionCount() != 0 {
 		t.Fatal("reaper left an idle corpse")
 	}
-	if _, _, ok := st.lookup(tok2, 100 * time.Hour); ok {
+	if _, _, ok := st.lookup(tok2, 100*time.Hour); ok {
 		t.Fatal("reaped session still resolves")
 	}
 
@@ -1081,7 +1081,7 @@ func TestAuthThrottleBeforeKDF(t *testing.T) {
 	csrf := ah.getLoginForm(t, "app.test")
 	before := authKDFRuns.Load()
 	r := authReq(http.MethodPost, "app.test", "/auth",
-		strings.NewReader(url.Values{"_csrf": {csrf}, "user": {"alice"}, "password": {"open-sesame"}}.Encode()),
+		strings.NewReader(url.Values{"csrf": {csrf}, "user": {"alice"}, "password": {"open-sesame"}}.Encode()),
 		"Content-Type", "application/x-www-form-urlencoded")
 	r.RemoteAddr = "192.0.2.1:9999"
 	r.AddCookie(&http.Cookie{Name: authCSRFCookieName, Value: csrf})

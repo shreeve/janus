@@ -2973,26 +2973,26 @@ auth_setcookie() {
 }
 
 auth_csrf_from_body() {
-	printf '%s' "$REPLY_BODY" | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p' | head -1
+	printf '%s' "$REPLY_BODY" | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p' | head -1
 }
 
-# auth_attempt URL USER PASS [RETURN_TO] — the full GET-form → POST
+# auth_attempt URL USER PASS [TO] — the full GET-form → POST
 # flow; leaves the POST's REPLY_* in place and AUTH_SESSION set to the
 # minted session cookie (empty on failure).
 auth_attempt() {
-	local url=$1 user=$2 pass=$3 rt=${4:-}
+	local url=$1 user=$2 pass=$3 to=${4:-}
 	auth_req GET "$url/auth"
 	eq "$REPLY_CODE" "200"
 	local csrf
 	csrf="$(auth_csrf_from_body)"
 	ok "-n \"$csrf\"" "no csrf field in the login form"
-	local -a data=(--data-urlencode "_csrf=$csrf"
+	local -a data=(--data-urlencode "csrf=$csrf"
 		--data-urlencode "user=$user" --data-urlencode "password=$pass")
-	if [[ -n "$rt" ]]; then
-		data+=(--data-urlencode "return_to=$rt")
+	if [[ -n "$to" ]]; then
+		data+=(--data-urlencode "to=$to")
 	fi
-	auth_req POST "$url/auth" -H "Cookie: __Host-janus_auth_csrf=$csrf" "${data[@]}"
-	AUTH_SESSION="$(auth_setcookie __Host-janus_auth)"
+	auth_req POST "$url/auth" -H "Cookie: __Host-janus_csrf=$csrf" "${data[@]}"
+	AUTH_SESSION="$(auth_setcookie __Host-janus)"
 }
 
 # auth_login URL USER PASS — auth_attempt that must succeed (303 + cookie)
@@ -3033,10 +3033,10 @@ case_auth_setup() {
 case_auth_wall_blocks() {
 	local h0
 	h0="$(auth_hits_count)"
-	# Browser-shaped → 302 to the login form, return_to carried, no-store.
+	# Browser-shaped → 302 to the login form, to carried, no-store.
 	auth_req GET "$AUTH_WALL/" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
-	eq "$(auth_hdr location)" "/auth?return_to=%2F"
+	eq "$(auth_hdr location)" "/auth?to=%2F"
 	eq "$(auth_hdr cache-control)" "no-store"
 	# Everything else → 401 with no WWW-Authenticate (cookies, not Bearer).
 	auth_req GET "$AUTH_WALL/api"
@@ -3056,14 +3056,14 @@ case_auth_login_roundtrip() {
 	eq "$(auth_hdr location)" "/"
 	eq "$(auth_hdr cache-control)" "no-store"
 	printf '%s' "$AUTH_SESSION" >"$AUTH_ALICE_COOKIE"
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$AUTH_SESSION"
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$AUTH_SESSION"
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" 'remote-user:alice'
 	# The upstream saw the injected identity and never the wall's cookie.
 	local rec
 	rec="$(grep '^GET / ' "$AUTH_HITS" | tail -1)"
 	json_has "$rec" 'remote-user=alice'
-	if printf '%s' "$rec" | grep -qF '__Host-janus_auth'; then
+	if printf '%s' "$rec" | grep -qF '__Host-janus'; then
 		echo "session cookie rode through to the upstream: $rec" >&2
 		return 1
 	fi
@@ -3071,11 +3071,11 @@ case_auth_login_roundtrip() {
 	ok "$(auth_stat sessions) -ge 1" "sessions gauge empty"
 }
 
-case_auth_return_to() {
-	# The 302's return_to survives the round trip…
-	auth_req GET "$AUTH_WALL/auth?return_to=%2Freports%3Fq%3D1"
+case_auth_to() {
+	# The 302's to survives the round trip…
+	auth_req GET "$AUTH_WALL/auth?to=%2Freports%3Fq%3D1"
 	eq "$REPLY_CODE" "200"
-	json_has "$REPLY_BODY" 'name="return_to" value="/reports?q=1"'
+	json_has "$REPLY_BODY" 'name="to" value="/reports?q=1"'
 	auth_login "$AUTH_WALL" alice sesame-alice "/reports?q=1"
 	eq "$(auth_hdr location)" "/reports?q=1"
 	# …and hostile targets collapse to /.
@@ -3093,22 +3093,22 @@ case_auth_status_signout() {
 	local session="$AUTH_SESSION"
 	# Signed in, GET /auth is the status page — with a re-minted CSRF
 	# pair (login cleared the login form's cookie).
-	auth_req GET "$AUTH_WALL/auth" -H "Cookie: __Host-janus_auth=$session"
+	auth_req GET "$AUTH_WALL/auth" -H "Cookie: __Host-janus=$session"
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" 'Signed in as'
 	json_has "$REPLY_BODY" 'alice'
 	local csrf
 	csrf="$(auth_csrf_from_body)"
 	ok "-n \"$csrf\"" "status page carries no csrf field"
-	eq "$(auth_setcookie __Host-janus_auth_csrf)" "$csrf"
+	eq "$(auth_setcookie __Host-janus_csrf)" "$csrf"
 	# Sign-out: POST with neither user nor password → revoked, cleared, 303.
 	auth_req POST "$AUTH_WALL/auth" \
-		-H "Cookie: __Host-janus_auth=$session; __Host-janus_auth_csrf=$csrf" \
-		--data-urlencode "_csrf=$csrf"
+		-H "Cookie: __Host-janus=$session; __Host-janus_csrf=$csrf" \
+		--data-urlencode "csrf=$csrf"
 	eq "$REPLY_CODE" "303"
 	eq "$(auth_hdr location)" "/auth"
 	# The revoked cookie is dead server-side: the next GET bounces.
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$session" -H 'Accept: text/html'
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$session" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
 	ok "$(auth_stat signouts) -gt $s0" "signouts counter unmoved"
 }
@@ -3118,15 +3118,15 @@ case_auth_csrf_enforced() {
 	auth_req POST "$AUTH_WALL/auth" \
 		--data-urlencode "user=alice" --data-urlencode "password=sesame-alice"
 	eq "$REPLY_CODE" "403"
-	eq "$(auth_setcookie __Host-janus_auth)" ""
+	eq "$(auth_setcookie __Host-janus)" ""
 	# Cookie/field mismatch → 403.
 	auth_req GET "$AUTH_WALL/auth"
 	local csrf other
 	csrf="$(auth_csrf_from_body)"
 	auth_req GET "$AUTH_WALL/auth"
 	other="$(auth_csrf_from_body)"
-	auth_req POST "$AUTH_WALL/auth" -H "Cookie: __Host-janus_auth_csrf=$other" \
-		--data-urlencode "_csrf=$csrf" \
+	auth_req POST "$AUTH_WALL/auth" -H "Cookie: __Host-janus_csrf=$other" \
+		--data-urlencode "csrf=$csrf" \
 		--data-urlencode "user=alice" --data-urlencode "password=sesame-alice"
 	eq "$REPLY_CODE" "403"
 	# Sign-out arm enforces it too.
@@ -3141,7 +3141,7 @@ case_auth_spoof_dies() {
 	# With a session: the client-supplied header dies, the wall's injection wins.
 	auth_login "$AUTH_WALL" alice sesame-alice
 	auth_req GET "$AUTH_WALL/spoof" -H 'Remote-User: root' \
-		-H "Cookie: __Host-janus_auth=$AUTH_SESSION"
+		-H "Cookie: __Host-janus=$AUTH_SESSION"
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" 'remote-user:alice'
 	local rec
@@ -3155,19 +3155,19 @@ case_auth_spoof_dies() {
 
 case_auth_fixation_dead() {
 	# A client-proposed token is never honored…
-	auth_req GET "$AUTH_WALL/" -H 'Cookie: __Host-janus_auth=attacker-chosen-token' -H 'Accept: text/html'
+	auth_req GET "$AUTH_WALL/" -H 'Cookie: __Host-janus=attacker-chosen-token' -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
 	# …and login always mints fresh (the pre-set value never comes back).
-	auth_req GET "$AUTH_WALL/auth" -H 'Cookie: __Host-janus_auth=attacker-chosen-token'
+	auth_req GET "$AUTH_WALL/auth" -H 'Cookie: __Host-janus=attacker-chosen-token'
 	local csrf
 	csrf="$(auth_csrf_from_body)"
 	auth_req POST "$AUTH_WALL/auth" \
-		-H "Cookie: __Host-janus_auth=attacker-chosen-token; __Host-janus_auth_csrf=$csrf" \
-		--data-urlencode "_csrf=$csrf" \
+		-H "Cookie: __Host-janus=attacker-chosen-token; __Host-janus_csrf=$csrf" \
+		--data-urlencode "csrf=$csrf" \
 		--data-urlencode "user=alice" --data-urlencode "password=sesame-alice"
 	eq "$REPLY_CODE" "303"
 	local minted
-	minted="$(auth_setcookie __Host-janus_auth)"
+	minted="$(auth_setcookie __Host-janus)"
 	ok "-n \"$minted\"" "no session minted"
 	ne "$minted" "attacker-chosen-token"
 }
@@ -3186,8 +3186,8 @@ case_auth_wrong_creds() {
 	# One generic message; the bodies are identical once the per-render
 	# CSRF token is normalized out — which half was wrong is never disclosed.
 	local n1 n2
-	n1="$(printf '%s' "$body1" | sed 's/name="_csrf" value="[^"]*"/name="_csrf" value=X/')"
-	n2="$(printf '%s' "$body2" | sed 's/name="_csrf" value="[^"]*"/name="_csrf" value=X/')"
+	n1="$(printf '%s' "$body1" | sed 's/name="csrf" value="[^"]*"/name="csrf" value=X/')"
+	n2="$(printf '%s' "$body2" | sed 's/name="csrf" value="[^"]*"/name="csrf" value=X/')"
 	eq "$n2" "$n1"
 	json_has "$body1" 'Invalid credentials'
 	eq "$(auth_stat login_failures)" "$((f0 + 2))"
@@ -3223,7 +3223,7 @@ case_auth_exact_match_only() {
 	auth_login "$AUTH_WALL" alice sesame-alice
 	local p
 	for p in /authors /auth/callback /auth.js; do
-		auth_req GET "$AUTH_WALL$p" -H "Cookie: __Host-janus_auth=$AUTH_SESSION"
+		auth_req GET "$AUTH_WALL$p" -H "Cookie: __Host-janus=$AUTH_SESSION"
 		eq "$REPLY_CODE" "200"
 		json_has "$REPLY_BODY" 'remote-user:alice'
 		ok "-n \"$(grep "^GET $p " "$AUTH_HITS" | tail -1)\"" "$p never reached the upstream"
@@ -3247,13 +3247,13 @@ case_auth_ws() {
 	auth_login "$AUTH_WALL" alice sesame-alice
 	local b0
 	b0="$(grep -c '^BRIDGE open ' "$AUTH_HITS" 2>/dev/null || true)"
-	hub_ws authwall.ripdev.io https://authwall.ripdev.io "__Host-janus_auth=$AUTH_SESSION" id close
+	hub_ws authwall.ripdev.io https://authwall.ripdev.io "__Host-janus=$AUTH_SESSION" id close
 	local rec
 	rec="$(grep '^BRIDGE open ' "$AUTH_HITS" | tail -1)"
 	ok "-n \"$rec\"" "no open bridge recorded: $REPLY_WS"
 	ok "$(grep -c '^BRIDGE open ' "$AUTH_HITS") -gt ${b0:-0}" "open bridge count unmoved"
 	json_has "$rec" 'remote-user=alice'
-	if printf '%s' "$rec" | grep -qF '__Host-janus_auth'; then
+	if printf '%s' "$rec" | grep -qF '__Host-janus'; then
 		echo "bridge snapshot holds the session cookie: $rec" >&2
 		return 1
 	fi
@@ -3267,7 +3267,7 @@ case_auth_cache_bypass() {
 	auth_login "$AUTH_WALL" alice sesame-alice
 	local i
 	for i in 1 2 3; do
-		auth_req GET "$AUTH_WALL/cachetest" -H "Cookie: __Host-janus_auth=$AUTH_SESSION"
+		auth_req GET "$AUTH_WALL/cachetest" -H "Cookie: __Host-janus=$AUTH_SESSION"
 		eq "$REPLY_CODE" "200"
 	done
 	eq "$(grep -c '^GET /cachetest ' "$AUTH_HITS")" "3"
@@ -3285,11 +3285,11 @@ case_auth_cascade_users() {
 	# …and alice's LIVE SESSION from authwall is unauthenticated there —
 	# authorization is per request, not a login-time filter.
 	auth_login "$AUTH_WALL" alice sesame-alice
-	auth_req GET "$AUTH_CAROL/" -H "Cookie: __Host-janus_auth=$AUTH_SESSION" -H 'Accept: text/html'
+	auth_req GET "$AUTH_CAROL/" -H "Cookie: __Host-janus=$AUTH_SESSION" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
 	# carol opens the carol door; the upstream sees carol.
 	auth_login "$AUTH_CAROL" carol sesame-carol
-	auth_req GET "$AUTH_CAROL/" -H "Cookie: __Host-janus_auth=$AUTH_SESSION"
+	auth_req GET "$AUTH_CAROL/" -H "Cookie: __Host-janus=$AUTH_SESSION"
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" 'remote-user:carol'
 }
@@ -3308,7 +3308,7 @@ case_auth_reload_keeps_sessions() {
 		sleep 0.1
 	done
 	# The pooled session store survived: no re-login.
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$(cat "$AUTH_ALICE_COOKIE")"
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$(cat "$AUTH_ALICE_COOKIE")"
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" 'remote-user:alice'
 }
@@ -3334,11 +3334,11 @@ case_auth_reload_revokes_removed_user() {
 		curl -sS -o /dev/null --max-time 1 http://127.0.0.1:7600/1.0/health 2>/dev/null && break
 		sleep 0.1
 	done
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$bob_session" -H 'Accept: text/html'
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$bob_session" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
 	ok "$(auth_stat reload_revoked) -gt $r0" "reload_revoked counter unmoved"
 	# alice appears in the surviving set: her session lives on.
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$(cat "$AUTH_ALICE_COOKIE")"
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$(cat "$AUTH_ALICE_COOKIE")"
 	eq "$REPLY_CODE" "200"
 	# Restore the real config.
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
@@ -3368,7 +3368,7 @@ case_auth_hot_revoke() {
 	eq "$REPLY_CODE" "404"
 	capi DELETE "/1.0/auth/sessions/$id"
 	eq "$REPLY_CODE" "204"
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$session" -H 'Accept: text/html'
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$session" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
 	# Wipe: two logins, one DELETE, both dead.
 	auth_login "$AUTH_WALL" alice sesame-alice
@@ -3378,9 +3378,9 @@ case_auth_hot_revoke() {
 	capi DELETE /1.0/auth/sessions
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"revoked":2'
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$s1" -H 'Accept: text/html'
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$s1" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$s2" -H 'Accept: text/html'
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$s2" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
 }
 
@@ -3451,7 +3451,7 @@ EOF
 		# …and the minted credential opens it: 303, then an authenticated
 		# request reaches the (empty) data plane — 404, not the wall.
 		auth_login "https://mint.ripdev.io:8444" mint mint-pass
-		auth_req GET "https://mint.ripdev.io:8444/" -H "Cookie: __Host-janus_auth=$AUTH_SESSION"
+		auth_req GET "https://mint.ripdev.io:8444/" -H "Cookie: __Host-janus=$AUTH_SESSION"
 		eq "$REPLY_CODE" "404"
 		# The plain-HTTP guarded site is a dead wall: loud 421, named remedy.
 		auth_req GET "http://authdead.ripdev.io:8081/anything"
@@ -3471,7 +3471,7 @@ case_auth_restart_wipes() {
 	stop_caddy
 	start_caddy || return 1
 	# Memory-only by contract: the old cookie is dead, everyone signs in again.
-	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus_auth=$(cat "$AUTH_ALICE_COOKIE")" -H 'Accept: text/html'
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$(cat "$AUTH_ALICE_COOKIE")" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
 	auth_login "$AUTH_WALL" alice sesame-alice
 }
@@ -3751,9 +3751,9 @@ test "parse rejections: every mdns hard error fails caddy adapt" case_mdns_parse
 
 group "auth"
 test "register app + recording upstream, /1.0/auth answers" case_auth_setup
-test "wall blocks: browser 302 + return_to, API 401, upstream untouched" case_auth_wall_blocks
+test "wall blocks: browser 302 + to, API 401, upstream untouched" case_auth_wall_blocks
 test "login round trip: 303 + cookie; upstream sees Remote-User, never the cookie" case_auth_login_roundtrip
-test "return_to survives login; hostile targets collapse to /" case_auth_return_to
+test "to survives login; hostile targets collapse to /" case_auth_to
 test "status page + sign-out: re-minted CSRF, revoked server-side" case_auth_status_signout
 test "CSRF enforced on both POST arms" case_auth_csrf_enforced
 test "spoofed Remote-User dies at the edge" case_auth_spoof_dies
