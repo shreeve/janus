@@ -7,7 +7,7 @@
 #   ./bin/caddy validate --config Caddyfile.example --adapter caddyfile
 #
 # Cold vs hot, in one breath: this file admits CAPABILITIES — what a host
-# may do (ping, cache, hub) and where /1.0 listens. The hot /1.0 API wires
+# may do (ping, cache, hub, auth) and where /1.0 listens. The hot /1.0 API wires
 # TENANTS — which hosts map to which worker sockets, heartbeats, the hub
 # bridge_path, and publish. Nothing here names an app or a socket; a
 # tenant registers itself against the control plane:
@@ -122,32 +122,80 @@
 			# listen :7680                 # optional: a dedicated front-door listener instead of the shared :80
 			# interface en0                # optional pinning; default: every multicast-capable interface, live
 		}
+
+		# 6) auth — the edge authentication wall for auth-less apps.
+		# Site-scoped, cascades like ping/cache/hub: this global block is
+		# the process default; sites opt out with `auth off` or replace
+		# the user set with their own `auth { user … }` block (site users
+		# REPLACE global users — one level, never merged; ttl cascades
+		# per key). When a site's effective auth is on, Janus claims
+		# exactly /auth (login form signed out; status + sign-out page
+		# signed in — the logout story for every guarded app), 302s
+		# browsers to it, 401s everything else, and injects
+		# Remote-User: <name> on what passes. Sessions live in memory —
+		# a reload keeps them, a restart signs everyone out. Mint
+		# credentials with `caddy janus-auth-hash` (argon2id; the
+		# password is prompted, never argv). THE PERIMETER RULE: the
+		# header is trustworthy exactly as far as the only road to the
+		# app runs through Janus — guarded upstreams must bind localhost
+		# or unix sockets. Observe and revoke: GET /1.0/auth,
+		# DELETE /1.0/auth/sessions[/{id}]. A global wall is inherited
+		# by EVERY janus site, including catch-alls (the https:// block
+		# below and the http://*.local front-door carrier): give
+		# catchalls an explicit `auth off` unless you mean to wall every
+		# unknown host.
+		auth {
+			user alice g1:fLqSrE0lzzk48NrZ4KlRU/GJmVQuJTteCYqHgZuYNXcXmJ2h8Mc9cZ35xLIXhZMA # caddy janus-auth-hash → paste
+			ttl 8h # sliding idle timeout; a session idle longer signs in again
+		}
 	}
 }
 
-# The mdns front door: front-door names serve the status page here; every other host falls through to the automatic HTTP→HTTPS redirects.
+# The mdns front door: front-door names serve the status page here; every
+# other host falls through to the automatic HTTP→HTTPS redirects. auth
+# off: this is a plain-HTTP carrier — the __Host- session cookie cannot
+# be set without HTTPS, so an inherited wall here would answer 421 to any
+# data-plane request that reached it.
 http://*.local {
-	janus
+	janus {
+		auth off
+	}
 }
 
 # The main site — the empty janus block admits the host and inherits
-# every global default: ping on, cache on at 1s, hub on at /hub. An
-# unmentioned capability is an inherited one; that is the cascade's
-# common case, and most sites should look exactly like this.
+# every global default: ping on, cache on at 1s, hub on at /hub, auth on
+# with the global users. An unmentioned capability is an inherited one;
+# that is the cascade's common case, and most sites should look exactly
+# like this.
 example.com, www.example.com {
 	janus
 }
 
-# API — explicit off beats inherited on, for both capabilities. WHY:
-# auth carried in custom headers (X-API-Key, …) is invisible to the
-# cache's bypass rules — it can only enumerate Cookie, Authorization,
-# and Proxy-Authorization — so custom-header auth and a shared cache
-# must never meet. And a plain HTTP API speaks no hub; leaving it on
-# would let anyone open sockets against a tenant that never bridges.
+# API — explicit off beats inherited on. WHY: auth carried in custom
+# headers (X-API-Key, …) is invisible to the cache's bypass rules — it
+# can only enumerate Cookie, Authorization, and Proxy-Authorization — so
+# custom-header auth and a shared cache must never meet. A plain HTTP
+# API speaks no hub; leaving it on would let anyone open sockets against
+# a tenant that never bridges. And this API authenticates itself (the
+# custom headers above), so the cookie wall opts out too.
 api.example.com {
 	janus {
 		cache off
 		hub off
+		auth off
+	}
+}
+
+# Notes — site users REPLACE the global set (carol opens this door;
+# alice does not), and the site ttl overrides the global default. The
+# per-request check is real: a session signed in on example.com does not
+# pass here unless this block's user set contains that user.
+notes.example.com {
+	janus {
+		auth {
+			user carol g1:W4bIofWe/+90BoGMrOOJ0rO9+hgfM58AACwlmoiVSpI+wqjVZD0q+gD4oc4ZRwHR
+			ttl 30m
+		}
 	}
 }
 
@@ -170,13 +218,16 @@ pages.example.com {
 # same admin.example.com` extends `same` rather than replacing it.
 # Non-browser clients send no Origin header and fail `same`; the
 # spelled-out opt-out for token-authenticated machine clients is
-# `origin any` — a deliberate choice, never a silent default.
+# `origin any` — a deliberate choice, never a silent default. auth off
+# here: those machine clients speak tokens, not cookies (a WS upgrade
+# without a session answers 401 on a guarded site).
 chat.example.com {
 	janus {
 		hub {
 			max_conns 16384
 			origin same admin.example.com
 		}
+		auth off
 	}
 }
 
@@ -191,6 +242,7 @@ ws-small.example.com {
 		hub {
 			max_conns 100
 		}
+		auth off
 	}
 }
 
@@ -199,6 +251,7 @@ ws-large.example.com {
 		hub {
 			max_conns 1000
 		}
+		auth off
 	}
 }
 
@@ -208,13 +261,16 @@ ws-large.example.com {
 # a tenant hot-registering a new host gets TLS with no config reload
 # and no wildcard. hub off because this site matches EVERY unknown
 # host: leaving hub on here would make every on-demand name
-# hub-enabled, defeating per-host hub admission. Cache stays inherited
-# — an anonymous GET on a registered host is the cache's home turf.
+# hub-enabled, defeating per-host hub admission. auth off for the same
+# reason: an inherited global wall would demand a Janus login on every
+# customer domain. Cache stays inherited — an anonymous GET on a
+# registered host is the cache's home turf.
 https:// {
 	tls {
 		on_demand
 	}
 	janus {
 		hub off
+		auth off
 	}
 }

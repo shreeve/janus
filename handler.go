@@ -29,6 +29,10 @@ type Handler struct {
 	// non-nil.
 	Hub *HubSettings `json:"hub,omitempty"`
 
+	// Auth overrides the global auth default/users for this site when
+	// non-nil.
+	Auth *AuthSettings `json:"auth,omitempty"`
+
 	app    *App
 	dp     *dataPlane
 	logger *zap.Logger
@@ -40,6 +44,10 @@ type Handler struct {
 	// hubCfg is the site's effective hub configuration; nil when the
 	// effective hub is off, so the bypass path costs one nil check.
 	hubCfg *hubSite
+
+	// authCfg is the site's effective auth configuration; nil when the
+	// effective auth is off, so the bypass path costs one nil check.
+	authCfg *authSite
 }
 
 // CaddyModule returns the Caddy module information.
@@ -71,10 +79,14 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if err := h.provisionHub(); err != nil {
 		return err
 	}
+	if err := h.provisionAuth(); err != nil {
+		return err
+	}
 	h.logger.Info("janus handler ready",
 		zap.Bool("ping", h.pingEnabled()),
 		zap.Bool("cache", h.cacheCfg != nil),
 		zap.Bool("hub", h.hubCfg != nil),
+		zap.Bool("auth", h.authCfg != nil),
 	)
 	return nil
 }
@@ -109,6 +121,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte("pong\n"))
 		return err
+	}
+	// The auth wall (after ping — /ping answers unauthenticated; before
+	// hub interception — an upgrade without a session gets 401 here):
+	// exact /auth serves the endpoint, everything else needs a valid
+	// session or gets the 302/401 fork; a valid session falls through
+	// with Remote-User injected and the wall's cookies stripped.
+	if h.authCfg != nil {
+		rr, handled, err := h.serveAuthWall(w, r)
+		if handled || err != nil {
+			return err
+		}
+		r = rr
 	}
 	// Hub interception (before cache and upstream selection, after ping):
 	// the hub claims upgrades to its path only — a non-upgrade request to
@@ -165,6 +189,15 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return err
 			}
 			h.Hub = hs
+		case "auth":
+			if h.Auth != nil {
+				return d.Err("duplicate auth directive in the same block")
+			}
+			as, err := parseAuthDirective(d)
+			if err != nil {
+				return err
+			}
+			h.Auth = as
 		case "control":
 			return d.Err("control is process-wide; configure it in the global janus options block")
 		case "mdns":

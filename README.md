@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, edge-terminated WebSocket fan-out, and zero-config LAN presence over mDNS, driven by a JSON control API.</strong>
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, and an edge authentication wall for auth-less apps, driven by a JSON control API.</strong>
 </p>
 
 ---
@@ -136,6 +136,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 3 | **cache** | Site-scoped micro-cache + request coalescing on the data plane | [`capability-microcache`](docs/20260720-033201-capability-microcache.md) |
 | 4 | **hub** | Per-app WebSocket fan-out terminated at the edge; tenants observe and steer over HTTP | [`capability-hub`](docs/20260720-162350-hub-design.md) |
 | 5 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS, and the read-only status front door | [`capability-mdns`](docs/20260722-034619-capability-mdns.md) |
+| 6 | **auth** | Edge authentication wall for auth-less apps: one `/auth` URL, cookie sessions in memory, `Remote-User` injection | [`capability-auth`](docs/20260722-134812-capability-auth.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -147,7 +148,7 @@ xcaddy build \
   --output ./bin/caddy
 
 go test ./...
-./test.sh   # 10 groups, 127 cases, in capability order: ping, control, apps, data, cache, heartbeat, tls, hub, tenant, mdns
+./test.sh   # 11 groups, 149 cases, in capability order: ping, control, apps, data, cache, heartbeat, tls, hub, tenant, mdns, auth
 ```
 
 ### 1. ping (data plane)
@@ -205,6 +206,16 @@ curl -s http://127.0.0.1:7600/1.0/mdns      # advertiser state (names, states, c
 curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 ```
 
+### 6. auth
+
+An admission wall in front of tenant apps that have no login story of their own: enable `auth` with `user <name> g1:…` lines (minted by `caddy janus-auth-hash`) and every request needs a valid session — browsers are redirected to the one reserved URL `/auth` (login form signed out; status + sign-out page signed in), everything else answers 401. What passes carries `Remote-User: <name>`; the app never sees a password, a hash, or a live session token. Sessions live in memory: a config reload keeps them, a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
+
+```bash
+./bin/caddy janus-auth-hash                 # mint a g1 credential (password prompted, never argv)
+curl -s http://127.0.0.1:7600/1.0/auth      # wall counters + session count
+curl -s http://127.0.0.1:7600/1.0/auth/sessions
+```
+
 ## Build and run
 
 From this repository (local module replacement is automatic when you run `xcaddy` inside the module):
@@ -232,7 +243,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.1.0 \
+  --with github.com/shreeve/janus@v1.2.0 \
   --output ./caddy
 ```
 
@@ -255,6 +266,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
       "cache": { "enabled": true, "ttl": "1s" },
       "hub": { "enabled": true, "path": "/hub", "max_conns": 4096 },
       "mdns": { "name": "janus.local" },
+      "auth": { "enabled": true, "users": [{ "name": "alice", "credential": "g1:…" }], "ttl": "8h" },
       "heartbeat_ttl": "15s"
     },
     "http": {
@@ -301,6 +313,11 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `mdns_config.go` | `mdns` directive: parse, provision, validation |
 | `mdns.html` | Embedded status page (self-contained; zero external resources) |
 | `control_mdns.go` | mDNS control surface (`GET /1.0/mdns`) |
+| `auth.go` | Auth wall: pooled sessions, throttle, CSRF, the `/auth` state machine |
+| `auth_config.go` | `auth` directive: parse, cascade, g1 codec, site table |
+| `auth_cmd.go` | `caddy janus-auth-hash` credential minter |
+| `auth.html` | Embedded login/status page (self-contained; zero external resources) |
+| `control_auth.go` | Auth control surface (`GET /1.0/auth`, session list + revocation) |
 | `testkit/` | Go test-support program: fixtures + WS driver for `test.sh` |
 | `bench/` | Committed bench harness (baseline, leak probe, hub arm) |
 | `Caddyfile` | Working cold config (multi-site cascade demos) |

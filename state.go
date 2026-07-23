@@ -26,6 +26,7 @@ type janusState struct {
 	hubs     *hubSet
 	dp       *dataPlane
 	mdns     *mdnsAdvertiser
+	auth     *authStore
 	logger   *zap.Logger
 }
 
@@ -47,11 +48,16 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 	}
 	reg := newAppRegistry()
 	reg.ttl = ttl
+	auth, err := newAuthStore()
+	if err != nil {
+		return nil, err
+	}
 	st := &janusState{
 		registry: reg,
 		hubs:     newHubSet(),
 		dp:       newDataPlane(reg, logger.Named("dataplane")),
 		mdns:     newMdnsAdvertiser(reg, logger.Named("mdns")),
+		auth:     auth,
 		logger:   logger,
 	}
 	// DELETE and TTL reap tear the app's hub down; PATCH host removal
@@ -63,6 +69,7 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 	reg.pruneUpstreams = st.dp.pruneState
 	reg.mdnsNotify = st.mdns.kickReconcile
 	st.mdns.run()
+	st.auth.run()
 	reg.startSweeper(logger.Named("registry"))
 	return st, nil
 }
@@ -71,6 +78,7 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 // released: the process is done with Janus entirely.
 func (st *janusState) Destruct() error {
 	st.registry.stopSweeper()
+	st.auth.stop()
 	// Orderly departure: every mdns registration withdraws (PTR
 	// goodbyes; host records age out on their TTL) before the responder
 	// stops.
