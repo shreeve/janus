@@ -15,6 +15,7 @@ index says which is which.
 | [`20260720-033201-capability-microcache.md`](20260720-033201-capability-microcache.md) | Capability 3: micro-cache + request coalescing |
 | [`20260720-162350-hub-design.md`](20260720-162350-hub-design.md) | Capability 4: hub (per-app WebSocket fan-out) |
 | [`20260722-034619-capability-mdns.md`](20260722-034619-capability-mdns.md) | Capability 5: mdns (LAN presence — `janus.local`, per-app `.local` names, the status front door) |
+| [`20260722-134812-capability-auth.md`](20260722-134812-capability-auth.md) | Capability 6: auth (the edge authentication wall for auth-less apps) |
 | [`20260719-141200-tls-ask.md`](20260719-141200-tls-ask.md) | On-demand TLS gating via `/1.0/tls/ask` |
 
 ## Measurements (claims and their evidence)

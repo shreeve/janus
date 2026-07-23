@@ -39,6 +39,11 @@ type App struct {
 	// front door. Default: off (nil).
 	Mdns *MdnsSettings `json:"mdns,omitempty"`
 
+	// Auth is the global default for the site-scoped auth wall (edge
+	// authentication for auth-less apps): default posture plus the
+	// default user set. Default: off. Sites may override.
+	Auth *AuthSettings `json:"auth,omitempty"`
+
 	// HeartbeatTTL is how long a registered app may go without a
 	// heartbeat before its registration is reaped (same effect as
 	// DELETE). Default: 15s. The JANUS_HEARTBEAT_TTL environment
@@ -84,6 +89,11 @@ type App struct {
 	// dedicated mode and with mdns off.
 	mdnsSharedPort   int
 	mdnsSharedRoutes http.Handler
+
+	// authSites pairs compiled site routes with effective auth configs;
+	// built at Start for the removed-user session revocation, the
+	// reaper's ttl bound, and the /1.0/auth sites view.
+	authSites []authSiteEntry
 }
 
 // CaddyModule returns the Caddy module information.
@@ -148,6 +158,13 @@ func (a *App) Start() error {
 		return err
 	}
 	a.closeDisabledHubHosts()
+	// Auth Start work runs past the reload's point of no return (the
+	// mdns introspection precedent): removed-user session revocation
+	// and the reaper's ttl bound — an aborted reload never logs users
+	// out.
+	if err := a.startAuth(); err != nil {
+		return err
+	}
 	if err := a.startControlListeners(); err != nil {
 		// A partially started app never receives Stop: close whatever
 		// listeners came up before rejecting.

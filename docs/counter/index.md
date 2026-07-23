@@ -1,6 +1,6 @@
 # A realtime counter: Janus + Rip Server, end to end
 
-A guided tour of Janus v1.1.0 in one page and one `app.rip`. You will build
+A guided tour of Janus v1.2.0 in one page and one `app.rip`. You will build
 a normal web app served over HTTPS that also has WSS support, where the
 browser's secure WebSocket frames are proxied **by Janus as plain HTTP** to
 the Rip server — the Janus↔Rip WS/HTTP bridge is the star. One page, one
@@ -124,7 +124,7 @@ cd ~/src/janus
 export PATH="$(go env GOPATH)/bin:$PATH"
 mkdir -p bin
 xcaddy build --with github.com/shreeve/janus=. --output ./bin/caddy
-# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.1.0 --output ./caddy)
+# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.2.0 --output ./caddy)
 ```
 
 **The demo Caddyfile.** It ships next to this page as

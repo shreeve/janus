@@ -114,6 +114,53 @@ func cmdDoorbell(args []string) {
 	}))
 }
 
+// cmdAuthUpstream: the auth group's recording origin. Every request
+// appends "METHOD PATH remote-user=<v|-> cookie=<v|->" to the hitfile
+// and answers 200 "remote-user:<v|->" — the tenant-side truth for the
+// strip-and-inject identity transport. Hub bridge POSTs (the
+// Sec-WebSocket-Frame header) are recorded as "BRIDGE <kind> …" and
+// answered 204 (admit, no directives). Heartbeats every app id given
+// (500ms; the suite's TTL is 2s).
+func cmdAuthUpstream(args []string) {
+	var sock, hits string
+	appIDs := flagValues(args, map[string]*string{"--sock": &sock, "--hits": &hits})
+	if sock == "" || hits == "" {
+		die("usage: testkit authup --sock S --hits F [APPID…]")
+	}
+	go func() {
+		client := &http.Client{Timeout: 2 * time.Second}
+		for {
+			for _, app := range appIDs {
+				req, _ := http.NewRequest("POST",
+					controlBase+"/1.0/apps/"+app+"/heartbeat", nil)
+				if resp, err := client.Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}()
+	dash := func(v string) string {
+		if v == "" {
+			return "-"
+		}
+		return v
+	}
+	serveUnix(sock, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ru := dash(r.Header.Get("Remote-User"))
+		ck := dash(r.Header.Get("Cookie"))
+		if kind := r.Header.Get("Sec-WebSocket-Frame"); kind != "" {
+			appendLine(hits, fmt.Sprintf("BRIDGE %s %s remote-user=%s cookie=%s", kind, r.URL.RequestURI(), ru, ck))
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(204)
+			return
+		}
+		appendLine(hits, fmt.Sprintf("%s %s remote-user=%s cookie=%s", r.Method, r.URL.RequestURI(), ru, ck))
+		io.Copy(io.Discard, r.Body)
+		sendText(w, 200, "remote-user:"+ru+"\n")
+	}))
+}
+
 // cmdCacheUpstream: the cache group's scripted origin — per-path sleeps,
 // cookies, cache-control vetoes, Vary variants, gzip, a truncated body
 // with a real mid-stream FIN, and an oversized body.
@@ -268,13 +315,14 @@ func cmdHubTenant(args []string) {
 		_, hasKey := r.Header["Sec-Websocket-Key"]
 		_, hasConn := r.Header["Connection"]
 		rec := fmt.Sprintf(`{"kind": %s, "path": %s, "client": %s, "app": %s, `+
-			`"cookie": %s, "has_sec_ws_key": %t, "has_connection": %t, `+
+			`"cookie": %s, "remote_user": %s, "has_sec_ws_key": %t, "has_connection": %t, `+
 			`"content_type": %s, "body": %s}`,
 			pyStr(kind),
 			pyStr(r.URL.RequestURI()),
 			pyVal(r.Header.Get("Janus-Hub-Client"), r.Header.Get("Janus-Hub-Client") != ""),
 			pyVal(r.Header.Get("Janus-Hub-App"), r.Header.Get("Janus-Hub-App") != ""),
 			pyVal(r.Header.Get("Cookie"), r.Header.Get("Cookie") != ""),
+			pyVal(r.Header.Get("Remote-User"), r.Header.Get("Remote-User") != ""),
 			hasKey, hasConn,
 			pyVal(r.Header.Get("Content-Type"), r.Header.Get("Content-Type") != ""),
 			pyStr(string(body)))

@@ -84,6 +84,15 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return err
 				}
 				a.Mdns = ms
+			case "auth":
+				if a.Auth != nil {
+					return d.Err("duplicate auth directive in the same block")
+				}
+				as, err := parseAuthDirective(d)
+				if err != nil {
+					return err
+				}
+				a.Auth = as
 			case "heartbeat_ttl":
 				if a.HeartbeatTTL != 0 {
 					return d.Err("duplicate heartbeat_ttl directive")

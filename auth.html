@@ -1,0 +1,77 @@
+<!doctype html>
+<!-- Janus auth wall — embedded, self-contained (zero external
+     resources). One page, two states: the login form when no valid
+     session is presented, the signed-in status page (which IS the
+     logout UI for every guarded app) when one is. Every dynamic value
+     renders through html/template escaping. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{if .User}}Signed in · {{.Host}}{{else}}Sign in · {{.Host}}{{end}}</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --text: #e6e9ef; --dim: #8b93a3; --accent: #7aa2f7; --bad: #f27878;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      Helvetica, Arial, sans-serif;
+    display: flex; min-height: 100vh; align-items: center; justify-content: center;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 26px 28px; width: 22rem; max-width: 92vw;
+  }
+  h1 { font-size: 19px; margin: 0 0 2px; letter-spacing: .3px; }
+  .host { color: var(--accent); font-family: ui-monospace, Menlo, monospace;
+    font-size: 13px; margin: 0 0 18px; word-break: break-all; }
+  .err { background: rgba(242,120,120,.08); border: 1px solid var(--bad);
+    color: var(--bad); border-radius: 6px; padding: 8px 10px;
+    font-size: 13px; margin: 0 0 14px; }
+  label { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--dim); }
+  input {
+    width: 100%; padding: 8px 10px; font: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  button {
+    margin-top: 18px; width: 100%; padding: 9px 0; font: inherit;
+    font-weight: 600; color: var(--bg); background: var(--accent);
+    border: none; border-radius: 6px; cursor: pointer;
+  }
+  .who { margin: 0 0 4px; }
+  .who strong { color: var(--accent); }
+  .since { color: var(--dim); font-size: 13px; margin: 0 0 6px; }
+</style>
+</head>
+<body>
+<div class="card">
+{{if .User}}
+  <h1>Signed in</h1>
+  <p class="host">{{.Host}}</p>
+  <p class="who">Signed in as <strong>{{.User}}</strong></p>
+  <p class="since">since {{.Since}}</p>
+  <form method="post" action="/auth">
+    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+    <button type="submit">Sign out</button>
+  </form>
+{{else}}
+  <h1>Sign in</h1>
+  <p class="host">{{.Host}}</p>
+  {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
+  <form method="post" action="/auth" autocomplete="on">
+    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+    <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+    <label for="u">User</label>
+    <input id="u" name="user" autocomplete="username" autofocus required>
+    <label for="p">Password</label>
+    <input id="p" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+  </form>
+{{end}}
+</div>
+</body>
+</html>

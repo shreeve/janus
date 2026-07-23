@@ -9,11 +9,12 @@ or a WebSocket. Everything is memory-only by contract: a restart
 empties the registry and tenants re-register.
 
 **Era: stewardship.** Feature-complete at v1.0.0 — every build-spec
-box ticked; five cold capabilities shipped. Ongoing work is fix,
+box ticked; six cold capabilities shipped. Ongoing work is fix,
 harden, measure. New behavior arrives as a capability through the
 proven loop: **design contract → adversarial review → revise →
 implement → pin in tests → measure** (mdns, capability 5, is the
-first post-v1.0.0 product of that loop).
+first post-v1.0.0 product of that loop; auth, capability 6, is the
+second).
 
 ## The Rules
 
@@ -31,14 +32,14 @@ first post-v1.0.0 product of that loop).
    values, defaults, and hard errors — same grammar as stock Caddy.
 
 4. **Capabilities are the unit of cold work.** Numbered by landing
-   order; the story (ping → control → cache → hub → mdns → …) never reorders
-   in docs or `test.sh`. A new one starts at "When adding a capability"
-   below — contract doc and adversarial review before code.
+   order; the story (ping → control → cache → hub → mdns → auth → …) never
+   reorders in docs or `test.sh`. A new one starts at "When adding a
+   capability" below — contract doc and adversarial review before code.
 
 5. **Cascade is explicit.**
    - **Process-wide** (control; cache's `max_bytes`/`max_app_share`):
      global `janus { }` only; a site-level occurrence is a parse error.
-   - **Site-scoped** (ping, cache, hub): global default → site
+   - **Site-scoped** (ping, cache, hub, auth): global default → site
      override; unmentioned inherits; explicit `off` beats inherited
      `on`; built-in default when unset everywhere.
    Document **Cascades: yes/no** on every capability page.
@@ -81,16 +82,17 @@ first post-v1.0.0 product of that loop).
 | 3 | **cache** | Site-scoped micro-cache + request coalescing, generation-fenced (cascades: yes). |
 | 4 | **hub** | Edge-terminated WebSocket fan-out with the Bam directive grammar; the tenant observes and steers over HTTP (cascades: yes). |
 | 5 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS; the read-only status front door with the canonical hand-off (cascades: no — process-wide). |
-| 6+ | next | Future capabilities, each through the loop above. |
+| 6 | **auth** | Edge authentication wall for auth-less apps: exact `/auth`, `g1:` argon2id credentials, pooled in-memory sessions, `Remote-User` strip-and-inject (cascades: yes). |
+| 7+ | next | Future capabilities, each through the loop above. |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,
-cache, heartbeat, tls, hub, tenant, mdns.
+cache, heartbeat, tls, hub, tenant, mdns, auth.
 
 ## Architecture (short)
 
 | Plane | Config | Role |
 | --- | --- | --- |
-| **data** | Site `janus` [block] | Admit this host into Janus; site-scoped overrides (ping, cache, hub) |
+| **data** | Site `janus` [block] | Admit this host into Janus; site-scoped overrides (ping, cache, hub, auth) |
 | **control** | Global `janus { control … }` | Where `/1.0` listens: `internal` / `local` / `public` |
 
 Unknown public hosts → **404**. Registry, data plane, and hubs sit in

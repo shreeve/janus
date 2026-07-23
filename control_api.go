@@ -177,6 +177,15 @@ func (a *App) controlMux() *http.ServeMux {
 		// capability is off, the full advertiser view when on.
 		mux.HandleFunc("GET "+base+"/1.0/mdns", a.handleMdnsState)
 		mux.HandleFunc("GET "+base+"/1.0/mdns/{$}", a.handleMdnsState)
+
+		// Auth wall state, always on: {"enabled": false} when no site's
+		// effective auth is on; counters, the session list, and
+		// revocation (observe and revoke — never configure).
+		mux.HandleFunc("GET "+base+"/1.0/auth", a.handleAuthState)
+		mux.HandleFunc("GET "+base+"/1.0/auth/{$}", a.handleAuthState)
+		mux.HandleFunc("GET "+base+"/1.0/auth/sessions", a.handleAuthSessions)
+		mux.HandleFunc("DELETE "+base+"/1.0/auth/sessions", a.handleAuthSessionsWipe)
+		mux.HandleFunc("DELETE "+base+"/1.0/auth/sessions/{id}", a.handleAuthSessionDelete)
 	}
 	return mux
 }
@@ -221,6 +230,7 @@ func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
 		"type":        "janus",
 		"ping":        cascadeBool(nil, a.Ping, false),
 		"mdns":        a.Mdns != nil,
+		"auth":        len(a.authEnabledSites()) > 0,
 		"control":     a.controlPublicInfo(),
 	})
 }

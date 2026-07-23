@@ -1,4 +1,4 @@
-# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns
+# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth
 #
 # *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
 #
@@ -70,6 +70,19 @@
 #   curl -s http://127.0.0.1:7600/1.0/mdns             → advertiser state
 #   curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 #
+# 6) auth — edge authentication wall (site-scoped, cascades)
+#   Global auth ON with the dev fixture users (passwords in the block
+#   below; mint real ones with `./bin/caddy janus-auth-hash`). Every
+#   site here EXCEPT authwall/authcarol opts out with `auth off` so the
+#   rest of the acceptance suite exercises open sites; the two auth
+#   sites prove the cascade:
+#   authwall.ripdev.io   → inherits the wall + global users (alice, bob)
+#   authcarol.ripdev.io  → site users REPLACE global (carol only), ttl 30m
+#   everything else      → explicit off beats inherited on
+#
+#   curl -s https://authwall.ripdev.io/auth                 → login form
+#   curl -s http://127.0.0.1:7600/1.0/auth                  → wall counters + sessions
+#
 {
 	auto_https disable_redirects # the redirect server would bind :80; this dev/CI config runs unprivileged
 	skip_install_trust
@@ -93,6 +106,11 @@
 		mdns { # 5) process-wide LAN presence
 			listen :7680 # dedicated dev/test listener; default (no listen) shares the :80 HTTP server
 		}
+		auth { # 6) site-scoped default: on — dev fixture credentials (committed on purpose, like certs/)
+			user alice g1:k5KZV0T/LsQSaqny8ZZa0hPn/FRGIDueMSt91JUSJzVp2TcbSNt3Hdo0RuBCMWV1 # password: sesame-alice
+			user bob g1:ZO7UHjS4TZm9A5t3q5aF0EUZe7Dhwb71Am4LoPynBy/qFMnG76oOwkvHN5EO2EW6 # password: sesame-bob
+			ttl 8h # sliding idle timeout (default)
+		}
 	}
 }
 
@@ -101,9 +119,13 @@
 }
 
 # Catchall — any other *.ripdev.io name inherits global ping on
+# (auth off: the acceptance suite drives open sites through this block;
+# authwall/authcarol below are the guarded ones)
 *.ripdev.io {
 	import ripdev_tls
-	janus
+	janus {
+		auth off
+	}
 }
 
 # Explicit on (same effective result as catchall; proves site-level on)
@@ -111,6 +133,7 @@ on.ripdev.io {
 	import ripdev_tls
 	janus {
 		ping on
+		auth off
 	}
 }
 
@@ -119,6 +142,7 @@ off.ripdev.io {
 	import ripdev_tls
 	janus {
 		ping off
+		auth off
 	}
 }
 
@@ -129,6 +153,7 @@ api.ripdev.io {
 	janus {
 		cache off
 		hub off
+		auth off
 	}
 }
 
@@ -140,6 +165,7 @@ pages.ripdev.io {
 			ttl 5s
 			debug
 		}
+		auth off
 	}
 }
 
@@ -151,6 +177,7 @@ hubany.ripdev.io {
 		hub {
 			origin any
 		}
+		auth off
 	}
 }
 
@@ -162,6 +189,7 @@ hubten.ripdev.io {
 			max_conns 10
 			origin any
 		}
+		auth off
 	}
 }
 
@@ -172,13 +200,37 @@ hubtwenty.ripdev.io {
 			max_conns 20
 			origin any
 		}
+		auth off
+	}
+}
+
+# Auth: inherits the wall whole — global users (alice, bob), global ttl,
+# plus every other inherited capability (ping, cache, hub). /auth is the
+# login form signed out and the status/sign-out page signed in;
+# everything else 302s browsers to /auth and 401s everything else.
+authwall.ripdev.io {
+	import ripdev_tls
+	janus
+}
+
+# Auth: site users REPLACE the global set (one level, never merged) —
+# alice and bob cannot open this door, carol can. Site ttl overrides.
+authcarol.ripdev.io {
+	import ripdev_tls
+	janus {
+		auth {
+			user carol g1:vubzMm3lFe41hKvKvZnXgOaBiA+QDUvsYr7PDmLf65WLF+J+EEnhAuzdAmPjGXXY # password: sesame-carol
+			ttl 30m
+		}
 	}
 }
 
 # On-demand TLS — certs minted per SNI from the internal CA, but only
 # for names the registry allows (see on_demand_tls ask above).
 # Hub off: this catch-all site would otherwise make EVERY host
-# hub-enabled, defeating per-host hub admission.
+# hub-enabled, defeating per-host hub admission. Auth off: a global
+# wall inherited by an on-demand catch-all would wall every unknown
+# host — opt catchalls out explicitly.
 https://:8443 {
 	tls {
 		on_demand
@@ -186,5 +238,6 @@ https://:8443 {
 	}
 	janus {
 		hub off
+		auth off
 	}
 }

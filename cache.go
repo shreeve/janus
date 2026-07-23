@@ -514,6 +514,13 @@ func cacheBypassRequest(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return true
 	}
+	// Authenticated traffic bypasses on the wall's EXPLICIT context
+	// signal, never on Cookie-header residue: the wall strips its own
+	// cookies before the request proceeds, and every response behind it
+	// is per-identity by assumption.
+	if authIdentityOf(r.Context()) != "" {
+		return true
+	}
 	h := r.Header
 	if len(h["Cookie"]) > 0 || len(h["Authorization"]) > 0 || len(h["Proxy-Authorization"]) > 0 {
 		return true
