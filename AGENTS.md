@@ -82,7 +82,7 @@ second).
 | 3 | **cache** | Site-scoped micro-cache + request coalescing, generation-fenced (cascades: yes). |
 | 4 | **hub** | Edge-terminated WebSocket fan-out with the Bam directive grammar; the tenant observes and steers over HTTP (cascades: yes). |
 | 5 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS; the read-only status front door with the canonical hand-off (cascades: no — process-wide). |
-| 6 | **auth** | Edge authentication wall for auth-less apps: exact `/auth`, `g1:` argon2id credentials, pooled in-memory sessions, `Remote-User` strip-and-inject (cascades: yes). |
+| 6 | **auth** | URL-prefix gates for auth-less apps: shared `users`, per-gate allow lists, host-wide `__Host-janus` session, `Remote-User` strip-and-inject (cascades: yes). |
 | 7+ | next | Future capabilities, each through the loop above. |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,

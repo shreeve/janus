@@ -29,8 +29,8 @@ type Handler struct {
 	// non-nil.
 	Hub *HubSettings `json:"hub,omitempty"`
 
-	// Auth overrides the global auth default/users for this site when
-	// non-nil.
+	// Auth overrides the global auth default for this site when non-nil.
+	// A non-empty auth { … } block replaces the global config wholesale.
 	Auth *AuthSettings `json:"auth,omitempty"`
 
 	app    *App
@@ -123,16 +123,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return err
 	}
 	// The auth wall (after ping — /ping answers unauthenticated; before
-	// hub interception — an upgrade without a session gets 401 here):
-	// exact /auth serves the endpoint, everything else needs a valid
-	// session or gets the 302/401 fork; a valid session falls through
-	// with Remote-User injected and the wall's cookies stripped.
+	// hub interception — an upgrade under a gate without a session gets
+	// 401 here): gate login doors, path allow lists, strip on every
+	// fall-through; authorized gated traffic gets Remote-User injected.
 	if h.authCfg != nil {
 		rr, handled, err := h.serveAuthWall(w, r)
 		if handled || err != nil {
 			return err
 		}
 		r = rr
+		w = &authRespStrip{ResponseWriter: w}
 	}
 	// Hub interception (before cache and upstream selection, after ping):
 	// the hub claims upgrades to its path only — a non-upgrade request to

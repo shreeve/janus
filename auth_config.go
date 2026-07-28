@@ -14,12 +14,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// Cold auth configuration (docs/20260722-134812-capability-auth.md
-// "Cold config"). Site-scoped capability, the cache/hub pattern: global
-// default → site override; explicit off beats an inherited on; built-in
-// default off. ttl cascades per key; users resolve at exactly one level
-// — a site block with at least one user line supplies the site's entire
-// user set, never merged with the global set.
+// Cold auth configuration (docs/20260728-160734-capability-auth.md).
+// Site-scoped capability: global default → site override; a site
+// auth { … } block replaces the global auth config (no merging of
+// users or gates); bare auth / auth on inherits; explicit off beats
+// an inherited on; built-in default off.
 
 // Built-in defaults and fixed v1 parameters.
 const (
@@ -35,13 +34,12 @@ const (
 	authPasswordCap = 1024
 	authToCap       = 2048
 
-	// Login throttle: fixed window per (client key, username).
-	authThrottleLimit  = 5
-	authThrottleWindow = 15 * time.Minute
-
-	// authThrottleMaxEntries bounds the throttle map: at the cap,
-	// expired windows are swept; if none are expired, an arbitrary
-	// entry is evicted so the map can never grow past the bound.
+	// Login throttle ladder waits (after the Nth failed attempt).
+	authThrottleWait4   = 10 * time.Second
+	authThrottleWait5   = 60 * time.Second
+	authThrottleWait6   = 300 * time.Second
+	authThrottleBan     = 24 * time.Hour
+	authThrottleBanAt   = 7 // fails >= 7 → 24h ban
 	authThrottleMaxEntries = 65536
 
 	// Argon2 verification concurrency: at most authVerifyConcurrency
@@ -75,27 +73,49 @@ type AuthUser struct {
 	Credential string `json:"credential"`
 }
 
+// AuthGate is one path-prefix allow list after normalization.
+type AuthGate struct {
+	Prefix string   `json:"prefix"`
+	Allow  []string `json:"allow"`
+}
+
 // AuthSettings configures the site-scoped auth wall. It appears in the
-// global janus options (default posture + default user set) and per site
-// (override). The full contract is docs/20260722-134812-capability-auth.md.
+// global janus options (default posture) and per site (override). A
+// non-empty auth { … } block at the site replaces the global config
+// wholesale. The full contract is docs/20260728-160734-capability-auth.md.
 type AuthSettings struct {
 	// Enabled turns the wall on or off for the site. Default: off.
 	// Sites may override the global default; explicit off beats an
-	// inherited on.
+	// inherited on. Bare auth / auth on sets Enabled true without
+	// Replace — inherit the global users and gates.
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// Users is this level's user set. Site users REPLACE the global set
-	// (one-level resolution, never merged); a site block with no user
-	// lines inherits the global set whole.
+	// Replace is true when a non-empty auth { … } block was parsed.
+	// Site Replace configs supply the entire effective auth config
+	// (users, gates, ttl) and do not merge with global.
+	Replace bool `json:"replace,omitempty"`
+
+	// Users is this level's credential table.
 	Users []AuthUser `json:"users,omitempty"`
+
+	// Gates is this level's path-prefix allow lists.
+	Gates []AuthGate `json:"gates,omitempty"`
 
 	// TTL is the sliding idle session timeout. Default: 8h.
 	TTL *caddy.Duration `json:"ttl,omitempty"`
 }
 
+// authGate is one compiled gate: normalized prefix and allow-set.
+type authGate struct {
+	prefix string
+	allow  map[string]bool
+	door   string // exact login path: prefix + "auth"
+}
+
 // authSite is one site's effective auth configuration after cascade.
 type authSite struct {
 	users map[string]string // lowercased name → g1 blob
+	gates []authGate        // longest-prefix-first for matching
 	ttl   time.Duration
 	store *authStore
 
@@ -109,13 +129,14 @@ type authSite struct {
 //	auth
 //	auth on
 //	auth off
-//	auth { user alice g1:…; user bob g1:…; ttl 8h }
-//	auth on { … }
+//	auth {
+//	  users { alice g1:… }
+//	  user bob g1:…
+//	  ttl 8h
+//	  gate /one/ { alice larry }
+//	}
 //
-// Hard errors per the capability contract: unknown argument, a block on
-// "off", unknown subdirectives, duplicate ttl, user without exactly two
-// arguments, duplicate usernames, illegal usernames, malformed g1
-// blobs, non-positive ttl, nested blocks.
+// Hard errors per the capability contract.
 func parseAuthDirective(d *caddyfile.Dispenser) (*AuthSettings, error) {
 	as := &AuthSettings{}
 	on, err := parseOnOff(d.RemainingArgs())
@@ -124,36 +145,75 @@ func parseAuthDirective(d *caddyfile.Dispenser) (*AuthSettings, error) {
 	}
 	as.Enabled = &on
 
+	nesting := d.Nesting()
+	if !d.NextBlock(nesting) {
+		// Bare auth / auth on / auth off, or empty auth { }.
+		if d.Val() == "}" {
+			if !on {
+				return nil, d.Err("auth off does not take a block (a block on an off switch is a contradiction)")
+			}
+			return nil, d.Err("auth: empty auth block")
+		}
+		return as, nil
+	}
+	if !on {
+		return nil, d.Err("auth off does not take a block (a block on an off switch is a contradiction)")
+	}
+	as.Replace = true
+
 	seen := map[string]bool{}
 	users := map[string]bool{}
-	for nesting := d.Nesting(); d.NextBlock(nesting); {
-		if !on {
-			return nil, d.Err("auth off does not take a block (a block on an off switch is a contradiction)")
-		}
+	gatePrefixes := map[string]bool{}
+	for {
 		sub := d.Val()
-		if sub != "user" && seen[sub] {
-			return nil, d.Errf("auth: duplicate subdirective %q", sub)
-		}
-		seen[sub] = true
 		switch sub {
 		case "user":
 			args := d.RemainingArgs()
 			if len(args) != 2 {
 				return nil, d.Err("auth user: want exactly two arguments (user <name> g1:<credential>)")
 			}
-			name, verr := validateAuthUsername(args[0])
-			if verr != nil {
-				return nil, d.Errf("auth user: %v", verr)
+			if err := addAuthUser(as, users, args[0], args[1]); err != nil {
+				return nil, d.Errf("auth user: %v", err)
 			}
-			if users[name] {
-				return nil, d.Errf("auth user: duplicate username %q in one block", name)
+			if d.NextBlock(d.Nesting()) {
+				return nil, d.Err("auth user does not take a nested block")
 			}
-			users[name] = true
-			if verr := validateG1(args[1]); verr != nil {
-				return nil, d.Errf("auth user %s: %v", name, verr)
+		case "users":
+			if seen["users"] {
+				return nil, d.Err(`auth: duplicate subdirective "users"`)
 			}
-			as.Users = append(as.Users, AuthUser{Name: name, Credential: args[1]})
+			seen["users"] = true
+			if len(d.RemainingArgs()) != 0 {
+				return nil, d.Err("auth users: want a block of `<name> g1:<credential>` lines, not arguments")
+			}
+			userNesting := d.Nesting()
+			if !d.NextBlock(userNesting) {
+				if d.Val() == "}" {
+					return nil, d.Err("auth users: empty users block")
+				}
+				return nil, d.Err("auth users: want a block of `<name> g1:<credential>` lines")
+			}
+			for {
+				nameTok := d.Val()
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, d.Err("auth users: want `<name> g1:<credential>` per line")
+				}
+				if err := addAuthUser(as, users, nameTok, args[0]); err != nil {
+					return nil, d.Errf("auth users: %v", err)
+				}
+				if d.NextBlock(d.Nesting()) {
+					return nil, d.Err("auth users entries do not take a nested block")
+				}
+				if !d.NextBlock(userNesting) {
+					break
+				}
+			}
 		case "ttl":
+			if seen["ttl"] {
+				return nil, d.Err(`auth: duplicate subdirective "ttl"`)
+			}
+			seen["ttl"] = true
 			val, err := oneDirectiveArg(d, "auth", sub)
 			if err != nil {
 				return nil, err
@@ -164,14 +224,206 @@ func parseAuthDirective(d *caddyfile.Dispenser) (*AuthSettings, error) {
 			}
 			cd := caddy.Duration(dur)
 			as.TTL = &cd
+			if d.NextBlock(d.Nesting()) {
+				return nil, d.Err("auth ttl does not take a nested block")
+			}
+		case "gate":
+			args := d.RemainingArgs()
+			if len(args) != 1 {
+				return nil, d.Err("auth gate: want exactly one path argument and an allow-list block")
+			}
+			prefix, perr := normalizeGatePrefix(args[0])
+			if perr != nil {
+				return nil, d.Errf("auth gate: %v", perr)
+			}
+			if gatePrefixes[prefix] {
+				return nil, d.Errf("auth gate: duplicate gate prefix %q after normalization", prefix)
+			}
+			gateNesting := d.Nesting()
+			if !d.NextBlock(gateNesting) {
+				if d.Val() == "}" {
+					return nil, d.Errf("auth gate %s: empty allow list", prefix)
+				}
+				return nil, d.Errf("auth gate %s: want an allow-list block", prefix)
+			}
+			var allow []string
+			allowSeen := map[string]bool{}
+			for {
+				// Allow-list tokens may sit on one line: { alice larry }.
+				// NextArg does not stop at "}", so roll the closer back
+				// for NextBlock to consume.
+				names := []string{d.Val()}
+				for d.NextArg() {
+					if d.Val() == "}" {
+						d.Prev()
+						break
+					}
+					if d.Val() == "{" {
+						return nil, d.Errf("auth gate %s: allow-list names do not take a nested block", prefix)
+					}
+					names = append(names, d.Val())
+				}
+				for _, raw := range names {
+					name, verr := validateAuthUsername(raw)
+					if verr != nil {
+						return nil, d.Errf("auth gate %s: %v", prefix, verr)
+					}
+					if allowSeen[name] {
+						return nil, d.Errf("auth gate %s: duplicate allow-list name %q", prefix, name)
+					}
+					allowSeen[name] = true
+					allow = append(allow, name)
+				}
+				if !d.NextBlock(gateNesting) {
+					break
+				}
+			}
+			if len(allow) == 0 {
+				return nil, d.Errf("auth gate %s: empty allow list", prefix)
+			}
+			gatePrefixes[prefix] = true
+			as.Gates = append(as.Gates, AuthGate{Prefix: prefix, Allow: allow})
 		default:
 			return nil, d.Errf("unrecognized auth subdirective: %s", sub)
 		}
-		if d.NextBlock(d.Nesting()) {
-			return nil, d.Errf("auth %s does not take a nested block", sub)
+		if !d.NextBlock(nesting) {
+			break
 		}
 	}
+
+	if err := finalizeAuthSettings(as); err != nil {
+		return nil, d.Errf("auth: %v", err)
+	}
 	return as, nil
+}
+
+func addAuthUser(as *AuthSettings, seen map[string]bool, rawName, cred string) error {
+	name, err := validateAuthUsername(rawName)
+	if err != nil {
+		return err
+	}
+	if seen[name] {
+		return fmt.Errorf("duplicate username %q in one block", name)
+	}
+	if err := validateG1(cred); err != nil {
+		return fmt.Errorf("user %s: %w", name, err)
+	}
+	seen[name] = true
+	as.Users = append(as.Users, AuthUser{Name: name, Credential: cred})
+	return nil
+}
+
+// normalizeGatePrefix validates and normalizes a gate path: must start
+// with /, no // or .., and gains a trailing / when missing.
+func normalizeGatePrefix(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("path must not be empty")
+	}
+	if !strings.HasPrefix(raw, "/") {
+		return "", fmt.Errorf("path %q must start with /", raw)
+	}
+	if strings.Contains(raw, "//") {
+		return "", fmt.Errorf("path %q must not contain //", raw)
+	}
+	if strings.Contains(raw, "..") {
+		return "", fmt.Errorf("path %q must not contain ..", raw)
+	}
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return "", fmt.Errorf("path %q must not contain whitespace", raw)
+	}
+	if !strings.HasSuffix(raw, "/") {
+		raw += "/"
+	}
+	return raw, nil
+}
+
+// gateDoor is the exact login path for a normalized prefix.
+func gateDoor(prefix string) string {
+	return prefix + "auth"
+}
+
+// finalizeAuthSettings checks allow-list membership, login-door
+// shadowing, and sorts nothing yet (provision sorts for match).
+func finalizeAuthSettings(as *AuthSettings) error {
+	if as == nil {
+		return nil
+	}
+	userSet := map[string]bool{}
+	for _, u := range as.Users {
+		userSet[u.Name] = true
+	}
+	for i := range as.Gates {
+		g := &as.Gates[i]
+		prefix, err := normalizeGatePrefix(g.Prefix)
+		if err != nil {
+			return fmt.Errorf("gate: %w", err)
+		}
+		g.Prefix = prefix
+		if len(g.Allow) == 0 {
+			return fmt.Errorf("gate %s: empty allow list", prefix)
+		}
+		for j, raw := range g.Allow {
+			name, err := validateAuthUsername(raw)
+			if err != nil {
+				return fmt.Errorf("gate %s: %w", prefix, err)
+			}
+			if !userSet[name] {
+				return fmt.Errorf("gate %s: allow-list name %q is not present in users", prefix, name)
+			}
+			g.Allow[j] = name
+		}
+	}
+	// Duplicate prefixes after normalization.
+	seen := map[string]bool{}
+	for _, g := range as.Gates {
+		if seen[g.Prefix] {
+			return fmt.Errorf("duplicate gate prefix %q after normalization", g.Prefix)
+		}
+		seen[g.Prefix] = true
+	}
+	if err := checkLoginDoorShadowing(as.Gates); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkLoginDoorShadowing rejects configs where a gate's login door
+// would be claimed by a different (longer) gate under longest-prefix
+// rules — e.g. /one/ together with /one/auth/.
+func checkLoginDoorShadowing(gates []AuthGate) error {
+	for _, g := range gates {
+		door := gateDoor(g.Prefix)
+		winner := longestGatePrefix(gates, door)
+		if winner != "" && winner != g.Prefix {
+			return fmt.Errorf("gate %s: login door %s is shadowed by gate %s", g.Prefix, door, winner)
+		}
+	}
+	return nil
+}
+
+// longestGatePrefix returns the normalized prefix of the longest gate
+// that matches path, or "" if none match.
+func longestGatePrefix(gates []AuthGate, path string) string {
+	best := ""
+	for _, g := range gates {
+		if gatePathMatches(g.Prefix, path) && len(g.Prefix) > len(best) {
+			best = g.Prefix
+		}
+	}
+	return best
+}
+
+// gatePathMatches reports whether path is under the normalized prefix.
+// For /one/: /one, /one/, /one/two match; /ones does not.
+func gatePathMatches(prefix, path string) bool {
+	if prefix == "/" {
+		return true
+	}
+	trimmed := strings.TrimSuffix(prefix, "/")
+	if path == trimmed || path == prefix {
+		return true
+	}
+	return strings.HasPrefix(path, prefix)
 }
 
 // validateAuthUsername lowercases and checks a username: 1–64 bytes of
@@ -250,42 +502,28 @@ func validateAuthSettings(as *AuthSettings) error {
 	if as.TTL != nil && *as.TTL <= 0 {
 		return fmt.Errorf("ttl must be a positive duration")
 	}
+	if as.Replace || len(as.Users) > 0 || len(as.Gates) > 0 {
+		if err := finalizeAuthSettings(as); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // --- cascade -------------------------------------------------------------------
 
-func authEnabledPtr(as *AuthSettings) *bool {
+func (as *AuthSettings) replaces() bool {
 	if as == nil {
-		return nil
+		return false
 	}
-	return as.Enabled
-}
-
-// resolveAuthUsers applies the one-level user rule: a site block that
-// declares at least one user line supplies the site's entire set; a
-// site block with no user lines inherits the global set whole.
-func resolveAuthUsers(site, global *AuthSettings) map[string]string {
-	src := global
-	if site != nil && len(site.Users) > 0 {
-		src = site
-	}
-	if src == nil {
-		return map[string]string{}
-	}
-	users := make(map[string]string, len(src.Users))
-	for _, u := range src.Users {
-		users[u.Name] = u.Credential
-	}
-	return users
+	return as.Replace || len(as.Users) > 0 || len(as.Gates) > 0 || as.TTL != nil
 }
 
 // provisionAuth resolves this site's effective auth configuration.
 // Effective off leaves h.authCfg nil — the request-path check is one nil
-// compare. The zero-users lockout is a hard provision error here (the
-// check is computable locally, per the contract's lifecycle split);
-// cross-site work — removed-user session revocation, the site table —
-// runs at App Start.
+// compare. Effective on with empty users or zero gates is a hard
+// provision error. Cross-site work — removed-user session revocation,
+// the site table — runs at App Start.
 func (h *Handler) provisionAuth() error {
 	var g *AuthSettings
 	if h.app != nil {
@@ -297,31 +535,117 @@ func (h *Handler) provisionAuth() error {
 			return fmt.Errorf("janus auth: %w", err)
 		}
 	}
-	if !cascadeBool(authEnabledPtr(s), authEnabledPtr(g), false) {
+	if s != nil && s.Enabled != nil && !*s.Enabled {
 		return nil
 	}
-	users := resolveAuthUsers(s, g)
-	if len(users) == 0 {
-		return fmt.Errorf("janus auth: this site's effective auth is on but its resolved user set is empty" +
-			" (the site block declares no user lines and the global janus block has none)" +
-			" — an enabled wall with zero credentials is a lockout; add user lines or 'auth off'")
+
+	var src *AuthSettings
+	switch {
+	case s != nil && s.replaces():
+		src = s
+	default:
+		// Site unset, or bare auth / auth on → inherit global.
+		src = g
+	}
+
+	wantOn := false
+	switch {
+	case s != nil && s.replaces():
+		wantOn = s.Enabled == nil || *s.Enabled
+	case s != nil && s.Enabled != nil && *s.Enabled:
+		// Bare auth / auth on: on only when global supplies a config.
+		wantOn = true
+	case s == nil:
+		wantOn = g != nil && g.Enabled != nil && *g.Enabled
+	}
+
+	if !wantOn {
+		return nil
+	}
+	if src == nil || (src.Enabled != nil && !*src.Enabled) {
+		return fmt.Errorf("janus auth: this site's effective auth is on but there is no auth config to inherit" +
+			" (bare 'auth'/'auth on' needs a global auth { users… gate… } block, or write a full site auth block)")
+	}
+	if len(src.Users) == 0 || len(src.Gates) == 0 {
+		return fmt.Errorf("janus auth: this site's effective auth is on but its resolved config is incomplete" +
+			" (need a non-empty users table and at least one gate)" +
+			" — an enabled wall without credentials or gates is a lockout; add users and gates or 'auth off'")
 	}
 	if h.app == nil || h.app.state == nil {
 		return nil // no data plane to guard (every request 404s already)
 	}
-	var sTTL, gTTL *caddy.Duration
-	if s != nil {
-		sTTL = s.TTL
+
+	ttl := authDefaultTTL
+	if src.TTL != nil {
+		ttl = time.Duration(*src.TTL)
 	}
-	if g != nil {
-		gTTL = g.TTL
+	cfg, err := compileAuthSite(src.Users, src.Gates, ttl, h.app.state.auth)
+	if err != nil {
+		return fmt.Errorf("janus auth: %w", err)
 	}
-	h.authCfg = &authSite{
-		users: users,
-		ttl:   cascadeDuration(sTTL, gTTL, authDefaultTTL),
-		store: h.app.state.auth,
+	h.authCfg = cfg
+	return nil
+}
+
+func compileAuthSite(users []AuthUser, gates []AuthGate, ttl time.Duration, store *authStore) (*authSite, error) {
+	umap := make(map[string]string, len(users))
+	for _, u := range users {
+		umap[u.Name] = u.Credential
+	}
+	compiled := make([]authGate, 0, len(gates))
+	for _, g := range gates {
+		allow := make(map[string]bool, len(g.Allow))
+		for _, n := range g.Allow {
+			allow[n] = true
+		}
+		compiled = append(compiled, authGate{
+			prefix: g.Prefix,
+			allow:  allow,
+			door:   gateDoor(g.Prefix),
+		})
+	}
+	// Longest prefix first so match walks in order.
+	sort.Slice(compiled, func(i, j int) bool {
+		return len(compiled[i].prefix) > len(compiled[j].prefix)
+	})
+	return &authSite{
+		users: umap,
+		gates: compiled,
+		ttl:   ttl,
+		store: store,
+	}, nil
+}
+
+// matchGate returns the winning (longest) gate for path, or nil.
+func (cfg *authSite) matchGate(path string) *authGate {
+	for i := range cfg.gates {
+		if gatePathMatches(cfg.gates[i].prefix, path) {
+			return &cfg.gates[i]
+		}
 	}
 	return nil
+}
+
+// doorGate returns the gate whose exact login door is path, or nil.
+func (cfg *authSite) doorGate(path string) *authGate {
+	for i := range cfg.gates {
+		if cfg.gates[i].door == path {
+			return &cfg.gates[i]
+		}
+	}
+	return nil
+}
+
+// gatesForUser returns normalized prefixes whose allow lists include user.
+func (cfg *authSite) gatesForUser(user string) []string {
+	var out []string
+	for _, g := range cfg.gates {
+		if g.allow[user] {
+			out = append(out, g.prefix)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // --- the site table (App Start) -----------------------------------------------
@@ -433,4 +757,23 @@ func (a *App) authEnabledSites() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// authCfgForHost returns the effective authSite for host, or nil.
+func (a *App) authCfgForHost(host string) *authSite {
+	host = strings.ToLower(host)
+	for _, e := range a.authSites {
+		if e.cfg == nil {
+			continue
+		}
+		if len(e.patterns) == 0 {
+			return e.cfg
+		}
+		for _, p := range e.patterns {
+			if hostMatchesPattern(strings.ToLower(p), host) {
+				return e.cfg
+			}
+		}
+	}
+	return nil
 }

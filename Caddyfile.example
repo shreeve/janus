@@ -123,30 +123,27 @@
 			# interface en0                # optional pinning; default: every multicast-capable interface, live
 		}
 
-		# 6) auth — the edge authentication wall for auth-less apps.
-		# Site-scoped, cascades like ping/cache/hub: this global block is
-		# the process default; sites opt out with `auth off` or replace
-		# the user set with their own `auth { user … }` block (site users
-		# REPLACE global users — one level, never merged; ttl cascades
-		# per key). When a site's effective auth is on, Janus claims
-		# exactly /auth (login form signed out; status + sign-out page
-		# signed in — the logout story for every guarded app), 302s
-		# browsers to it, 401s everything else, and injects
-		# Remote-User: <name> on what passes. Sessions live in memory —
-		# a reload keeps them, a restart signs everyone out. Mint
-		# credentials with `caddy janus-auth-hash` (argon2id; the
-		# password is prompted, never argv). THE PERIMETER RULE: the
-		# header is trustworthy exactly as far as the only road to the
-		# app runs through Janus — guarded upstreams must bind localhost
-		# or unix sockets. Observe and revoke: GET /1.0/auth,
-		# DELETE /1.0/auth/sessions[/{id}]. A global wall is inherited
-		# by EVERY janus site, including catch-alls (the https:// block
-		# below and the http://*.local front-door carrier): give
-		# catchalls an explicit `auth off` unless you mean to wall every
-		# unknown host.
+		# 6) auth — URL-prefix gates for auth-less apps. Site-scoped,
+		# cascades like ping/cache/hub: this global block is the process
+		# default; sites opt out with `auth off` or replace the whole
+		# config with their own `auth { … }` (users + gates — no merge).
+		# Bare `auth` / `auth on` inherits. Each gate is a path prefix
+		# with an allow list; login door is exact `{prefix}auth`. One
+		# host-wide `__Host-janus` session; sign in/out once. Longest
+		# prefix wins. Outside every gate is open (strip/421 still apply
+		# when auth is on). Mint credentials with `caddy janus-auth-hash`
+		# (argon2id; password prompted, never argv). PERIMETER: guarded
+		# upstreams must bind localhost or unix sockets. Observe/revoke:
+		# GET /1.0/auth, DELETE /1.0/auth/sessions[/{id}]. Catch-alls
+		# need an explicit `auth off` unless you mean to gate them.
 		auth {
-			user alice g1:fLqSrE0lzzk48NrZ4KlRU/GJmVQuJTteCYqHgZuYNXcXmJ2h8Mc9cZ35xLIXhZMA # caddy janus-auth-hash → paste
-			ttl 8h # sliding idle timeout; a session idle longer signs in again
+			users {
+				alice g1:fLqSrE0lzzk48NrZ4KlRU/GJmVQuJTteCYqHgZuYNXcXmJ2h8Mc9cZ35xLIXhZMA # caddy janus-auth-hash → paste
+			}
+			ttl 8h # host-wide sliding idle; default 8h
+			gate / { # whole site; door /auth
+				alice
+			}
 		}
 	}
 }
@@ -186,15 +183,19 @@ api.example.com {
 	}
 }
 
-# Notes — site users REPLACE the global set (carol opens this door;
-# alice does not), and the site ttl overrides the global default. The
-# per-request check is real: a session signed in on example.com does not
-# pass here unless this block's user set contains that user.
+# Notes — site auth { … } replaces the global config (carol only; alice
+# cannot open this door). A session from example.com does not pass here
+# unless carol is in this site's users and the winning gate allow list.
 notes.example.com {
 	janus {
 		auth {
-			user carol g1:W4bIofWe/+90BoGMrOOJ0rO9+hgfM58AACwlmoiVSpI+wqjVZD0q+gD4oc4ZRwHR
+			users {
+				carol g1:W4bIofWe/+90BoGMrOOJ0rO9+hgfM58AACwlmoiVSpI+wqjVZD0q+gD4oc4ZRwHR
+			}
 			ttl 30m
+			gate / {
+				carol
+			}
 		}
 	}
 }

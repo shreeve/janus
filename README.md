@@ -136,7 +136,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 3 | **cache** | Site-scoped micro-cache + request coalescing on the data plane | [`capability-microcache`](docs/20260720-033201-capability-microcache.md) |
 | 4 | **hub** | Per-app WebSocket fan-out terminated at the edge; tenants observe and steer over HTTP | [`capability-hub`](docs/20260720-162350-hub-design.md) |
 | 5 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS, and the read-only status front door | [`capability-mdns`](docs/20260722-034619-capability-mdns.md) |
-| 6 | **auth** | Edge authentication wall for auth-less apps: one `/auth` URL, cookie sessions in memory, `Remote-User` injection | [`capability-auth`](docs/20260722-134812-capability-auth.md) |
+| 6 | **auth** | URL-prefix gates for auth-less apps: shared users, per-gate allow lists, host-wide session, `Remote-User` strip-and-inject | [`capability-auth`](docs/20260728-160734-capability-auth.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -208,7 +208,7 @@ curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 
 ### 6. auth
 
-An admission wall in front of tenant apps that have no login story of their own: enable `auth` with `user <name> g1:…` lines (minted by `caddy janus-auth-hash`) and every request needs a valid session — browsers are redirected to the one reserved URL `/auth` (login form signed out; status + sign-out page signed in), everything else answers 401. What passes carries `Remote-User: <name>`; the app never sees a password, a hash, or a live session token. Sessions live in memory: a config reload keeps them, a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
+URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `caddy janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: a config reload keeps them, a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
 
 ```bash
 ./bin/caddy janus-auth-hash                 # mint a g1 credential (password prompted, never argv)
@@ -266,7 +266,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
       "cache": { "enabled": true, "ttl": "1s" },
       "hub": { "enabled": true, "path": "/hub", "max_conns": 4096 },
       "mdns": { "name": "janus.local" },
-      "auth": { "enabled": true, "users": [{ "name": "alice", "credential": "g1:…" }], "ttl": "8h" },
+      "auth": { "enabled": true, "replace": true, "users": [{ "name": "alice", "credential": "g1:…" }], "gates": [{ "prefix": "/", "allow": ["alice"] }], "ttl": "8h" },
       "heartbeat_ttl": "15s"
     },
     "http": {
@@ -313,8 +313,8 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `mdns_config.go` | `mdns` directive: parse, provision, validation |
 | `mdns.html` | Embedded status page (self-contained; zero external resources) |
 | `control_mdns.go` | mDNS control surface (`GET /1.0/mdns`) |
-| `auth.go` | Auth wall: pooled sessions, throttle, CSRF, the `/auth` state machine |
-| `auth_config.go` | `auth` directive: parse, cascade, g1 codec, site table |
+| `auth.go` | Auth wall: gates, pooled sessions, throttle ladder, CSRF, login doors |
+| `auth_config.go` | `auth` directive: users, gates, parse, cascade, g1 codec, site table |
 | `auth_cmd.go` | `caddy janus-auth-hash` credential minter |
 | `auth.html` | Embedded login/status page (self-contained; zero external resources) |
 | `control_auth.go` | Auth control surface (`GET /1.0/auth`, session list + revocation) |
