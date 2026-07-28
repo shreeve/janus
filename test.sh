@@ -2899,17 +2899,15 @@ EOF
 
 # --- cases: auth ---------------------------------------------------------------
 #
-# Capability 6: the edge authentication wall
-# (docs/20260722-134812-capability-auth.md "Acceptance sketch"). The
-# instruments: the authup fixture upstream records every request's
-# Remote-User and Cookie (the tenant-side truth: strip-and-inject is
-# observable only there) and answers hub bridge POSTs 204; /1.0/auth is
-# the Janus-side truth. Root-Caddyfile sites: authwall.ripdev.io
-# inherits the global wall whole (alice, bob); authcarol.ripdev.io
-# replaces the user set (carol only, ttl 30m); every other site carries
-# `auth off`. Passwords are the dev-fixture ones committed beside the
-# blobs in the Caddyfile. The group runs under the heartbeat caddy
-# (TTL 2s): the fixture heartbeats its app.
+# Capability 6: URL-prefix gates for auth-less apps
+# (docs/20260728-160734-capability-auth.md). The instruments: the authup
+# fixture upstream records every request's Remote-User and Cookie
+# (tenant-side truth) and answers hub bridge POSTs 204; /1.0/auth is the
+# Janus-side truth. Root-Caddyfile sites: authwall.ripdev.io inherits
+# global users + gates (`gate /` + `gate /one/`); authcarol.ripdev.io
+# replaces with carol-only `gate /`; every other site carries `auth off`.
+# Passwords are the fixture ones beside the blobs. The group runs under
+# the heartbeat caddy (TTL 2s).
 
 AUTH_WALL="https://authwall.ripdev.io"
 AUTH_CAROL="https://authcarol.ripdev.io"
@@ -3195,19 +3193,62 @@ case_auth_wrong_creds() {
 
 case_auth_throttle() {
 	local t0 i
+	# Clear the per-IP aggregate left by earlier failure cases (all curl
+	# traffic shares 127.0.0.1 as the client key).
+	auth_login "$AUTH_WALL" alice sesame-alice
 	t0="$(auth_stat throttled)"
-	# 5 failures for one (IP, user) pair fill the window…
-	for i in 1 2 3 4 5; do
+	# Ladder: fails 1–3 immediate 401; 4th sets a 10s wait…
+	for i in 1 2 3 4; do
 		auth_attempt "$AUTH_WALL" eve bad-guess
 		eq "$REPLY_CODE" "401"
 	done
-	# …and the 6th answers 429 + Retry-After before any argon2 work.
+	# …and the next try during the wait answers 429 (wait does not increment).
 	auth_attempt "$AUTH_WALL" eve bad-guess
 	eq "$REPLY_CODE" "429"
 	ok "-n \"$(auth_hdr retry-after)\"" "429 carries no Retry-After"
 	ok "$(auth_stat throttled) -gt $t0" "throttled counter unmoved"
-	# Pair isolation: an unthrottled pair still signs in.
+	# Aggregate wait blocks every username from this client key; wait it out,
+	# then a successful login clears the aggregate for later cases.
+	sleep 11
 	auth_login "$AUTH_WALL" alice sesame-alice
+}
+
+case_auth_prefix_gates() {
+	# Longest prefix: bob may pass gate / but not /one/.
+	auth_login "$AUTH_WALL" bob sesame-bob
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$AUTH_SESSION"
+	eq "$REPLY_CODE" "200"
+	auth_req GET "$AUTH_WALL/one/x" -H "Cookie: __Host-janus=$AUTH_SESSION" -H 'Accept: text/html'
+	eq "$REPLY_CODE" "302"
+	eq "$(auth_hdr location)" "/one/auth?to=%2Fone%2Fx"
+	# alice signs in once at /one/auth and passes both gates that list her.
+	auth_req GET "$AUTH_WALL/one/auth"
+	eq "$REPLY_CODE" "200"
+	local csrf
+	csrf="$(auth_csrf_from_body)"
+	auth_req POST "$AUTH_WALL/one/auth" -H "Cookie: __Host-janus_csrf=$csrf" \
+		--data-urlencode "csrf=$csrf" \
+		--data-urlencode "user=alice" --data-urlencode "password=sesame-alice"
+	eq "$REPLY_CODE" "303"
+	eq "$(auth_hdr location)" "/one/"
+	AUTH_SESSION="$(auth_setcookie __Host-janus)"
+	ok "-n \"$AUTH_SESSION\"" "prefix-gate login minted no session"
+	auth_req GET "$AUTH_WALL/one/x" -H "Cookie: __Host-janus=$AUTH_SESSION"
+	eq "$REPLY_CODE" "200"
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$AUTH_SESSION"
+	eq "$REPLY_CODE" "200"
+	# larry may use /one/ but not gate /.
+	auth_req GET "$AUTH_WALL/one/auth"
+	csrf="$(auth_csrf_from_body)"
+	auth_req POST "$AUTH_WALL/one/auth" -H "Cookie: __Host-janus_csrf=$csrf" \
+		--data-urlencode "csrf=$csrf" \
+		--data-urlencode "user=larry" --data-urlencode "password=sesame-larry"
+	eq "$REPLY_CODE" "303"
+	AUTH_SESSION="$(auth_setcookie __Host-janus)"
+	auth_req GET "$AUTH_WALL/one/y" -H "Cookie: __Host-janus=$AUTH_SESSION"
+	eq "$REPLY_CODE" "200"
+	auth_req GET "$AUTH_WALL/" -H "Cookie: __Host-janus=$AUTH_SESSION" -H 'Accept: text/html'
+	eq "$REPLY_CODE" "302"
 }
 
 case_auth_ping_open() {
@@ -3278,12 +3319,12 @@ case_auth_cache_bypass() {
 }
 
 case_auth_cascade_users() {
-	# Site users REPLACE global users: alice's credentials fail on the
+	# Site auth { … } replaces global: alice's credentials fail on the
 	# carol-only site (same generic 401)…
 	auth_attempt "$AUTH_CAROL" alice sesame-alice
 	eq "$REPLY_CODE" "401"
 	# …and alice's LIVE SESSION from authwall is unauthenticated there —
-	# authorization is per request, not a login-time filter.
+	# authorization is per request against the site's users + gates.
 	auth_login "$AUTH_WALL" alice sesame-alice
 	auth_req GET "$AUTH_CAROL/" -H "Cookie: __Host-janus=$AUTH_SESSION" -H 'Accept: text/html'
 	eq "$REPLY_CODE" "302"
@@ -3317,10 +3358,13 @@ case_auth_reload_revokes_removed_user() {
 	auth_login "$AUTH_WALL" bob sesame-bob
 	local bob_session="$AUTH_SESSION" r0
 	r0="$(auth_stat reload_revoked)"
-	# Reload with bob's user line deleted: his session dies at Start.
+	# Reload with bob's users-table line deleted: his session dies at Start.
 	local stripped="$ROOT/.test-auth-stripped-caddyfile"
-	sed '/user bob /d' "$ROOT/Caddyfile" >"$stripped"
-	if grep -qF 'user bob' "$stripped"; then
+	sed '/[[:space:]]bob[[:space:]]*g1:/d' "$ROOT/Caddyfile" >"$stripped"
+	# gate / still lists bob — drop bob from the allow list too.
+	sed -i.bak 's/alice bob/alice/' "$stripped"
+	rm -f "$stripped.bak"
+	if grep -qE '[[:space:]]bob[[:space:]]*g1:' "$stripped"; then
 		echo "failed to strip bob from the reload config" >&2
 		return 1
 	fi
@@ -3358,6 +3402,10 @@ case_auth_hot_revoke() {
 	capi GET /1.0/auth/sessions
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"user":"alice"'
+	json_has "$REPLY_BODY" '"host":"authwall.ripdev.io"'
+	json_has "$REPLY_BODY" '"gates"'
+	json_has "$REPLY_BODY" '"/"'
+	json_has "$REPLY_BODY" '"/one/"'
 	json_has "$REPLY_BODY" '"age_ms"'
 	json_has "$REPLY_BODY" '"idle_ms"'
 	local id
@@ -3412,6 +3460,9 @@ https://mint.ripdev.io:8444 {
 	janus {
 		auth {
 			user mint $blob
+			gate / {
+				mint
+			}
 		}
 	}
 }
@@ -3420,6 +3471,9 @@ http://authdead.ripdev.io:8081 {
 	janus {
 		auth {
 			user mint $blob
+			gate / {
+				mint
+			}
 		}
 	}
 }
@@ -3457,7 +3511,7 @@ EOF
 		auth_req GET "http://authdead.ripdev.io:8081/anything"
 		eq "$REPLY_CODE" "421"
 		json_has "$REPLY_BODY" 'auth requires HTTPS'
-		json_has "$(cat "$log")" 'guarded site reached over plain HTTP'
+		json_has "$(cat "$log")" 'site with auth reached over plain HTTP'
 	} || rc=1
 	kill "$pid" 2>/dev/null || true
 	rm -rf "$dir"
@@ -3477,7 +3531,7 @@ case_auth_restart_wipes() {
 }
 
 case_auth_zero_users_lockout() {
-	# An enabled wall with an empty resolved user set refuses to load.
+	# Bare auth on with nothing to inherit refuses to load.
 	local dir
 	dir="$(mktemp -d /tmp/janus-auth-lockout.XXXXXX)"
 	cat >"$dir/Caddyfile" <<'EOF'
@@ -3496,12 +3550,40 @@ site.example.com {
 EOF
 	local out
 	if out="$("$CADDY_BIN" validate --config "$dir/Caddyfile" --adapter caddyfile 2>&1)"; then
-		echo "caddy validate accepted an enabled wall with zero users" >&2
+		echo "caddy validate accepted bare auth on with no config to inherit" >&2
 		rm -rf "$dir"
 		return 1
 	fi
-	if ! printf '%s' "$out" | grep -qF 'resolved user set is empty'; then
-		printf 'lockout error does not name the empty set: %q' "$out" >&2
+	if ! printf '%s' "$out" | grep -qE 'no auth config to inherit|incomplete'; then
+		printf 'lockout error is imprecise: %q' "$out" >&2
+		rm -rf "$dir"
+		return 1
+	fi
+	# Users without gates also refuse (needs a site handler to provision).
+	local blob
+	blob="g1:k5KZV0T/LsQSaqny8ZZa0hPn/FRGIDueMSt91JUSJzVp2TcbSNt3Hdo0RuBCMWV1"
+	cat >"$dir/Caddyfile" <<EOF
+{
+	admin off
+	skip_install_trust
+	janus {
+		auth {
+			user alice $blob
+		}
+	}
+}
+
+site.example.com {
+	janus
+}
+EOF
+	if out="$("$CADDY_BIN" validate --config "$dir/Caddyfile" --adapter caddyfile 2>&1)"; then
+		echo "caddy validate accepted auth with users but zero gates" >&2
+		rm -rf "$dir"
+		return 1
+	fi
+	if ! printf '%s' "$out" | grep -qF 'incomplete'; then
+		printf 'zero-gates error is imprecise: %q' "$out" >&2
 		rm -rf "$dir"
 		return 1
 	fi
@@ -3517,9 +3599,11 @@ case_auth_parse_rejections() {
 		'auth on off'
 		"auth off {
 			user alice $blob
+			gate / { alice }
 		}"
 		'auth
 		auth off'
+		'auth { }'
 		'auth { bogus 1 }'
 		'auth { user }'
 		'auth { user alice }'
@@ -3541,6 +3625,19 @@ case_auth_parse_rejections() {
 			ttl 2h
 		}"
 		'auth { ttl 1h { nested } }'
+		"auth {
+			user alice $blob
+			gate /one/ { bob }
+		}"
+		"auth {
+			user alice $blob
+			gate /one/ { alice }
+			gate /one/auth/ { alice }
+		}"
+		"auth {
+			user alice $blob
+			gate ones { alice }
+		}"
 	)
 	for bad in "${cases[@]}"; do
 		cat >"$dir/Caddyfile" <<EOF
@@ -3759,7 +3856,8 @@ test "CSRF enforced on both POST arms" case_auth_csrf_enforced
 test "spoofed Remote-User dies at the edge" case_auth_spoof_dies
 test "fixation dead: pre-set cookie never honored, never re-minted" case_auth_fixation_dead
 test "wrong password and unknown user → one generic 401" case_auth_wrong_creds
-test "throttle: 6th failure → 429 + Retry-After; pairs isolated" case_auth_throttle
+test "throttle ladder: 5th try during wait → 429; pairs isolated" case_auth_throttle
+test "prefix gates: longest prefix, allow lists, one host session" case_auth_prefix_gates
 test "/ping answers unauthenticated on the guarded site" case_auth_ping_open
 test "/auth exact match only: neighbors proxy" case_auth_exact_match_only
 test "WS upgrade: 401 without a session; bridge carries Remote-User with one" case_auth_ws

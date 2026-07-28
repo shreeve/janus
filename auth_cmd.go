@@ -28,9 +28,9 @@ func init() {
 		Long: `
 Mints a credential for the janus auth capability: argon2id under the
 fixed g1 constants (m=64MiB, t=2, p=1; 16-byte salt, 32-byte key),
-printed as one g1:<base64> line for a Caddyfile user line:
+printed as one g1:<base64> line for a Caddyfile users entry:
 
-	user alice g1:…
+	users { alice g1:… }
 
 On a terminal the password is prompted without echo and confirmed.
 With stdin redirected, exactly one line is read as the password:

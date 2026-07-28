@@ -17,9 +17,9 @@
 // directive frames out per app while the tenant observes and steers
 // over plain HTTP, mdns (5) advertises janus.local plus registered
 // .local app hosts over multicast DNS and serves the read-only status
-// front door, and auth (6) is the edge authentication wall for
-// auth-less apps: exact /auth, in-memory sessions, and Remote-User
-// injection on everything that passes.
+// front door, and auth (6) is URL-prefix gates for auth-less apps:
+// shared users, per-gate allow lists, one host-wide session, and
+// Remote-User strip-and-inject on fall-through.
 //
 // The registry, data plane, and hub state live in pooled process state
 // (caddy.UsagePool), so a Caddy config reload never drops a registration
