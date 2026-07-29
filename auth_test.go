@@ -217,7 +217,9 @@ func TestAuthParseLegalLines(t *testing.T) {
 				bob ` + blob + `
 			}
 			ttl 2h
-			gate /one/ { alice bob }
+			gate /one/ {
+				alice bob
+			}
 		}`), func(a *AuthSettings) bool {
 			return a != nil && *a.Enabled && a.Replace && len(a.Users) == 2 &&
 				len(a.Gates) == 1 && a.Gates[0].Prefix == "/one/" &&
@@ -225,22 +227,37 @@ func TestAuthParseLegalLines(t *testing.T) {
 		}},
 		{"top-level user + gate /", jblock(`auth {
 			user alice ` + blob + `
-			gate / { alice }
+			gate / {
+				alice
+			}
 		}`), func(a *AuthSettings) bool {
 			return a != nil && a.Replace && len(a.Users) == 1 &&
 				a.Gates[0].Prefix == "/" && a.Gates[0].Allow[0] == "alice"
 		}},
 		{"normalize trailing slash", jblock(`auth {
 			user alice ` + blob + `
-			gate /foo/bar/baz { alice }
+			gate /foo/bar/baz {
+				alice
+			}
 		}`), func(a *AuthSettings) bool {
 			return a != nil && a.Gates[0].Prefix == "/foo/bar/baz/"
 		}},
 		{"lowercased username", jblock(`auth {
 			user ALICE ` + blob + `
-			gate / { ALICE }
+			gate / {
+				ALICE
+			}
 		}`), func(a *AuthSettings) bool {
 			return a != nil && a.Users[0].Name == "alice" && a.Gates[0].Allow[0] == "alice"
+		}},
+		{"allow list names on one line inside the block", jblock(`auth {
+			user alice ` + blob + `
+			user bob ` + blob + `
+			gate /one/ {
+				alice bob
+			}
+		}`), func(a *AuthSettings) bool {
+			return a != nil && len(a.Gates) == 1 && len(a.Gates[0].Allow) == 2
 		}},
 	}
 	for _, tc := range cases {
@@ -1004,5 +1021,149 @@ func TestAuthRespStripReservedCookies(t *testing.T) {
 	got := rec.Header().Values("Set-Cookie")
 	if len(got) != 1 || got[0] != "sid=ok" {
 		t.Fatalf("Set-Cookie after strip: %v", got)
+	}
+}
+
+// --- gaps pinned after the prefix-gate landing --------------------------------------
+
+func TestGateDoorAndShadowing(t *testing.T) {
+	if got := gateDoor("/"); got != "/auth" {
+		t.Fatalf("gate / door = %q, want /auth", got)
+	}
+	if got := gateDoor("/one/"); got != "/one/auth" {
+		t.Fatalf("gate /one/ door = %q", got)
+	}
+	ok := []AuthGate{{Prefix: "/one/", Allow: []string{"alice"}}, {Prefix: "/two/", Allow: []string{"alice"}}}
+	if err := checkLoginDoorShadowing(ok); err != nil {
+		t.Fatal(err)
+	}
+	shadow := []AuthGate{{Prefix: "/one/", Allow: []string{"alice"}}, {Prefix: "/one/auth/", Allow: []string{"alice"}}}
+	if err := checkLoginDoorShadowing(shadow); err == nil {
+		t.Fatal("expected shadowing error for /one/ + /one/auth/")
+	}
+}
+
+func TestGatesForUser(t *testing.T) {
+	users := map[string]string{
+		"alice": testCred(t, "open-sesame"),
+		"larry": testCred(t, "larry-pass"),
+	}
+	ah := newAuthHarnessGates(t, users, 0, map[string][]string{
+		"/one/":         {"alice", "larry"},
+		"/foo/bar/baz/": {"larry"},
+	})
+	got := ah.h.authCfg.gatesForUser("larry")
+	if len(got) != 2 || got[0] != "/foo/bar/baz/" || got[1] != "/one/" {
+		t.Fatalf("larry gates = %v, want [/foo/bar/baz/ /one/]", got)
+	}
+	if got := ah.h.authCfg.gatesForUser("alice"); len(got) != 1 || got[0] != "/one/" {
+		t.Fatalf("alice gates = %v", got)
+	}
+}
+
+func TestAuthLarryCrossGateAndSignOut(t *testing.T) {
+	users := map[string]string{
+		"alice": testCred(t, "open-sesame"),
+		"bob":   testCred(t, "open-sesame"),
+		"larry": testCred(t, "larry-pass"),
+	}
+	ah := newAuthHarnessGates(t, users, 0, map[string][]string{
+		"/one/":         {"alice", "larry"},
+		"/foo/bar/baz/": {"bob", "larry"},
+	})
+
+	session := ah.loginDoor(t, "app.test", "/one/auth", "larry", "larry-pass")
+	for _, p := range []string{"/one/x", "/foo/bar/baz/y"} {
+		r := authReq(http.MethodGet, "app.test", p, nil)
+		r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+		if _, out := ah.wall(t, r); out == nil {
+			t.Fatalf("larry blocked on %s after one login", p)
+		}
+	}
+
+	// Sign out via the other gate's door clears the host session.
+	r := authReq(http.MethodGet, "app.test", "/foo/bar/baz/auth", nil)
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	rr, _ := ah.wall(t, r)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "larry") {
+		t.Fatalf("status on /foo door: %d %s", rr.Code, rr.Body.String())
+	}
+	csrf := authCookieValue(rr, authCSRFCookieName)
+	out := authReq(http.MethodPost, "app.test", "/foo/bar/baz/auth",
+		strings.NewReader(url.Values{"csrf": {csrf}}.Encode()),
+		"Content-Type", "application/x-www-form-urlencoded")
+	out.AddCookie(&http.Cookie{Name: authCSRFCookieName, Value: csrf})
+	out.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	rr2, _ := ah.wall(t, out)
+	if rr2.Code != http.StatusSeeOther {
+		t.Fatalf("sign-out: %d", rr2.Code)
+	}
+	for _, p := range []string{"/one/x", "/foo/bar/baz/y"} {
+		r := authReq(http.MethodGet, "app.test", p, nil)
+		r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+		if _, fall := ah.wall(t, r); fall != nil {
+			t.Fatalf("after sign-out, %s still fell through", p)
+		}
+	}
+}
+
+func TestSafeToRejectsOutsideMintingGate(t *testing.T) {
+	users := map[string]string{"alice": testCred(t, "open-sesame")}
+	ah := newAuthHarnessGates(t, users, 0, map[string][]string{
+		"/one/": {"alice"},
+	})
+	csrf := ah.getLoginForm(t, "app.test", "/one/auth")
+	rr := ah.postFormDoor(t, "app.test", "/one/auth", url.Values{
+		"csrf": {csrf}, "user": {"alice"}, "password": {"open-sesame"},
+		"to": {"/elsewhere"},
+	}, csrf)
+	if loc := rr.Header().Get("Location"); loc != "/one/" {
+		t.Fatalf("to outside minting gate → %q, want /one/", loc)
+	}
+}
+
+func TestAuthBanSurvivesOtherUsernameSuccess(t *testing.T) {
+	st, err := newAuthStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	st.now = func() time.Time { return now }
+	gate, client := "/one/", "198.51.100.7"
+	waits := []time.Duration{0, 0, 0, authThrottleWait4, authThrottleWait5, authThrottleWait6}
+	for i := 0; i < 7; i++ {
+		st.throttleFail(gate, client, "alice")
+		if i < len(waits) && waits[i] > 0 {
+			now = now.Add(waits[i] + time.Second)
+		}
+	}
+	if blocked, _ := st.throttleCheck(gate, client, "alice"); !blocked {
+		t.Fatal("expected ban")
+	}
+	// Successful login for bob must not lift the client ban.
+	st.throttleClear(gate, client, "bob")
+	if blocked, retry := st.throttleCheck(gate, client, "alice"); !blocked || retry < time.Hour {
+		t.Fatalf("ban cleared by other user success: blocked=%v retry=%v", blocked, retry)
+	}
+	if blocked, _ := st.throttleCheck(gate, client, "carol"); !blocked {
+		t.Fatal("client ban must still block a third username")
+	}
+}
+
+func TestAuthIdleTTLEndsHostWide(t *testing.T) {
+	users := map[string]string{"larry": testCred(t, "larry-pass")}
+	ttl := 50 * time.Millisecond
+	ah := newAuthHarnessGates(t, users, ttl, map[string][]string{
+		"/one/":         {"larry"},
+		"/foo/bar/baz/": {"larry"},
+	})
+	session := ah.loginDoor(t, "app.test", "/one/auth", "larry", "larry-pass")
+	time.Sleep(80 * time.Millisecond)
+	for _, p := range []string{"/one/x", "/foo/bar/baz/y"} {
+		r := authReq(http.MethodGet, "app.test", p, nil)
+		r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+		if _, out := ah.wall(t, r); out != nil {
+			t.Fatalf("idle session still admitted on %s", p)
+		}
 	}
 }
