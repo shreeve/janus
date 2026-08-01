@@ -140,6 +140,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 6 | **auth** | URL-prefix gates for auth-less apps: shared users, per-gate allow lists, host-wide session, `Remote-User` strip-and-inject | [`capability-auth`](docs/20260728-160734-capability-auth.md) |
 | 7 | **files** | Registered ordered roots, SPA shells, and directory-gated site hosts | [`capability-files`](docs/20260730-202700-capability-files.md) |
 | 8 | **sendfile** | Always-on final upstream `X-Sendfile` transformation with validators, ranges, cache recording, and streaming | [`capability-sendfile`](docs/20260801-020600-capability-sendfile.md) |
+| 9 | **browse** | Navigable hot and cold roots, content-addressed themes, bounded extension renderers, and process leases | [`capability-browse`](docs/20260801-042700-capability-browse.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -151,7 +152,7 @@ xcaddy build \
   --output ./bin/caddy
 
 go test ./...
-./test.sh   # 13 groups, 163 cases, ending with files and sendfile
+./test.sh   # 14 groups, 168 cases, ending with browse
 ```
 
 ### 1. ping (data plane)
@@ -246,7 +247,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.3.0 \
+  --with github.com/shreeve/janus@v1.4.0 \
   --output ./caddy
 ```
 

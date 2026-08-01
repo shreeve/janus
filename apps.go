@@ -63,6 +63,7 @@ type AppRecord struct {
 	Upstreams []Upstream   `json:"upstreams"`
 	Site      *SitePolicy  `json:"site,omitempty"`
 	Files     *FilesPolicy `json:"files,omitempty"`
+	Lease     string       `json:"lease"`
 
 	// BridgePath is the tenant's hub bridge endpoint (optional; empty =
 	// hub handshakes answer 503). Cold config never carries it: which URL
@@ -265,10 +266,11 @@ func mintIDSuffix() (string, error) {
 // appRegistry is the memory-only apps registry. Janus restart → empty;
 // tenants re-register. Reads share the lock; writes are exclusive.
 type appRegistry struct {
-	mu    sync.RWMutex
-	apps  map[string]*AppRecord // id → record
-	hosts map[string]string     // host → holding app id (first-wins)
-	sites map[string]string     // pattern suffix → holding app id
+	mu     sync.RWMutex
+	apps   map[string]*AppRecord // id → record
+	hosts  map[string]string     // host → holding app id (first-wins)
+	sites  map[string]string     // pattern suffix → holding app id
+	browse *browseSupervisor
 
 	// purge is the cache's purge hook, invoked (outside the registry
 	// lock, after the generation bump inside it) on every purge event:
@@ -333,14 +335,18 @@ func (r *appRegistry) purgeApp(id string) {
 }
 
 func (r *appRegistry) create(name string, hosts []string, bridgePath string) (AppRecord, error) {
-	return r.createWithPolicyAndUpstreams(name, hosts, nil, nil, bridgePath, nil)
+	return r.createWithLease(name, hosts, nil, nil, bridgePath, nil, "heartbeat")
 }
 
 func (r *appRegistry) createWithPolicy(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgePath string) (AppRecord, error) {
-	return r.createWithPolicyAndUpstreams(name, hosts, site, files, bridgePath, nil)
+	return r.createWithLease(name, hosts, site, files, bridgePath, nil, "heartbeat")
 }
 
 func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgePath string, upstreams []Upstream) (AppRecord, error) {
+	return r.createWithLease(name, hosts, site, files, bridgePath, upstreams, "heartbeat")
+}
+
+func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgePath string, upstreams []Upstream, lease string) (AppRecord, error) {
 	if err := validateAppName(name); err != nil {
 		return AppRecord{}, err
 	}
@@ -369,6 +375,18 @@ func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, 
 	if err := validateUpstreams(upstreams); err != nil {
 		return AppRecord{}, err
 	}
+	if lease != "heartbeat" && lease != "process" {
+		return AppRecord{}, errBadRequest(`lease must be "heartbeat" or "process"`)
+	}
+	if files != nil && files.Shell == "" {
+		allBrowse := len(files.Roots) > 0
+		for _, root := range files.Roots {
+			allBrowse = allBrowse && root.Browse
+		}
+		if !allBrowse || len(files.ProxyFirst) != 0 || len(upstreams) != 0 {
+			return AppRecord{}, errBadRequest("files.shell may be omitted only for a terminal browse-only registration")
+		}
+	}
 
 	r.mu.Lock()
 	claims := append([]string(nil), hosts...)
@@ -378,6 +396,10 @@ func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, 
 		}
 	}
 	for _, h := range claims {
+		if r.browse != nil && r.browse.coldClaim(h) {
+			r.mu.Unlock()
+			return AppRecord{}, errHostConflict(h, "cold:"+h)
+		}
 		if holder, taken := r.hosts[h]; taken {
 			r.mu.Unlock()
 			return AppRecord{}, errHostConflict(h, holder)
@@ -388,6 +410,12 @@ func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, 
 		}
 	}
 	if suffix != "" {
+		if r.browse != nil {
+			if host, conflict := r.browse.coldHostUnderSuffix(suffix); conflict {
+				r.mu.Unlock()
+				return AppRecord{}, errSiteConflict("site pattern suffix %q conflicts with cold host %q", suffix, host)
+			}
+		}
 		if held, holder, conflict := r.patternConflictLocked(suffix); conflict {
 			r.mu.Unlock()
 			return AppRecord{}, errSiteConflict("site pattern suffix %q conflicts with suffix %q held by app %q", suffix, held, holder)
@@ -414,8 +442,11 @@ func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, 
 	// Registration counts as the first heartbeat.
 	rec := &AppRecord{
 		ID: id, Name: name, Hosts: hosts, Upstreams: append([]Upstream{}, upstreams...),
-		Site: site, Files: files, BridgePath: bridgePath,
-		heartbeatAt: r.now(), gen: new(atomic.Uint64), siteSuffix: suffix,
+		Site: site, Files: files, BridgePath: bridgePath, Lease: lease,
+		gen: new(atomic.Uint64), siteSuffix: suffix,
+	}
+	if lease == "heartbeat" {
+		rec.heartbeatAt = r.now()
 	}
 	// Host claim is a purge event (docs/20260720-033201-capability-microcache.md
 	// O5): bump the (fresh) generation in the same critical section as the
@@ -475,6 +506,14 @@ func (r *appRegistry) patternConflictLocked(suffix string) (held, holder string,
 		}
 	}
 	return "", "", false
+}
+
+func (r *appRegistry) hostConflictLocked(host string) string {
+	if holder := r.hosts[host]; holder != "" {
+		return holder
+	}
+	_, holder, _ := r.patternClaimForExactLocked(host)
+	return holder
 }
 
 func siteDirectoryExists(dir, site string) bool {
@@ -642,6 +681,10 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgePath
 			return AppRecord{}, errBadRequest("a site-pattern app does not support hosts PATCH")
 		}
 		for _, h := range newHosts {
+			if r.browse != nil && r.browse.coldClaim(h) {
+				r.mu.Unlock()
+				return AppRecord{}, errHostConflict(h, "cold:"+h)
+			}
 			if holder, taken := r.hosts[h]; taken && holder != id {
 				r.mu.Unlock()
 				return AppRecord{}, errHostConflict(h, holder)
@@ -712,6 +755,10 @@ func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error)
 		r.mu.Unlock()
 		return AppRecord{}, errUnknownApp(id)
 	}
+	if rec.Files != nil && rec.Files.Shell == "" && len(ups) != 0 {
+		r.mu.Unlock()
+		return AppRecord{}, errBadRequest("terminal browse-only registration cannot publish upstreams")
+	}
 	rec.Upstreams = append([]Upstream{}, ups...)
 	rec.gen.Add(1)
 	out := rec.clone()
@@ -731,6 +778,9 @@ func (r *appRegistry) heartbeat(id string) error {
 	if !ok {
 		return errUnknownApp(id)
 	}
+	if rec.Lease == "process" {
+		return errBadRequest("process lease does not accept heartbeats")
+	}
 	rec.heartbeatAt = r.now()
 	return nil
 }
@@ -745,6 +795,9 @@ func (r *appRegistry) sweepExpired() []string {
 	r.mu.Lock()
 	var reaped []string
 	for id, rec := range r.apps {
+		if rec.Lease == "process" {
+			continue
+		}
 		if now.Sub(rec.heartbeatAt) > r.ttl {
 			for _, h := range rec.Hosts {
 				delete(r.hosts, h)
@@ -856,7 +909,9 @@ func (r *appRegistry) heartbeatAges() map[string]time.Duration {
 	defer r.mu.RUnlock()
 	out := make(map[string]time.Duration, len(r.apps))
 	for id, rec := range r.apps {
-		out[id] = now.Sub(rec.heartbeatAt)
+		if rec.Lease == "heartbeat" {
+			out[id] = now.Sub(rec.heartbeatAt)
+		}
 	}
 	return out
 }
@@ -872,6 +927,7 @@ type appCreateRequest struct {
 	Files      json.RawMessage `json:"files"`
 	Upstreams  json.RawMessage `json:"upstreams"`
 	BridgePath string          `json:"bridge_path"`
+	Lease      json.RawMessage `json:"lease"`
 }
 
 type appPatchRequest struct {
@@ -974,8 +1030,19 @@ func (a *App) handleAppsCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rec, err := a.appsRegistry().createWithPolicyAndUpstreams(
-		req.Name, hosts, site, files, req.BridgePath, upstreams,
+	lease := "heartbeat"
+	if req.Lease != nil {
+		if string(req.Lease) == "null" {
+			writeAPIError(w, errBadRequest("lease must not be null"))
+			return
+		}
+		if err := json.Unmarshal(req.Lease, &lease); err != nil || lease == "" {
+			writeAPIError(w, errBadRequest(`lease must be "heartbeat" or "process"`))
+			return
+		}
+	}
+	rec, err := a.appsRegistry().createWithLease(
+		req.Name, hosts, site, files, req.BridgePath, upstreams, lease,
 	)
 	if err != nil {
 		writeAPIError(w, err)

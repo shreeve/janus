@@ -58,8 +58,8 @@ func TestFilesCaddyfileFormsAndCascade(t *testing.T) {
 func TestFilesPolicyValidation(t *testing.T) {
 	good := &FilesPolicy{
 		Roots: []FilesRoot{
-			{Path: "/srv/sites/{site}/public", Class: filesClassLive},
-			{Path: "/srv/common", Class: filesClassMutable},
+			{Path: "/srv/sites/{site}/public", Cache: filesCacheNever},
+			{Path: "/srv/common", Cache: filesCacheRevalidate},
 		},
 		ProxyFirst: []string{"/api", "/admin"},
 		Shell:      "/srv/app/index.html",
@@ -69,23 +69,23 @@ func TestFilesPolicyValidation(t *testing.T) {
 	}
 	bad := []*FilesPolicy{
 		{Shell: "/x"},
-		{Roots: []FilesRoot{{Path: "/x", Class: filesClassMutable}}},
-		{Roots: []FilesRoot{{Path: "relative", Class: filesClassMutable}}, Shell: "/x"},
-		{Roots: []FilesRoot{{Path: "/a//b", Class: filesClassMutable}}, Shell: "/x"},
-		{Roots: []FilesRoot{{Path: "/a/../b", Class: filesClassMutable}}, Shell: "/x"},
-		{Roots: []FilesRoot{{Path: "/a", Class: filesClassMutable}, {Path: "/a", Class: filesClassLive}}, Shell: "/x"},
-		{Roots: []FilesRoot{{Path: "/a/{other}", Class: filesClassMutable}}, Shell: "/x"},
-		{Roots: []FilesRoot{{Path: "/a", Class: "forever"}}, Shell: "/x"},
-		{Roots: []FilesRoot{{Path: "/a", Class: filesClassMutable}}, Shell: "/x/{site}"},
-		{Roots: []FilesRoot{{Path: "/a", Class: filesClassMutable}}, Shell: "/x", ProxyFirst: []string{"/api", "/api/v1"}},
-		{Roots: []FilesRoot{{Path: "/a", Class: filesClassMutable}}, Shell: "/x", ProxyFirst: []string{"/api/"}},
+		{Roots: []FilesRoot{{Path: "/x", Cache: filesCacheRevalidate}}},
+		{Roots: []FilesRoot{{Path: "relative", Cache: filesCacheRevalidate}}, Shell: "/x"},
+		{Roots: []FilesRoot{{Path: "/a//b", Cache: filesCacheRevalidate}}, Shell: "/x"},
+		{Roots: []FilesRoot{{Path: "/a/../b", Cache: filesCacheRevalidate}}, Shell: "/x"},
+		{Roots: []FilesRoot{{Path: "/a", Cache: filesCacheRevalidate}, {Path: "/a", Cache: filesCacheNever}}, Shell: "/x"},
+		{Roots: []FilesRoot{{Path: "/a/{other}", Cache: filesCacheRevalidate}}, Shell: "/x"},
+		{Roots: []FilesRoot{{Path: "/a", Cache: "sometimes"}}, Shell: "/x"},
+		{Roots: []FilesRoot{{Path: "/a", Cache: filesCacheRevalidate}}, Shell: "/x/{site}"},
+		{Roots: []FilesRoot{{Path: "/a", Cache: filesCacheRevalidate}}, Shell: "/x", ProxyFirst: []string{"/api", "/api/v1"}},
+		{Roots: []FilesRoot{{Path: "/a", Cache: filesCacheRevalidate}}, Shell: "/x", ProxyFirst: []string{"/api/"}},
 	}
 	for i, policy := range bad {
 		if _, err := normalizeFilesPolicy(policy, true); err == nil {
 			t.Errorf("bad policy %d accepted: %+v", i, policy)
 		}
 	}
-	if _, err := normalizeFilesPolicy(&FilesPolicy{Roots: []FilesRoot{{Path: "/x/{site}", Class: filesClassLive}}, Shell: "/x"}, false); err == nil {
+	if _, err := normalizeFilesPolicy(&FilesPolicy{Roots: []FilesRoot{{Path: "/x/{site}", Cache: filesCacheNever}}, Shell: "/x"}, false); err == nil {
 		t.Fatal("{site} root without site accepted")
 	}
 }
@@ -182,7 +182,8 @@ func TestFilesHTTPStrictPresenceAndNestedFields(t *testing.T) {
 		`{"name":"x","hosts":["x.test"],"site":{"host":"{site}.x.test","dir":"/tmp"}}`,
 		`{"name":"x","site":{"host":"{site}.x.test","dir":"/tmp","extra":1}}`,
 		`{"name":"x","hosts":["x.test"],"files":null}`,
-		`{"name":"x","hosts":["x.test"],"files":{"roots":[{"path":"/tmp","class":"mutable"}],"shell":"/tmp/index","extra":1}}`,
+		`{"name":"x","hosts":["x.test"],"files":{"roots":[{"path":"/tmp","class":"x"}],"shell":"/tmp/index"}}`,
+		`{"name":"x","hosts":["x.test"],"files":{"roots":[{"path":"/tmp","cache":"revalidate"}],"shell":"/tmp/index","extra":1}}`,
 	} {
 		code, _ := doJSON(t, mux, http.MethodPost, "/1.0/apps", body)
 		if code != http.StatusBadRequest {
@@ -209,8 +210,8 @@ func TestServeFilesOrderShellValidatorsHeadAndRange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(second, "styles.css"), []byte("body{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	versioned := t.TempDir()
-	if err := os.WriteFile(filepath.Join(versioned, "asset.js"), []byte("export{}"), 0o644); err != nil {
+	forever := t.TempDir()
+	if err := os.WriteFile(filepath.Join(forever, "asset.js"), []byte("export{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	shell := filepath.Join(t.TempDir(), "index.html")
@@ -219,9 +220,9 @@ func TestServeFilesOrderShellValidatorsHeadAndRange(t *testing.T) {
 	}
 	rec := AppRecord{Files: &FilesPolicy{
 		Roots: []FilesRoot{
-			{Path: first, Class: filesClassLive},
-			{Path: second, Class: filesClassMutable},
-			{Path: versioned, Class: filesClassVersioned},
+			{Path: first, Cache: filesCacheNever},
+			{Path: second, Cache: filesCacheRevalidate},
+			{Path: forever, Cache: filesCacheForever},
 		},
 		ProxyFirst: []string{"/api"},
 		Shell:      shell,
@@ -266,21 +267,21 @@ func TestServeFilesOrderShellValidatorsHeadAndRange(t *testing.T) {
 	}
 	out, _ = serve(http.MethodGet, "http://app.test/source.rip", "", nil)
 	if got := out.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("live rip Cache-Control=%q", got)
+		t.Fatalf("never Cache-Control=%q", got)
 	}
 	if got := out.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
 		t.Fatalf("rip Content-Type=%q", got)
 	}
 	out, _ = serve(http.MethodGet, "http://app.test/styles.css", "", nil)
 	if got := out.Header().Get("Cache-Control"); got != "no-cache" {
-		t.Fatalf("mutable Cache-Control=%q", got)
+		t.Fatalf("revalidate Cache-Control=%q", got)
 	}
 	if got := out.Header().Get("Content-Type"); got != "text/css; charset=utf-8" {
 		t.Fatalf("css Content-Type=%q", got)
 	}
 	out, _ = serve(http.MethodGet, "http://app.test/asset.js", "", nil)
 	if got := out.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
-		t.Fatalf("versioned Cache-Control=%q", got)
+		t.Fatalf("forever Cache-Control=%q", got)
 	}
 	out, handled = serve(http.MethodGet, "http://app.test/missing.bin", "", nil)
 	if !handled || out.Code != http.StatusNotFound {
@@ -300,7 +301,7 @@ func TestServeFilesOrderShellValidatorsHeadAndRange(t *testing.T) {
 
 func TestServeFilesRejectsUnsafeRequestPaths(t *testing.T) {
 	h := new(Handler)
-	rec := AppRecord{Files: &FilesPolicy{Roots: []FilesRoot{{Path: t.TempDir(), Class: filesClassMutable}}, Shell: filepath.Join(t.TempDir(), "index")}}
+	rec := AppRecord{Files: &FilesPolicy{Roots: []FilesRoot{{Path: t.TempDir(), Cache: filesCacheRevalidate}}, Shell: filepath.Join(t.TempDir(), "index")}}
 	for _, target := range []string{
 		"http://app.test/a%2fb",
 		"http://app.test/a%5cb",
@@ -342,7 +343,7 @@ func TestFilesMissingAssetNeverRingsDoorbell(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	rec, err := reg.createWithPolicy("app", []string{"app.test"}, nil, &FilesPolicy{
-		Roots: []FilesRoot{{Path: t.TempDir(), Class: filesClassMutable}},
+		Roots: []FilesRoot{{Path: t.TempDir(), Cache: filesCacheRevalidate}},
 		Shell: filepath.Join(t.TempDir(), "missing-shell.html"),
 	}, "")
 	if err != nil {
@@ -395,7 +396,7 @@ func TestSiteClaimsReleaseOnHeartbeatReapAndClonesAreDeep(t *testing.T) {
 		Dir:     dir,
 		Aliases: map[string]string{"local.test": "ola"},
 	}, &FilesPolicy{
-		Roots:      []FilesRoot{{Path: "/srv/{site}", Class: filesClassLive}},
+		Roots:      []FilesRoot{{Path: "/srv/{site}", Cache: filesCacheNever}},
 		ProxyFirst: []string{"/api"},
 		Shell:      "/srv/index.html",
 	}, "")
@@ -500,8 +501,8 @@ func BenchmarkServeFiles(b *testing.B) {
 	}
 	h := new(Handler)
 	rec := AppRecord{Files: &FilesPolicy{Roots: []FilesRoot{
-		{Path: first, Class: filesClassMutable},
-		{Path: second, Class: filesClassMutable},
+		{Path: first, Cache: filesCacheRevalidate},
+		{Path: second, Cache: filesCacheRevalidate},
 	}, Shell: shell}}
 	for _, bench := range []struct {
 		name   string

@@ -1,4 +1,4 @@
-# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth, (7) files, (8) sendfile
+# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth, (7) files, (8) sendfile, (9) browse
 #
 # *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
 #
@@ -121,6 +121,30 @@
 			}
 		}
 		files # 7) site-scoped default: on; hot registrations carry roots and shell
+		browse { # 9) navigable roots; embedded theme + bounded fixture renderers
+			timeout 10s
+			max_output 8MB
+			concurrency 4
+			renderer .md {
+				command cat {file}
+				content_type "text/plain; charset=utf-8"
+			}
+			renderer .hold {
+				command /bin/sh -c "sleep 1; cat \"$1\"" janus {file}
+				content_type "text/plain; charset=utf-8"
+				timeout 3s
+				concurrency 1
+			}
+			renderer .slow {
+				command /bin/sh -c "sleep 2; cat \"$1\"" janus {file}
+				content_type "text/plain; charset=utf-8"
+				timeout 100ms
+			}
+			renderer .fail {
+				command /usr/bin/false {file}
+				content_type "text/plain; charset=utf-8"
+			}
+		}
 	}
 }
 
@@ -165,6 +189,7 @@ api.ripdev.io {
 		hub off
 		auth off
 		files off
+		browse off
 	}
 }
 
@@ -174,6 +199,27 @@ filesoff.ripdev.io {
 	janus {
 		auth off
 		files off
+		browse off
+	}
+}
+
+# Browse: explicit off beats the inherited global default while files stay on.
+browseoff.ripdev.io {
+	import ripdev_tls
+	janus {
+		auth off
+		browse off
+	}
+}
+
+# Browse: persistent exact-host root, outside the hot app registry.
+coldbrowse.ripdev.io {
+	import ripdev_tls
+	janus {
+		auth off
+		browse {
+			root {$JANUS_BROWSE_COLD_ROOT:/tmp/janus-browse-cold}
+		}
 	}
 }
 

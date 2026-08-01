@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -37,6 +38,10 @@ type Handler struct {
 	// site when non-nil.
 	Files *bool `json:"files,omitempty"`
 
+	// Browse overrides the global browse admission default and may carry
+	// persistent cold roots for this exact-host site.
+	Browse *BrowseSiteSettings `json:"browse,omitempty"`
+
 	app    *App
 	dp     *dataPlane
 	logger *zap.Logger
@@ -52,6 +57,10 @@ type Handler struct {
 	// authCfg is the site's effective auth configuration; nil when the
 	// effective auth is off, so the bypass path costs one nil check.
 	authCfg *authSite
+
+	browseEnabled bool
+	browseCfg     *BrowseSettings
+	coldRoots     []BrowseRoot
 }
 
 // CaddyModule returns the Caddy module information.
@@ -86,12 +95,16 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if err := h.provisionAuth(); err != nil {
 		return err
 	}
+	if err := h.provisionBrowse(); err != nil {
+		return err
+	}
 	h.logger.Info("janus handler ready",
 		zap.Bool("ping", h.pingEnabled()),
 		zap.Bool("cache", h.cacheCfg != nil),
 		zap.Bool("hub", h.hubCfg != nil),
 		zap.Bool("auth", h.authCfg != nil),
 		zap.Bool("files", h.filesEnabled()),
+		zap.Bool("browse", h.browseEnabled),
 	)
 	return nil
 }
@@ -109,7 +122,47 @@ func (h *Handler) filesEnabled() bool {
 	if h.app != nil {
 		global = h.app.Files
 	}
+	if h.Files == nil && global == nil && h.browseEnabled {
+		return true
+	}
 	return cascadeBool(h.Files, global, false)
+}
+
+func (h *Handler) provisionBrowse() error {
+	var global *BrowseSettings
+	if h.app != nil {
+		global = h.app.Browse
+	}
+	enabled := global != nil
+	if h.Browse != nil && h.Browse.Enabled != nil {
+		enabled = *h.Browse.Enabled
+	}
+	h.browseEnabled = enabled
+	if enabled && h.app != nil {
+		h.browseCfg = h.app.browseRuntime
+	}
+	if h.Browse != nil {
+		for _, root := range h.Browse.Roots {
+			if err := validateBrowseRoot(root.Path, root.Cache); err != nil {
+				return fmt.Errorf("janus browse: %w", err)
+			}
+		}
+		h.coldRoots = append([]BrowseRoot(nil), h.Browse.Roots...)
+	}
+	if len(h.coldRoots) > 0 && !enabled {
+		return fmt.Errorf("janus browse: cold roots require effective browse on")
+	}
+	if enabled {
+		var globalFiles *bool
+		if h.app != nil {
+			globalFiles = h.app.Files
+		}
+		explicitOff := h.Files != nil && !*h.Files || h.Files == nil && globalFiles != nil && !*globalFiles
+		if explicitOff {
+			return fmt.Errorf("janus browse: effective browse on conflicts with effective files off")
+		}
+	}
+	return nil
 }
 
 // ServeHTTP handles admitted requests: on the plain-HTTP port with the
@@ -152,18 +205,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return nil
 	}
+	assetRequest := h.browseEnabled && strings.HasPrefix(r.URL.EscapedPath(), browseAssetPrefix)
 	var host string
 	var rec AppRecord
-	if h.dp != nil {
-		host = normalizeHostHeader(r.Host)
-		var ok bool
-		rec, ok = h.dp.registry.resolveRequestHost(r.Host)
-		if !ok {
-			return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
+	host = normalizeHostHeader(r.Host)
+	// startBrowse validates and reserves the exact hosts that can activate a
+	// cold-root handler. The active handler is therefore the routing claim;
+	// serving must not depend on a generation-start side table mutating the
+	// same handler pointer Caddy later installs.
+	if h.browseEnabled && len(h.coldRoots) > 0 {
+		if assetRequest {
+			h.serveBrowseAsset(w, r)
+			return nil
 		}
-		if rec.siteValue != "" {
-			r.Header.Set(ripSiteHeader, rec.siteValue)
-		}
+		return h.serveColdBrowse(w, r)
+	}
+	if h.dp == nil {
+		return caddyhttp.Error(http.StatusNotFound, nil)
+	}
+	var ok bool
+	rec, ok = h.dp.registry.resolveRequestHost(r.Host)
+	if !ok {
+		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
+	}
+	if rec.siteValue != "" {
+		r.Header.Set(ripSiteHeader, rec.siteValue)
+	}
+	if assetRequest {
+		h.serveBrowseAsset(w, r)
+		return nil
 	}
 	// Hub interception (before cache and upstream selection, after ping):
 	// the hub claims upgrades to its path only — a non-upgrade request to
@@ -171,19 +241,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if h.hubCfg != nil && r.URL.Path == h.hubCfg.path && websocket.IsWebSocketUpgrade(r) {
 		return h.serveHub(w, r)
 	}
-	if h.dp != nil {
-		if h.filesEnabled() && rec.Files != nil {
-			handled, err := h.serveFiles(w, r, rec)
-			if handled || err != nil {
-				return err
-			}
+	if (h.filesEnabled() || h.browseEnabled) && rec.Files != nil {
+		handled, err := h.serveFiles(w, r, rec)
+		if handled || err != nil {
+			return err
 		}
-		if h.cacheCfg != nil {
-			return h.serveCache(w, r)
-		}
-		return h.dp.serveResolved(w, r, host, rec)
 	}
-	return caddyhttp.Error(http.StatusNotFound, nil)
+	if h.cacheCfg != nil {
+		return h.serveCache(w, r)
+	}
+	return h.dp.serveResolved(w, r, host, rec)
 }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
@@ -244,6 +311,15 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return err
 			}
 			h.Files = files
+		case "browse":
+			if h.Browse != nil {
+				return d.Err("duplicate browse directive in the same block")
+			}
+			browse, err := parseSiteBrowseDirective(d)
+			if err != nil {
+				return err
+			}
+			h.Browse = browse
 		case "control":
 			return d.Err("control is process-wide; configure it in the global janus options block")
 		case "mdns":

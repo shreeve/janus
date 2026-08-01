@@ -796,7 +796,7 @@ func BenchmarkSendfileDelivery(b *testing.B) {
 	registerApp(b, reg, "bench.test", Upstream{Path: socket})
 	h := new(Handler)
 	rec := AppRecord{Files: &FilesPolicy{
-		Roots: []FilesRoot{{Path: dir, Class: filesClassMutable}},
+		Roots: []FilesRoot{{Path: dir, Cache: filesCacheRevalidate}},
 		Shell: name,
 	}}
 

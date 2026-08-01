@@ -102,6 +102,15 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return err
 				}
 				a.Files = files
+			case "browse":
+				if a.Browse != nil {
+					return d.Err("duplicate browse directive in the same block")
+				}
+				browse, err := parseGlobalBrowseDirective(d)
+				if err != nil {
+					return err
+				}
+				a.Browse = browse
 			case "heartbeat_ttl":
 				if a.HeartbeatTTL != 0 {
 					return d.Err("duplicate heartbeat_ttl directive")

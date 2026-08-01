@@ -1088,14 +1088,14 @@ func TestMdnsStatusShapeAdmissionLaunchAndConflict(t *testing.T) {
 	root := t.TempDir()
 	shell := filepath.Join(t.TempDir(), "index.html")
 	appOnly, err := app.appsReg.createWithPolicy("apponly", []string{"apponly.test"}, nil, &FilesPolicy{
-		Roots: []FilesRoot{{Path: root, Class: filesClassMutable}},
+		Roots: []FilesRoot{{Path: root, Cache: filesCacheRevalidate}},
 		Shell: shell,
 	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	full, err := app.appsReg.createWithPolicy("full", []string{"full.test"}, nil, &FilesPolicy{
-		Roots:      []FilesRoot{{Path: root, Class: filesClassLive}},
+		Roots:      []FilesRoot{{Path: root, Cache: filesCacheNever}},
 		ProxyFirst: []string{"/PRIVATE-api"},
 		Shell:      shell,
 	}, "")
@@ -1110,7 +1110,7 @@ func TestMdnsStatusShapeAdmissionLaunchAndConflict(t *testing.T) {
 		Dir:     filepath.Join(t.TempDir(), "SECRET-site-dir"),
 		Aliases: map[string]string{"launch.local": "tenant"},
 	}, &FilesPolicy{
-		Roots: []FilesRoot{{Path: filepath.Join(t.TempDir(), "SECRET-root"), Class: filesClassMutable}},
+		Roots: []FilesRoot{{Path: filepath.Join(t.TempDir(), "SECRET-root"), Cache: filesCacheRevalidate}},
 		Shell: filepath.Join(t.TempDir(), "SECRET-shell.html"),
 	}, "")
 	if err != nil {

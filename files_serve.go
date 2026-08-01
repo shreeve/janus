@@ -121,17 +121,7 @@ func (h *Handler) serveFiles(w http.ResponseWriter, r *http.Request, rec AppReco
 		http.NotFound(w, r)
 		return true, nil
 	}
-	relative := strings.TrimPrefix(requestPath, "/")
-	if relative == "" {
-		relative = "."
-	}
-	for _, configuredRoot := range rec.Files.Roots {
-		rootPath := strings.ReplaceAll(configuredRoot.Path, "{site}", rec.siteValue)
-		if serveRootedFile(w, r, rootPath, relative, requestPath, configuredRoot.Class) {
-			return true, nil
-		}
-	}
-	if acceptsHTML(r.Header.Get("Accept")) && serveAbsoluteFile(w, r, rec.Files.Shell) {
+	if h.serveBrowseRoots(w, r, requestPath, hotBrowseRoots(rec.Files.Roots, rec.siteValue), rec.Files.Shell, true) {
 		return true, nil
 	}
 	http.NotFound(w, r)
@@ -172,16 +162,16 @@ func serveAbsoluteFile(w http.ResponseWriter, r *http.Request, name string) bool
 	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
-	serveOpenedFile(w, r, file, info, name, filesClassGenerated)
+	serveOpenedFile(w, r, file, info, name, filesCacheRevalidate)
 	return true
 }
 
-func serveOpenedFile(w http.ResponseWriter, r *http.Request, file *os.File, info os.FileInfo, name, class string) {
+func serveOpenedFile(w http.ResponseWriter, r *http.Request, file *os.File, info os.FileInfo, name, cache string) {
 	ext := strings.ToLower(filepath.Ext(name))
-	switch {
-	case class == filesClassLive && ext == ".rip":
+	switch cache {
+	case filesCacheNever:
 		w.Header().Set("Cache-Control", "no-store")
-	case class == filesClassVersioned:
+	case filesCacheForever:
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	default:
 		w.Header().Set("Cache-Control", "no-cache")
