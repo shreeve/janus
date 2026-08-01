@@ -582,7 +582,7 @@ func (a *mdnsAdvertiser) desiredLocked(cfg *mdnsConfig) map[string]*mdnsEntry {
 	}
 	newSkipped := map[string]bool{}
 	for _, rec := range a.registry.list() {
-		for _, h := range rec.Hosts {
+		for _, h := range rec.concreteHosts() {
 			switch {
 			case mdnsAdvertisableHost(h):
 				e := &mdnsEntry{name: h, app: rec.ID, typ: mdnsTypeAppHost, port: 443}
@@ -1063,6 +1063,7 @@ func (a *App) mdnsServePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) mdnsServeStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, a.mdnsStatusSnapshot())
 }
 
@@ -1073,7 +1074,7 @@ func (a *App) mdnsServeStatus(w http.ResponseWriter, r *http.Request) {
 // deliberately adds it. Upstream socket paths and bridge_path never
 // appear — counts and health only.
 
-type mdnsStatusUpstreams struct {
+type mdnsStatusWorkers struct {
 	Total   int `json:"total"`
 	Healthy int `json:"healthy"`
 }
@@ -1094,14 +1095,33 @@ type mdnsStatusHub struct {
 	Channels int `json:"channels"`
 }
 
+type mdnsStatusAlias struct {
+	Host string `json:"host"`
+	Site string `json:"site"`
+}
+
+type mdnsStatusLaunch struct {
+	Host          string `json:"host"`
+	URL           string `json:"url,omitempty"`
+	MDNS          string `json:"mdns"`
+	EffectiveName string `json:"effective_name,omitempty"`
+}
+
 type mdnsStatusApp struct {
-	ID             string              `json:"id"`
-	Name           string              `json:"name"`
-	Hosts          []string            `json:"hosts"`
-	Upstreams      mdnsStatusUpstreams `json:"upstreams"`
-	HeartbeatAgeMS int64               `json:"heartbeat_age_ms"`
-	Cache          mdnsStatusCache     `json:"cache"`
-	Hub            mdnsStatusHub       `json:"hub"`
+	ID             string             `json:"id"`
+	Name           string             `json:"name"`
+	Shape          string             `json:"shape"`
+	Hosts          []string           `json:"hosts"`
+	SitePattern    string             `json:"site_pattern"`
+	Aliases        []mdnsStatusAlias  `json:"aliases"`
+	Files          bool               `json:"files"`
+	API            bool               `json:"api"`
+	Admission      string             `json:"admission"`
+	Workers        mdnsStatusWorkers  `json:"workers"`
+	HeartbeatAgeMS int64              `json:"heartbeat_age_ms"`
+	Cache          mdnsStatusCache    `json:"cache"`
+	Hub            mdnsStatusHub      `json:"hub"`
+	Launch         []mdnsStatusLaunch `json:"launch"`
 }
 
 type mdnsStatusSnapshot struct {
@@ -1135,6 +1155,16 @@ func (a *App) mdnsStatusSnapshot() mdnsStatusSnapshot {
 		}
 		out.Advertised = append(out.Advertised, name)
 	}
+	advertisedByApp := map[string]map[string]mdnsAdvertisedEntry{}
+	for _, entry := range adv.entries {
+		if entry.App == "" {
+			continue
+		}
+		if advertisedByApp[entry.App] == nil {
+			advertisedByApp[entry.App] = map[string]mdnsAdvertisedEntry{}
+		}
+		advertisedByApp[entry.App][entry.Name] = entry
+	}
 
 	ages := a.appsReg.heartbeatAges()
 	cacheStats := a.cache.snapshot()
@@ -1153,17 +1183,69 @@ func (a *App) mdnsStatusSnapshot() mdnsStatusSnapshot {
 		app := mdnsStatusApp{
 			ID:             rec.ID,
 			Name:           rec.Name,
-			Hosts:          rec.Hosts,
+			Hosts:          append([]string{}, rec.Hosts...),
+			SitePattern:    "",
+			Aliases:        []mdnsStatusAlias{},
+			Launch:         []mdnsStatusLaunch{},
 			HeartbeatAgeMS: ages[rec.ID].Milliseconds(),
 		}
+		app.Files = rec.Files != nil
+		app.API = rec.Files == nil || len(rec.Files.ProxyFirst) > 0
+		switch {
+		case app.Files && app.API:
+			app.Shape = "full"
+		case app.Files:
+			app.Shape = "app-only"
+		default:
+			app.Shape = "api-only"
+		}
+		switch {
+		case !app.API:
+			app.Admission = "none"
+		case len(rec.Upstreams) == 0:
+			app.Admission = "empty"
+		case len(rec.Upstreams) == 1 && rec.Upstreams[0].Doorbell:
+			app.Admission = "doorbell"
+		default:
+			app.Admission = "workers"
+		}
+		if rec.Site != nil {
+			app.SitePattern = rec.Site.Host
+			for host, site := range rec.Site.Aliases {
+				app.Aliases = append(app.Aliases, mdnsStatusAlias{Host: host, Site: site})
+			}
+			sort.Slice(app.Aliases, func(i, j int) bool { return app.Aliases[i].Host < app.Aliases[j].Host })
+		}
 		if a.dp != nil {
-			app.Upstreams.Total, app.Upstreams.Healthy = a.dp.upstreamHealth(rec.Upstreams)
+			workers := make([]Upstream, 0, len(rec.Upstreams))
+			for _, upstream := range rec.Upstreams {
+				if !upstream.Doorbell {
+					workers = append(workers, upstream)
+				}
+			}
+			app.Workers.Total, app.Workers.Healthy = a.dp.upstreamHealth(workers)
 		}
 		if b := cacheStats.Apps[rec.ID]; b != nil {
 			app.Cache = mdnsStatusCache{Hits: b.Hits, Misses: b.Misses, Coalesced: b.Coalesced}
 		}
 		if b := hubStats.Apps[rec.ID]; b != nil {
 			app.Hub = mdnsStatusHub{Conns: b.Conns, Channels: b.Channels}
+		}
+		for _, host := range rec.concreteHosts() {
+			target := mdnsStatusLaunch{Host: host, MDNS: "not-applicable"}
+			if mdnsAdvertisableHost(host) {
+				target.MDNS = "not-advertised"
+				if entry, ok := advertisedByApp[rec.ID][host]; ok {
+					target.MDNS = entry.State
+					target.EffectiveName = entry.Effective
+					if entry.State == mdnsStateAnnounced {
+						target.URL = "https://" + host + "/"
+					}
+				}
+			} else {
+				target.URL = "https://" + host + "/"
+			}
+			app.Launch = append(app.Launch, target)
 		}
 		out.Apps = append(out.Apps, app)
 	}

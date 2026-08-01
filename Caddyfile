@@ -1,4 +1,4 @@
-# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth
+# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth, (7) files
 #
 # *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
 #
@@ -51,6 +51,7 @@
 #   catchall   *.ripdev.io   → inherit on (default tuning, origin same)
 #   api.ripdev.io            → explicit off (plain HTTP API site)
 #   hubany.ripdev.io         → origin any (token-authenticated non-browser clients)
+#   hubdirect.ripdev.io      → direct mode: no worker bridge, empty upstreams legal
 #   hubten/hubtwenty         → max_conns 10 / 20 (per-app floor = 10 when
 #                              one app claims both)
 #
@@ -119,6 +120,7 @@
 				alice larry
 			}
 		}
+		files # 7) site-scoped default: on; hot registrations carry roots and shell
 	}
 }
 
@@ -162,6 +164,16 @@ api.ripdev.io {
 		cache off
 		hub off
 		auth off
+		files off
+	}
+}
+
+# Files: explicit off beats the inherited global on.
+filesoff.ripdev.io {
+	import ripdev_tls
+	janus {
+		auth off
+		files off
 	}
 }
 
@@ -183,6 +195,18 @@ hubany.ripdev.io {
 	import ripdev_tls
 	janus {
 		hub {
+			origin any
+		}
+		auth off
+	}
+}
+
+# Hub: direct edge transport — origin/auth/caps stay active; no worker bridge.
+hubdirect.ripdev.io {
+	import ripdev_tls
+	janus {
+		hub {
+			mode direct
 			origin any
 		}
 		auth off

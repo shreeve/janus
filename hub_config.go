@@ -18,6 +18,7 @@ import (
 
 // Built-in defaults.
 const (
+	hubDefaultMode        = "bridge"
 	hubDefaultPath        = "/hub"
 	hubDefaultMaxConns    = 4096
 	hubDefaultMaxFrame    = int64(64 << 10)
@@ -35,6 +36,10 @@ type HubSettings struct {
 	// Sites may override the global default; explicit off beats an
 	// inherited on.
 	Enabled *bool `json:"enabled,omitempty"`
+
+	// Mode selects tenant-observed bridge admission or edge-only direct
+	// admission. Default: bridge.
+	Mode *string `json:"mode,omitempty"`
 
 	// Path is the WebSocket endpoint path; only upgrade requests to it
 	// are intercepted. Must start with "/" and contain no "?" or "#".
@@ -63,6 +68,7 @@ type HubSettings struct {
 
 // hubSite is one site's effective hub configuration after cascade.
 type hubSite struct {
+	mode        string
 	path        string
 	maxConns    int
 	maxFrame    int64
@@ -103,6 +109,15 @@ func parseHubDirective(d *caddyfile.Dispenser) (*HubSettings, error) {
 		}
 		seen[sub] = true
 		switch sub {
+		case "mode":
+			val, err := oneDirectiveArg(d, "hub", sub)
+			if err != nil {
+				return nil, err
+			}
+			if val != "bridge" && val != "direct" {
+				return nil, d.Errf("hub mode: want bridge or direct, got %q", val)
+			}
+			hs.Mode = &val
 		case "path":
 			val, err := oneDirectiveArg(d, "hub", sub)
 			if err != nil {
@@ -224,6 +239,9 @@ func (h *Handler) provisionHub() error {
 				return fmt.Errorf("janus hub path: %w", err)
 			}
 		}
+		if hs.Mode != nil && *hs.Mode != "bridge" && *hs.Mode != "direct" {
+			return fmt.Errorf("janus hub mode: want bridge or direct, got %q", *hs.Mode)
+		}
 		if hs.MaxConns != nil && *hs.MaxConns < 1 {
 			return fmt.Errorf("janus hub: max_conns must be a positive integer, got %d", *hs.MaxConns)
 		}
@@ -247,6 +265,7 @@ func (h *Handler) provisionHub() error {
 	}
 
 	cfg := &hubSite{
+		mode:        hubDefaultMode,
 		path:        hubDefaultPath,
 		maxConns:    hubDefaultMaxConns,
 		maxFrame:    hubDefaultMaxFrame,
@@ -261,6 +280,9 @@ func (h *Handler) provisionHub() error {
 			}
 			if hs.Path != nil {
 				cfg.path = *hs.Path
+			}
+			if hs.Mode != nil {
+				cfg.mode = *hs.Mode
 			}
 			if hs.MaxConns != nil {
 				cfg.maxConns = *hs.MaxConns
@@ -428,7 +450,7 @@ func hostMatchesPattern(pattern, host string) bool {
 func (a *App) hubMaxConnsFloor(rec AppRecord) (int, bool) {
 	floor := 0
 	enabled := false
-	for _, host := range rec.Hosts {
+	for _, host := range rec.concreteHosts() {
 		cfg := a.hubSiteFor(host)
 		if cfg == nil {
 			continue

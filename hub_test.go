@@ -11,12 +11,66 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 // --- harness ------------------------------------------------------------------
 
 func newTestAppHub() *appHub {
 	return newHubSet().getOrCreate("app-test01", nil)
+}
+
+func TestHubDirectModeNeedsNoBridgeOrUpstreams(t *testing.T) {
+	reg := newAppRegistry()
+	hubs := newHubSet()
+	st := &janusState{registry: reg, hubs: hubs, dp: newDataPlane(reg, zap.NewNop())}
+	rec, err := reg.create("direct", []string{"app.test"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &hubSite{
+		mode:        "direct",
+		path:        "/hub",
+		maxConns:    4,
+		maxFrame:    hubDefaultMaxFrame,
+		maxChannels: hubDefaultMaxChannels,
+		originAny:   true,
+	}
+	app := &App{
+		state:    st,
+		hubs:     hubs,
+		hubLog:   zap.NewNop(),
+		hubSites: [][]hubSiteEntry{{{patterns: []string{"app.test"}, cfg: cfg}}},
+	}
+	handler := &Handler{app: app, hubCfg: cfg}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Host = "app.test"
+		if err := handler.serveHub(w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, response, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(srv.URL, "http")+"/hub", nil,
+	)
+	if err != nil {
+		if response != nil {
+			t.Fatalf("direct handshake: %v (status %d)", err, response.StatusCode)
+		}
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.WriteMessage(websocket.TextMessage, []byte(`{"+":["/room"],"echo!":{"ok":true}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readWS(t, client)); !strings.Contains(got, `"echo"`) {
+		t.Fatalf("direct delivery=%s", got)
+	}
+	hub := hubs.getOrCreate(rec.ID, nil)
+	if hub.ctr.bridgeSent.Load() != 0 || hub.ctr.bridgeFailed.Load() != 0 {
+		t.Fatalf("direct mode touched bridge counters: sent=%d failed=%d",
+			hub.ctr.bridgeSent.Load(), hub.ctr.bridgeFailed.Load())
+	}
 }
 
 // dialHubConn stands up one real WebSocket pair: the server side becomes a

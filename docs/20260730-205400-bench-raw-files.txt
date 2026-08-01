@@ -1,0 +1,30 @@
+command: go test -run '^$' -bench '^BenchmarkServeFiles$' -benchmem -count=5
+cwd: /Users/shreeve/Data/Code/janus
+date: 2026-07-30
+
+goos: darwin
+goarch: arm64
+pkg: github.com/shreeve/janus
+cpu: Apple M5
+BenchmarkServeFiles/first-root-hit-10         	   62277	     20206 ns/op	    7025 B/op	      37 allocs/op
+BenchmarkServeFiles/first-root-hit-10         	   62767	     20280 ns/op	    7014 B/op	      37 allocs/op
+BenchmarkServeFiles/first-root-hit-10         	   62263	     19296 ns/op	    7014 B/op	      37 allocs/op
+BenchmarkServeFiles/first-root-hit-10         	   62869	     19274 ns/op	    7014 B/op	      37 allocs/op
+BenchmarkServeFiles/first-root-hit-10         	   56340	     20894 ns/op	    7014 B/op	      37 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   42806	     28040 ns/op	    7247 B/op	      43 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   42625	     28065 ns/op	    7246 B/op	      43 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   37026	     30260 ns/op	    7246 B/op	      43 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   38924	     28938 ns/op	    7246 B/op	      43 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   42422	     30988 ns/op	    7246 B/op	      43 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   31906	     37477 ns/op	    7911 B/op	      53 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   32083	     38717 ns/op	    7911 B/op	      53 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   29000	     39006 ns/op	    7911 B/op	      53 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   31776	     37734 ns/op	    7911 B/op	      53 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   31671	     37620 ns/op	    7911 B/op	      53 allocs/op
+BenchmarkServeFiles/static-miss-10            	   64258	     18500 ns/op	    5810 B/op	      25 allocs/op
+BenchmarkServeFiles/static-miss-10            	   64893	     18476 ns/op	    5810 B/op	      25 allocs/op
+BenchmarkServeFiles/static-miss-10            	   64800	     18452 ns/op	    5810 B/op	      25 allocs/op
+BenchmarkServeFiles/static-miss-10            	   64828	     18372 ns/op	    5810 B/op	      25 allocs/op
+BenchmarkServeFiles/static-miss-10            	   60992	     19490 ns/op	    5810 B/op	      25 allocs/op
+PASS
+ok  	github.com/shreeve/janus	24.599s

@@ -3,6 +3,9 @@ package janus
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -15,6 +18,33 @@ func askCode(t *testing.T, mux *http.ServeMux, rawQuery string) int {
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	return rr.Code
+}
+
+func TestTLSAskResolvesPatternAndDirectoryGate(t *testing.T) {
+	mux := newTestControlMux(t)
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "ola"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"name":"sites","site":{"host":"{site}.example.test","dir":` +
+		strconv.Quote(dir) + `,"aliases":{"local.example":"ola"}}}`
+	if code, response := doJSON(t, mux, http.MethodPost, "/1.0/apps", body); code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, response)
+	}
+	for _, domain := range []string{"ola.example.test", "local.example"} {
+		if code := askCode(t, mux, "domain="+domain); code != http.StatusOK {
+			t.Fatalf("%s: want 200, got %d", domain, code)
+		}
+	}
+	if code := askCode(t, mux, "domain=missing.example.test"); code != http.StatusNotFound {
+		t.Fatalf("missing directory: want 404, got %d", code)
+	}
+	if err := os.Remove(filepath.Join(dir, "ola")); err != nil {
+		t.Fatal(err)
+	}
+	if code := askCode(t, mux, "domain=ola.example.test"); code != http.StatusNotFound {
+		t.Fatalf("removed directory: want 404, got %d", code)
+	}
 }
 
 func TestTLSAskAllowedAndUnknown(t *testing.T) {

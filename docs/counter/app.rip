@@ -45,7 +45,7 @@ get '/' -> PAGE   # PAGE is the HTML constant at the bottom of this file
 
 # Act 4: the micro-cache blip. Anonymous GET, storable response; Janus
 # caches it for 1s. Zero cache code here — the capability rides the site.
-get '/now' -> { now: new Date().toISOString() }
+get '/now' -> { now: Date.new().toISOString() }
 
 # Plumbing panel: the tenant reading its own reflection off the control
 # plane. no-store keeps this poll out of the micro-cache by contract.

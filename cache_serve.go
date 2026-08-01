@@ -35,7 +35,7 @@ func (h *Handler) serveCache(w http.ResponseWriter, r *http.Request) error {
 	dp := h.dp
 
 	host := normalizeHostHeader(r.Host)
-	rec, ok := dp.registry.resolveHost(host) // generation snapshot rides rec.genSnap
+	rec, ok := dp.registry.resolveRequestHost(r.Host) // generation snapshot rides rec.genSnap
 	if !ok {
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}

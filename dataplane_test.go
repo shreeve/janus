@@ -1,6 +1,7 @@
 package janus
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -573,6 +574,82 @@ func TestRingSingleFlight(t *testing.T) {
 		if codes[i] != http.StatusOK || bodies[i] != "upstream:fresh" {
 			t.Fatalf("holder %d: want 200 upstream:fresh, got %d %q", i, codes[i], bodies[i])
 		}
+	}
+}
+
+func TestRingWithholdsExpectContinueUntilWorkerReadsBody(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	worker := startUnixHTTP(t, echoUpstream("fresh", nil))
+	release := make(chan struct{})
+	var appID string
+	bell := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		if _, err := reg.setUpstreams(appID, []Upstream{{Path: worker}}); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	appID = registerApp(t, reg, "app.test", Upstream{Path: bell, Doorbell: true})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = dp.serve(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	address := strings.TrimPrefix(srv.URL, "http://")
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := io.WriteString(conn,
+		"POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 7\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	waitFor(t, "expect request holding at doorbell", func() bool { return dp.testWaiters(appID) == 1 })
+	if err := conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := reader.ReadString('\n'); err == nil {
+		t.Fatalf("server solicited body before doorbell release: %q", line)
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("pre-release read: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "HTTP/1.1 100 Continue\r\n" {
+		t.Fatalf("first response after release=%q", line)
+	}
+	if blank, err := reader.ReadString('\n'); err != nil || blank != "\r\n" {
+		t.Fatalf("100 terminator=%q err=%v", blank, err)
+	}
+	if _, err := io.WriteString(conn, "payload"); err != nil {
+		t.Fatal(err)
+	}
+	var response *http.Response
+	for {
+		response, err = http.ReadResponse(reader, &http.Request{Method: http.MethodPost})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusContinue {
+			break
+		}
+		_ = response.Body.Close()
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || string(body) != "received:payload" {
+		t.Fatalf("final response=%d %q", response.StatusCode, body)
 	}
 }
 

@@ -7,7 +7,7 @@
 #   ./bin/caddy validate --config Caddyfile.example --adapter caddyfile
 #
 # Cold vs hot, in one breath: this file admits CAPABILITIES — what a host
-# may do (ping, cache, hub, auth) and where /1.0 listens. The hot /1.0 API wires
+# may do (ping, cache, hub, auth, files) and where /1.0 listens. The hot /1.0 API wires
 # TENANTS — which hosts map to which worker sockets, heartbeats, the hub
 # bridge_path, and publish. Nothing here names an app or a socket; a
 # tenant registers itself against the control plane:
@@ -95,6 +95,7 @@
 		# POST /1.0/apps/{id}/hub/publish — cold admits the capability,
 		# hot wires the tenant. Counters: GET /1.0/hub.
 		hub {
+			mode bridge # bridge requires bridge_path/upstreams; direct performs no worker bridge while retaining origin/auth/caps
 			path /hub # WS endpoint; the hub claims Upgrade requests here only — plain HTTP on the same path flows to the worker
 			max_conns 4096 # per app, not per site — see the floor caveat at ws-small/ws-large below
 			max_frame 64kb # largest client frame; oversize closes 1009. Raising it raises the per-connection memory budget
@@ -145,6 +146,13 @@
 				alice
 			}
 		}
+
+		# 7) files — site-scoped, cascades, built-in off. Hot app
+		# registration supplies ordered roots, worker-first prefixes, and
+		# the SPA shell. Patterned registrations additionally supply
+		# `{site}.suffix`, aliases, and the direct-child directory gate.
+		# Janus strips client Rip-Site and injects the resolved site label.
+		files
 	}
 }
 
@@ -156,6 +164,7 @@
 http://*.local {
 	janus {
 		auth off
+		files off
 	}
 }
 
@@ -180,6 +189,7 @@ api.example.com {
 		cache off
 		hub off
 		auth off
+		files off
 	}
 }
 
@@ -227,6 +237,18 @@ chat.example.com {
 		hub {
 			max_conns 16384
 			origin same admin.example.com
+		}
+		auth off
+	}
+}
+
+# Direct Hub: edge-only connections and fan-out. Empty upstreams and no
+# bridge_path are valid; control-plane publish remains available.
+live.example.com {
+	janus {
+		hub {
+			mode direct
+			origin same
 		}
 		auth off
 	}

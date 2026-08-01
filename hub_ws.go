@@ -13,8 +13,8 @@ import (
 
 // The WebSocket edge (docs/20260720-162350-hub-design.md "Identity and
 // connection lifecycle", "Security"). Connections terminate at Janus; the
-// tenant participates over the HTTP bridge. Client frames execute at the
-// edge — delivery never gates on the bridge.
+// tenant may participate over the HTTP bridge. Direct mode performs no
+// bridge I/O. Client frames execute at the edge in either mode.
 
 var hubUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
@@ -32,7 +32,7 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 
 	// Host resolution runs as always: unknown host → 404, worker untouched.
 	host := normalizeHostHeader(r.Host)
-	rec, ok := st.registry.resolveHost(host)
+	rec, ok := st.registry.resolveRequestHost(r.Host)
 	if !ok {
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
@@ -50,7 +50,7 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	// Hub-enabled site, hub-unready tenant: loud, not a hang.
-	if rec.BridgePath == "" {
+	if cfg.mode == "bridge" && rec.BridgePath == "" {
 		return app.hubUnavailable(w, rec.ID, "app has no registered bridge_path")
 	}
 
@@ -74,13 +74,17 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	// The filtered handshake-header snapshot: frozen at open, replayed on
 	// every bridge POST for the connection's lifetime. Over the cap → 431,
 	// never truncated.
-	snapshot, fits := hubHeaderSnapshot(r.Header)
-	if !fits {
-		hub.releaseSlot()
-		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, "handshake headers exceed the 32 KiB bridge snapshot cap",
-			http.StatusRequestHeaderFieldsTooLarge)
-		return nil
+	snapshot := http.Header{}
+	if cfg.mode == "bridge" {
+		var fits bool
+		snapshot, fits = hubHeaderSnapshot(r.Header)
+		if !fits {
+			hub.releaseSlot()
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "handshake headers exceed the 32 KiB bridge snapshot cap",
+				http.StatusRequestHeaderFieldsTooLarge)
+			return nil
+		}
 	}
 
 	connID, err := mintHubConnID()
@@ -92,7 +96,10 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	// The open bridge: the tenant's admission decision, synchronous, while
 	// the handshake holds unanswered. Nothing is buffered; the socket is
 	// not yet upgraded.
-	res := hubBridgePost(st, host, rec.ID, connID, "open", r.RemoteAddr, snapshot, nil)
+	res := hubBridgeResult{ok: true, status: http.StatusNoContent}
+	if cfg.mode == "bridge" {
+		res = hubBridgePost(st, host, rec.ID, connID, "open", r.RemoteAddr, snapshot, nil)
+	}
 	if !res.ok {
 		hub.releaseSlot()
 		return app.hubUnavailable(w, rec.ID, "open bridge failed: "+res.errMsg)
@@ -140,29 +147,37 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 		c.pongReceived()
 		return nil
 	})
-	c.bridge = newHubBridge(c, st, app.hubLog, cfg.maxFrame)
+	if cfg.mode == "bridge" {
+		c.bridge = newHubBridge(c, st, app.hubLog, cfg.maxFrame)
+	}
 
 	go c.writeLoop()
 	go c.pingLoop()
-	go c.bridge.run()
+	if c.bridge != nil {
+		go c.bridge.run()
+	}
 
 	// A close that began after attachWS but before the bridge existed
 	// could not deliver its close notification; recheck now that the
 	// drainer is running, so the drainer always terminates.
-	select {
-	case <-c.closedCh:
-		c.qmu.Lock()
-		code, reason := c.closeCode, c.closeReason
-		c.qmu.Unlock()
-		c.bridge.notifyClose(code, reason)
-		return nil
-	default:
+	if c.bridge != nil {
+		select {
+		case <-c.closedCh:
+			c.qmu.Lock()
+			code, reason := c.closeCode, c.closeReason
+			c.qmu.Unlock()
+			c.bridge.notifyClose(code, reason)
+			return nil
+		default:
+		}
 	}
 
 	// The tenant's open-response directives execute in the new
 	// connection's context before the inbound reader starts: enrollment
 	// and greeting precede all client frames.
-	c.bridge.processDirectives("open", res)
+	if c.bridge != nil {
+		c.bridge.processDirectives("open", res)
+	}
 
 	go h.hubReadLoop(c)
 	return nil
@@ -222,7 +237,9 @@ func (h *Handler) hubReadLoop(c *hubConn) {
 
 		// Observation: verbatim wire bytes, at-most-once, never gating
 		// the edge execution above.
-		c.bridge.enqueueText(data)
+		if c.bridge != nil {
+			c.bridge.enqueueText(data)
+		}
 	}
 }
 
