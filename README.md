@@ -246,7 +246,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.2.0 \
+  --with github.com/shreeve/janus@v1.3.0 \
   --output ./caddy
 ```
 
