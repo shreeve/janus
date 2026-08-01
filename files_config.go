@@ -1,6 +1,8 @@
 package janus
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net"
 	"path"
@@ -21,20 +23,49 @@ type SitePolicy struct {
 type FilesPolicy struct {
 	Roots      []FilesRoot `json:"roots"`
 	ProxyFirst []string    `json:"proxy_first,omitempty"`
-	Shell      string      `json:"shell"`
+	Shell      string      `json:"shell,omitempty"`
 }
 
-// FilesRoot is one ordered root with a finite response-policy class.
+// FilesRoot is one ordered root with a finite cache policy.
 type FilesRoot struct {
-	Path  string `json:"path"`
-	Class string `json:"class"`
+	Path   string `json:"path"`
+	Cache  string `json:"cache,omitempty"`
+	Browse bool   `json:"browse"`
+}
+
+func (r *FilesRoot) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Path   json.RawMessage `json:"path"`
+		Cache  json.RawMessage `json:"cache"`
+		Browse json.RawMessage `json:"browse"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	if len(raw.Path) != 0 {
+		if bytes.Equal(bytes.TrimSpace(raw.Path), []byte("null")) || json.Unmarshal(raw.Path, &r.Path) != nil {
+			return fmt.Errorf("files root path must be a string")
+		}
+	}
+	if len(raw.Cache) != 0 {
+		if bytes.Equal(bytes.TrimSpace(raw.Cache), []byte("null")) || json.Unmarshal(raw.Cache, &r.Cache) != nil {
+			return fmt.Errorf("files root cache must be a string")
+		}
+	}
+	if len(raw.Browse) != 0 {
+		if bytes.Equal(bytes.TrimSpace(raw.Browse), []byte("null")) || json.Unmarshal(raw.Browse, &r.Browse) != nil {
+			return fmt.Errorf("files root browse must be a boolean")
+		}
+	}
+	return nil
 }
 
 const (
-	filesClassLive      = "live"
-	filesClassGenerated = "generated"
-	filesClassMutable   = "mutable"
-	filesClassVersioned = "versioned"
+	filesCacheNever      = "never"
+	filesCacheRevalidate = "revalidate"
+	filesCacheForever    = "forever"
 )
 
 func parseFilesDirective(d *caddyfile.Dispenser) (*bool, error) {
@@ -141,7 +172,14 @@ func normalizeFilesPolicy(in *FilesPolicy, hasSite bool) (*FilesPolicy, error) {
 		return nil, errBadRequest("files.roots is required and must not be empty")
 	}
 	if in.Shell == "" {
-		return nil, errBadRequest("files.shell is required")
+		for _, root := range in.Roots {
+			if !root.Browse {
+				return nil, errBadRequest("files.shell may be omitted only when every root has browse true")
+			}
+		}
+		if len(in.ProxyFirst) != 0 {
+			return nil, errBadRequest("files.shell may be omitted only when proxy_first is empty")
+		}
 	}
 	out := &FilesPolicy{Roots: make([]FilesRoot, 0, len(in.Roots)), Shell: in.Shell}
 	seenRoots := map[string]bool{}
@@ -149,10 +187,13 @@ func normalizeFilesPolicy(in *FilesPolicy, hasSite bool) (*FilesPolicy, error) {
 		if err := validateConfiguredPath(root.Path, "files.roots.path", hasSite); err != nil {
 			return nil, err
 		}
-		switch root.Class {
-		case filesClassLive, filesClassGenerated, filesClassMutable, filesClassVersioned:
+		if root.Cache == "" {
+			root.Cache = filesCacheRevalidate
+		}
+		switch root.Cache {
+		case filesCacheNever, filesCacheRevalidate, filesCacheForever:
 		default:
-			return nil, errBadRequest("files root %q has invalid class %q (want live, generated, mutable, or versioned)", root.Path, root.Class)
+			return nil, errBadRequest("files root %q has invalid cache %q (want never, revalidate, or forever)", root.Path, root.Cache)
 		}
 		if strings.Contains(root.Path, "{site}") && !hasSite {
 			return nil, errBadRequest("files root %q uses {site} without site", root.Path)
@@ -163,8 +204,10 @@ func normalizeFilesPolicy(in *FilesPolicy, hasSite bool) (*FilesPolicy, error) {
 		seenRoots[root.Path] = true
 		out.Roots = append(out.Roots, root)
 	}
-	if err := validateConfiguredPath(in.Shell, "files.shell", false); err != nil {
-		return nil, err
+	if in.Shell != "" {
+		if err := validateConfiguredPath(in.Shell, "files.shell", false); err != nil {
+			return nil, err
+		}
 	}
 	for _, prefix := range in.ProxyFirst {
 		if err := validateRequestPathString(prefix); err != nil {

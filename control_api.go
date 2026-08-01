@@ -186,6 +186,9 @@ func (a *App) controlMux() *http.ServeMux {
 		mux.HandleFunc("GET "+base+"/1.0/auth/sessions", a.handleAuthSessions)
 		mux.HandleFunc("DELETE "+base+"/1.0/auth/sessions", a.handleAuthSessionsWipe)
 		mux.HandleFunc("DELETE "+base+"/1.0/auth/sessions/{id}", a.handleAuthSessionDelete)
+
+		mux.HandleFunc("GET "+base+"/1.0/browse", a.handleBrowseState)
+		mux.HandleFunc("GET "+base+"/1.0/browse/{$}", a.handleBrowseState)
 	}
 	return mux
 }
@@ -211,6 +214,10 @@ func (a *App) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 	name := normalizeHostHeader(domain)
 	rec, ok := a.appsRegistry().resolveRequestHost(domain)
 	if !ok {
+		if a.state != nil && a.state.browse.coldClaim(name) {
+			writeJSON(w, http.StatusOK, map[string]string{"domain": name, "claim": "cold"})
+			return
+		}
 		writeAPIError(w, &apiError{
 			Status: http.StatusNotFound,
 			Msg:    fmt.Sprintf("domain %q is not a host of any registered app", name),
@@ -231,9 +238,14 @@ func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
 		"ping":        cascadeBool(nil, a.Ping, false),
 		"mdns":        a.Mdns != nil,
 		"auth":        len(a.authEnabledSites()) > 0,
-		"files":       cascadeBool(nil, a.Files, false),
+		"files":       cascadeBool(nil, a.Files, a.Browse != nil),
+		"browse":      a.Browse != nil,
 		"control":     a.controlPublicInfo(),
 	})
+}
+
+func (a *App) handleBrowseState(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.browseStatus())
 }
 
 func (a *App) handleControlHealth(w http.ResponseWriter, r *http.Request) {

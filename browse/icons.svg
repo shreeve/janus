@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="directory" viewBox="0 0 24 24"><path d="M2 5h8l2 2h10v12H2z"/></symbol>
+<symbol id="image" viewBox="0 0 24 24"><path d="M3 4h18v16H3zm3 13h12l-4-5-3 3-2-2z"/></symbol>
+<symbol id="audio" viewBox="0 0 24 24"><path d="M9 18V5l11-2v13a4 4 0 1 1-2-3.46V7L11 8v8a4 4 0 1 1-2 2z"/></symbol>
+<symbol id="video" viewBox="0 0 24 24"><path d="M3 5h13v14H3zm13 5 5-3v10l-5-3z"/></symbol>
+<symbol id="text" viewBox="0 0 24 24"><path d="M5 2h10l4 4v16H5zm3 8h8v2H8zm0 4h8v2H8z"/></symbol>
+<symbol id="archive" viewBox="0 0 24 24"><path d="M5 2h14v20H5zm5 3h4v3h-4zm0 5h4v3h-4z"/></symbol>
+<symbol id="binary" viewBox="0 0 24 24"><path d="M4 3h16v18H4zm3 4h2v4H7zm8 6h2v4h-2z"/></symbol>
+<symbol id="symlink" viewBox="0 0 24 24"><path d="m14 5 5 5-5 5v-3H9a4 4 0 0 0-4 4v3H2v-3a7 7 0 0 1 7-7h5z"/></symbol>
+</defs></svg>

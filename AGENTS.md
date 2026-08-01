@@ -9,7 +9,7 @@ or a WebSocket. Everything is memory-only by contract: a restart
 empties the registry and tenants re-register.
 
 **Era: stewardship.** Feature-complete at v1.0.0 — every build-spec
-box ticked; eight capabilities shipped. Ongoing work is fix,
+box ticked; nine capabilities shipped. Ongoing work is fix,
 harden, measure. New behavior arrives as a capability through the
 proven loop: **design contract → adversarial review → revise →
 implement → pin in tests → measure** (mdns, capability 5, is the
@@ -34,14 +34,14 @@ second).
 
 4. **Capabilities are the unit of product work.** Numbered by landing
    order; the story (ping → control → cache → hub → mdns → auth → files →
-   sendfile → …) never
+   sendfile → browse → …) never
    reorders in docs or `test.sh`. A new one starts at "When adding a
    capability" below — contract doc and adversarial review before code.
 
 5. **Cascade is explicit.**
    - **Process-wide** (control; cache's `max_bytes`/`max_app_share`):
      global `janus { }` only; a site-level occurrence is a parse error.
-   - **Site-scoped** (ping, cache, hub, auth, files): global default → site
+   - **Site-scoped** (ping, cache, hub, auth, files, browse): global default → site
      override; unmentioned inherits; explicit `off` beats inherited
      `on`; built-in default when unset everywhere.
    Document **Cascades: yes/no** on every capability page.
@@ -85,18 +85,20 @@ second).
 | 4 | **hub** | Edge-terminated WebSocket fan-out with the Bam directive grammar; explicit bridge or direct transport, plus control-plane publish (cascades: yes). |
 | 5 | **mdns** | LAN presence: `janus.local` + exact-host/site-alias `.local` names; the redacted, conflict-safe App launch dashboard and canonical hand-off (cascades: no — process-wide). |
 | 6 | **auth** | URL-prefix gates for auth-less apps: shared `users`, per-gate allow lists, host-wide `__Host-janus` session, `Remote-User` strip-and-inject (cascades: yes). |
-| 7 | **files** | Registered ordered roots with fixed response classes, terminal non-API routing, SPA shell, and directory-gated `{site}` admission with trusted `Rip-Site` (cascades: yes). |
+| 7 | **files** | Registered ordered roots with fixed cache policies, terminal non-API routing, SPA shell, and directory-gated `{site}` admission with trusted `Rip-Site` (cascades: yes). |
 | 8 | **sendfile** | Always-on final upstream `X-Sendfile` transformation: application authorization, Janus validators/ranges/cache recording/streaming (cascades: no; configuration: none). |
-| 9+ | next | Future capabilities, each through the loop above. |
+| 9 | **browse** | Navigable hot and cold roots, embedded/custom themes, bounded extension renderers, strict leases, cold-host reservations, and redacted status (cascades: yes). |
+| 10+ | next | Future capabilities, each through the loop above. |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,
-cache, heartbeat, tls, hub, tenant, mdns, auth, files, sendfile.
+cache, heartbeat, tls, hub, tenant, mdns, auth, files, sendfile,
+browse.
 
 ## Architecture (short)
 
 | Plane | Config | Role |
 | --- | --- | --- |
-| **data** | Site `janus` [block] | Admit this host into Janus; site-scoped overrides (ping, cache, hub, auth, files) |
+| **data** | Site `janus` [block] | Admit this host into Janus; site-scoped overrides (ping, cache, hub, auth, files, browse) |
 | **control** | Global `janus { control … }` | Where `/1.0` listens: `internal` / `local` / `public` |
 
 Unknown public hosts → **404**. Registry, data plane, and hubs sit in

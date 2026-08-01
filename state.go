@@ -27,6 +27,7 @@ type janusState struct {
 	dp       *dataPlane
 	mdns     *mdnsAdvertiser
 	auth     *authStore
+	browse   *browseSupervisor
 	logger   *zap.Logger
 }
 
@@ -58,8 +59,10 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 		dp:       newDataPlane(reg, logger.Named("dataplane")),
 		mdns:     newMdnsAdvertiser(reg, logger.Named("mdns")),
 		auth:     auth,
+		browse:   newBrowseSupervisor(),
 		logger:   logger,
 	}
+	reg.browse = st.browse
 	// DELETE and TTL reap tear the app's hub down; PATCH host removal
 	// closes the removed hosts' connections. Wired once — the hub set and
 	// the registry live and die together in this holder. The mdns hook is

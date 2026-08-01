@@ -1,6 +1,7 @@
 package janus
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -47,6 +48,10 @@ type App struct {
 	// Files is the global default for the site-scoped registered-file
 	// service. Default: off. Sites may override.
 	Files *bool `json:"files,omitempty"`
+
+	// Browse is the process-wide theme and renderer configuration.
+	// Presence also enables the global site-scoped browse default.
+	Browse *BrowseSettings `json:"browse,omitempty"`
 
 	// HeartbeatTTL is how long a registered app may go without a
 	// heartbeat before its registration is reaped (same effect as
@@ -98,6 +103,12 @@ type App struct {
 	// built at Start for the removed-user session revocation, the
 	// reaper's ttl bound, and the /1.0/auth sites view.
 	authSites []authSiteEntry
+
+	browseSites   []browseSiteEntry
+	browseRuntime *BrowseSettings
+	browseCtx     context.Context
+	browseCancel  context.CancelFunc
+	coldHosts     []string
 }
 
 // CaddyModule returns the Caddy module information.
@@ -128,6 +139,13 @@ func (a *App) Provision(ctx caddy.Context) error {
 	a.appsReg = a.state.registry
 	a.dp = a.state.dp
 	a.hubs = a.state.hubs
+	a.browseCtx, a.browseCancel = context.WithCancel(ctx)
+	if a.Browse != nil && a.Files != nil && !*a.Files {
+		return fmt.Errorf("janus browse: global browse conflicts with global files off")
+	}
+	if err := a.provisionBrowse(); err != nil {
+		return err
+	}
 	if err := a.provisionCacheStore(); err != nil {
 		return err
 	}
@@ -169,12 +187,16 @@ func (a *App) Start() error {
 	if err := a.startAuth(); err != nil {
 		return err
 	}
+	if err := a.startBrowse(); err != nil {
+		return err
+	}
 	if err := a.startControlListeners(); err != nil {
 		// A partially started app never receives Stop: close whatever
 		// listeners came up before rejecting.
 		if serr := a.stopControlListeners(); serr != nil {
 			a.logger.Error("janus control unwind", zap.Error(serr))
 		}
+		a.stopBrowse()
 		return err
 	}
 	if err := a.startMdns(); err != nil {
@@ -184,6 +206,7 @@ func (a *App) Start() error {
 		if serr := a.stopMdns(); serr != nil {
 			a.logger.Error("janus mdns unwind", zap.Error(serr))
 		}
+		a.stopBrowse()
 		return err
 	}
 	return nil
@@ -194,6 +217,7 @@ func (a *App) Start() error {
 // stops the old app while the new one is already serving the same pooled
 // state.
 func (a *App) Stop() error {
+	a.stopBrowse()
 	cerr := a.stopControlListeners()
 	merr := a.stopMdns()
 	if cerr != nil {
@@ -209,6 +233,10 @@ func (a *App) Stop() error {
 // down — the advertiser tells them apart and ERROR-logs the aborted
 // case's config divergence.
 func (a *App) Cleanup() error {
+	a.stopBrowse()
+	if a.state != nil {
+		a.state.browse.releaseCold(a)
+	}
 	if a.state != nil {
 		deleted, err := janusPool.Delete(janusStateKey)
 		if !deleted {

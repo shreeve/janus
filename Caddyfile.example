@@ -153,6 +153,21 @@
 		# `{site}.suffix`, aliases, and the direct-child directory gate.
 		# Janus strips client Rip-Site and injects the resolved site label.
 		files
+
+		# 9) browse — site-scoped admission with process-wide theme and
+		# renderer definitions. The embedded theme is used here. Renderer
+		# commands are argv, never shell text; exactly one token is
+		# `{file}`. GET /1.0/browse reports redacted state and counters.
+		browse {
+			timeout 10s
+			max_output 8MB
+			concurrency 4
+			renderer .md {
+				command cat {file}
+				content_type "text/plain; charset=utf-8"
+				concurrency 2
+			}
+		}
 	}
 }
 
@@ -165,6 +180,7 @@ http://*.local {
 	janus {
 		auth off
 		files off
+		browse off
 	}
 }
 
@@ -190,6 +206,7 @@ api.example.com {
 		hub off
 		auth off
 		files off
+		browse off
 	}
 }
 
@@ -275,6 +292,18 @@ ws-large.example.com {
 			max_conns 1000
 		}
 		auth off
+	}
+}
+
+# Persistent cold browse roots are configuration, not app records. Every
+# such handler requires finite exact host matchers; cache omission means
+# revalidate. This site has no worker, heartbeat, shell, or DELETE endpoint.
+downloads.example.com {
+	janus {
+		browse {
+			root /srv/downloads
+			root /srv/releases forever
+		}
 	}
 }
 

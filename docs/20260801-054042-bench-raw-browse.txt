@@ -1,0 +1,71 @@
+command:
+  go test -run '^$' -bench '^BenchmarkBrowse' -benchmem -count=5
+
+scope:
+  64 KiB regular file with complete request construction and full recorder
+  delivery under browse off, a non-browsable root, and a browsable root;
+  complete listing construction for 10, 100, and 1,000 files; embedded CSS
+  asset delivery; one no-op child and one Bun child; embedded and custom
+  theme provisioning. Bun was present for this run.
+
+goos: darwin
+goarch: arm64
+pkg: github.com/shreeve/janus
+cpu: Apple M5
+BenchmarkBrowseRegularFile/BrowseOff-10         	   41152	     28517 ns/op	2298.11 MB/s	  138146 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseOff-10         	   41784	     28496 ns/op	2299.86 MB/s	  138130 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseOff-10         	   42260	     28493 ns/op	2300.05 MB/s	  138130 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseOff-10         	   41834	     28448 ns/op	2303.75 MB/s	  138129 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseOff-10         	   40750	     28691 ns/op	2284.17 MB/s	  138129 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseFalse-10       	   42031	     28506 ns/op	2299.06 MB/s	  138130 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseFalse-10       	   41827	     28588 ns/op	2292.44 MB/s	  138130 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseFalse-10       	   42153	     28655 ns/op	2287.06 MB/s	  138129 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseFalse-10       	   41037	     29077 ns/op	2253.85 MB/s	  138130 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseFalse-10       	   41018	     28782 ns/op	2276.99 MB/s	  138130 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseTrue-10        	   41690	     28608 ns/op	2290.80 MB/s	  138130 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseTrue-10        	   41875	     28578 ns/op	2293.27 MB/s	  138129 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseTrue-10        	   42019	     28580 ns/op	2293.09 MB/s	  138129 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseTrue-10        	   42087	     30431 ns/op	2153.56 MB/s	  138129 B/op	      40 allocs/op
+BenchmarkBrowseRegularFile/BrowseTrue-10        	   41655	     33963 ns/op	1929.61 MB/s	  138131 B/op	      40 allocs/op
+BenchmarkBrowseListing/10-10                    	   10000	    106388 ns/op	   75291 B/op	    1046 allocs/op
+BenchmarkBrowseListing/10-10                    	   10000	    102839 ns/op	   75292 B/op	    1046 allocs/op
+BenchmarkBrowseListing/10-10                    	   10000	    103754 ns/op	   75291 B/op	    1046 allocs/op
+BenchmarkBrowseListing/10-10                    	   10000	    101932 ns/op	   75291 B/op	    1046 allocs/op
+BenchmarkBrowseListing/10-10                    	   10000	    101941 ns/op	   75292 B/op	    1046 allocs/op
+BenchmarkBrowseListing/100-10                   	    1886	    630882 ns/op	  345436 B/op	    9153 allocs/op
+BenchmarkBrowseListing/100-10                   	    1905	    630975 ns/op	  345434 B/op	    9153 allocs/op
+BenchmarkBrowseListing/100-10                   	    1837	    647989 ns/op	  345435 B/op	    9153 allocs/op
+BenchmarkBrowseListing/100-10                   	    1861	    642090 ns/op	  345440 B/op	    9153 allocs/op
+BenchmarkBrowseListing/100-10                   	    1860	    641499 ns/op	  345437 B/op	    9153 allocs/op
+BenchmarkBrowseListing/1000-10                  	     192	   6212837 ns/op	 4149094 B/op	   90926 allocs/op
+BenchmarkBrowseListing/1000-10                  	     195	   6084198 ns/op	 4149076 B/op	   90926 allocs/op
+BenchmarkBrowseListing/1000-10                  	     196	   6177488 ns/op	 4149076 B/op	   90926 allocs/op
+BenchmarkBrowseListing/1000-10                  	     187	   6232230 ns/op	 4149048 B/op	   90926 allocs/op
+BenchmarkBrowseListing/1000-10                  	     198	   6118862 ns/op	 4149086 B/op	   90926 allocs/op
+BenchmarkBrowseThemeAsset-10                    	  729244	      1534 ns/op	 337.04 MB/s	    6901 B/op	      26 allocs/op
+BenchmarkBrowseThemeAsset-10                    	  772809	      1528 ns/op	 338.41 MB/s	    6901 B/op	      26 allocs/op
+BenchmarkBrowseThemeAsset-10                    	  778813	      1525 ns/op	 339.04 MB/s	    6901 B/op	      26 allocs/op
+BenchmarkBrowseThemeAsset-10                    	  798592	      1526 ns/op	 338.79 MB/s	    6901 B/op	      26 allocs/op
+BenchmarkBrowseThemeAsset-10                    	  784449	      1534 ns/op	 337.09 MB/s	    6901 B/op	      26 allocs/op
+BenchmarkBrowseRenderer/NoopChild-10            	     856	   1360490 ns/op	   88264 B/op	      95 allocs/op
+BenchmarkBrowseRenderer/NoopChild-10            	     879	   1362091 ns/op	   88206 B/op	      95 allocs/op
+BenchmarkBrowseRenderer/NoopChild-10            	     886	   1357486 ns/op	   88207 B/op	      95 allocs/op
+BenchmarkBrowseRenderer/NoopChild-10            	     876	   1364492 ns/op	   88179 B/op	      95 allocs/op
+BenchmarkBrowseRenderer/NoopChild-10            	     868	   1375527 ns/op	   88197 B/op	      95 allocs/op
+BenchmarkBrowseRenderer/Bun-10                  	      76	  15391685 ns/op	   88507 B/op	      97 allocs/op
+BenchmarkBrowseRenderer/Bun-10                  	      76	  15284032 ns/op	   88549 B/op	      97 allocs/op
+BenchmarkBrowseRenderer/Bun-10                  	      76	  15301327 ns/op	   88668 B/op	      97 allocs/op
+BenchmarkBrowseRenderer/Bun-10                  	      76	  15325713 ns/op	   88538 B/op	      97 allocs/op
+BenchmarkBrowseRenderer/Bun-10                  	      76	  15875972 ns/op	   88503 B/op	      97 allocs/op
+BenchmarkBrowseThemeProvisioning/Embedded-10    	   21878	     54613 ns/op	   47524 B/op	     792 allocs/op
+BenchmarkBrowseThemeProvisioning/Embedded-10    	   22009	     54807 ns/op	   47524 B/op	     792 allocs/op
+BenchmarkBrowseThemeProvisioning/Embedded-10    	   21910	     54718 ns/op	   47524 B/op	     792 allocs/op
+BenchmarkBrowseThemeProvisioning/Embedded-10    	   21727	     54727 ns/op	   47524 B/op	     792 allocs/op
+BenchmarkBrowseThemeProvisioning/Embedded-10    	   21711	     54991 ns/op	   47524 B/op	     792 allocs/op
+BenchmarkBrowseThemeProvisioning/Custom-10      	   10000	    112217 ns/op	   53132 B/op	     845 allocs/op
+BenchmarkBrowseThemeProvisioning/Custom-10      	   10000	    111804 ns/op	   53133 B/op	     845 allocs/op
+BenchmarkBrowseThemeProvisioning/Custom-10      	   10000	    112033 ns/op	   53133 B/op	     845 allocs/op
+BenchmarkBrowseThemeProvisioning/Custom-10      	   10000	    114145 ns/op	   53132 B/op	     845 allocs/op
+BenchmarkBrowseThemeProvisioning/Custom-10      	   10000	    124781 ns/op	   53135 B/op	     845 allocs/op
+PASS
+ok  	github.com/shreeve/janus	65.673s

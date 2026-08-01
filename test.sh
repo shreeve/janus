@@ -4,7 +4,7 @@
 # For operators/users: prove cold capabilities behave end-to-end.
 # Developers still use idiomatic `go test ./...` while building.
 #
-# Groups run in capability order: ping (1), control (2), …, sendfile (8) last.
+# Groups run in capability order: ping (1), control (2), …, browse (9) last.
 #
 #   ./test.sh
 #   NO_COLOR=1 ./test.sh
@@ -21,6 +21,9 @@ CADDY_PID=""
 # testkit: the suite's Go support binary (fixture servers, WS driver,
 # JSON/string utilities). Built fresh at suite start from ./testkit.
 TESTKIT="$ROOT/.test-testkit"
+TMP_BASE="${TMPDIR:-/tmp}"
+BROWSE_COLD_ROOT="$(mktemp -d "${TMP_BASE%/}/janus-browse-cold.XXXXXX")"
+export JANUS_BROWSE_COLD_ROOT="$BROWSE_COLD_ROOT"
 
 # --- colors ---------------------------------------------------------------
 
@@ -273,7 +276,8 @@ cleanup() {
 		"$ROOT"/.test-cache-burst-* "$ROOT"/.test-cache-fail-* \
 		"$ROOT/.test-cache-cap-codes" "$ROOT/.test-cache-race" \
 		"$ROOT"/.test-auth-*
-	rm -rf "$ROOT/.test-files" "$ROOT/.test-sendfile" "$ROOT"/.test-mdns-*
+	rm -rf "$ROOT/.test-files" "$ROOT/.test-sendfile" "$ROOT/.test-browse" \
+		"$ROOT"/.test-mdns-* "$BROWSE_COLD_ROOT"
 	rm -f "$ROOT/.test-sendfile-app-id"
 }
 
@@ -3768,16 +3772,16 @@ FILES_APP_FILE="$ROOT/.test-files/app-id"
 FILES_OFF_APP_FILE="$ROOT/.test-files/off-app-id"
 
 case_files_setup() {
-	mkdir -p "$ROOT/.test-files/root1" "$ROOT/.test-files/root2" "$ROOT/.test-files/versioned"
+	mkdir -p "$ROOT/.test-files/root1" "$ROOT/.test-files/root2" "$ROOT/.test-files/forever"
 	printf 'first-root' >"$ROOT/.test-files/root1/ordered.txt"
 	printf 'value = 1' >"$ROOT/.test-files/root1/source.rip"
 	printf 'second-root' >"$ROOT/.test-files/root2/ordered.txt"
 	printf 'second-only' >"$ROOT/.test-files/root2/second.txt"
 	printf 'body{}' >"$ROOT/.test-files/root2/styles.css"
-	printf 'export{}' >"$ROOT/.test-files/versioned/app.js"
+	printf 'export{}' >"$ROOT/.test-files/forever/app.js"
 	printf '<main>spa-shell</main>' >"$ROOT/.test-files/shell.html"
 	capi POST /1.0/apps \
-		"{\"name\":\"files\",\"hosts\":[\"files.ripdev.io\"],\"files\":{\"roots\":[{\"path\":\"$ROOT/.test-files/root1\",\"class\":\"live\"},{\"path\":\"$ROOT/.test-files/root2\",\"class\":\"mutable\"},{\"path\":\"$ROOT/.test-files/versioned\",\"class\":\"versioned\"}],\"proxy_first\":[\"/api\"],\"shell\":\"$ROOT/.test-files/shell.html\"}}"
+		"{\"name\":\"files\",\"hosts\":[\"files.ripdev.io\"],\"files\":{\"roots\":[{\"path\":\"$ROOT/.test-files/root1\",\"cache\":\"never\"},{\"path\":\"$ROOT/.test-files/root2\",\"cache\":\"revalidate\"},{\"path\":\"$ROOT/.test-files/forever\",\"cache\":\"forever\"}],\"proxy_first\":[\"/api\"],\"shell\":\"$ROOT/.test-files/shell.html\"}}"
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -3825,7 +3829,7 @@ case_files_strict_hot_fields() {
 
 case_files_cascade_off() {
 	capi POST /1.0/apps \
-		"{\"name\":\"filesoff\",\"hosts\":[\"filesoff.ripdev.io\"],\"files\":{\"roots\":[{\"path\":\"$ROOT/.test-files/root1\",\"class\":\"mutable\"}],\"shell\":\"$ROOT/.test-files/shell.html\"}}"
+		"{\"name\":\"filesoff\",\"hosts\":[\"filesoff.ripdev.io\"],\"files\":{\"roots\":[{\"path\":\"$ROOT/.test-files/root1\",\"cache\":\"revalidate\"}],\"shell\":\"$ROOT/.test-files/shell.html\"}}"
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -3904,6 +3908,121 @@ case_sendfile_failure_strips_instruction() {
 	clean="$(tr -d '\r' <"$headers")"
 	! printf '%s' "$clean" | awk -F': ' 'tolower($1)=="x-sendfile" {found=1} END {exit !found}'
 	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="cache-control" && $2=="no-store" {found=1} END {exit !found}'
+}
+
+# --- cases: browse ----------------------------------------------------------
+
+BROWSE_ROOT="$ROOT/.test-browse/root"
+BROWSE_APP_FILE="$ROOT/.test-browse/app-id"
+
+case_browse_setup_and_listing() {
+	mkdir -p "$BROWSE_ROOT/sub" "$BROWSE_COLD_ROOT"
+	printf '# rendered\n' >"$BROWSE_ROOT/page.md"
+	printf 'audio' >"$BROWSE_ROOT/audio.mp3"
+	printf 'image' >"$BROWSE_ROOT/image.png"
+	printf 'hold' >"$BROWSE_ROOT/wait.hold"
+	printf 'slow' >"$BROWSE_ROOT/wait.slow"
+	printf 'fail' >"$BROWSE_ROOT/wait.fail"
+	printf '<h1>index</h1>' >"$BROWSE_ROOT/sub/index.html"
+	printf 'cold-root' >"$BROWSE_COLD_ROOT/cold.txt"
+
+	capi POST /1.0/apps \
+		"{\"name\":\"browse\",\"hosts\":[\"browseone.ripdev.io\",\"browsetwo.ripdev.io\"],\"lease\":\"process\",\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
+	eq "$REPLY_CODE" "201"
+	local id
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	printf '%s' "$id" >"$BROWSE_APP_FILE"
+
+	local body
+	body="$(http_body https://browseone.ripdev.io/)"
+	json_has "$body" 'page.md'
+	json_has "$body" 'image.png'
+	json_has "$body" '/_janus/browse/'
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://browseone.ripdev.io/sub)" "308"
+	eq "$(http_body https://browseone.ripdev.io/sub/)" '<h1>index</h1>'
+}
+
+case_browse_raw_and_renderer() {
+	eq "$(http_body 'https://browseone.ripdev.io/page.md?raw')" '# rendered'
+	eq "$(http_body https://browseone.ripdev.io/page.md)" '# rendered'
+	eq "$(http_body https://browsetwo.ripdev.io/page.md)" '# rendered'
+	local headers
+	headers="$(curl -sS -I --max-time 5 'https://browseone.ripdev.io/audio.mp3?raw' | tr -d '\r')"
+	json_has "$headers" 'content-type: audio/mpeg'
+	json_has "$headers" 'cache-control: no-cache'
+}
+
+case_browse_renderer_bounds() {
+	curl -sS --max-time 5 https://browseone.ripdev.io/wait.hold \
+		>"$ROOT/.test-browse/hold.out" &
+	local pid=$!
+	sleep 0.2
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+		https://browsetwo.ripdev.io/wait.hold)" "503"
+	wait "$pid"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+		https://browseone.ripdev.io/wait.slow)" "504"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+		https://browseone.ripdev.io/wait.fail)" "502"
+}
+
+case_browse_cascade_lease_and_status() {
+	capi POST /1.0/apps \
+		"{\"name\":\"browseoff\",\"hosts\":[\"browseoff.ripdev.io\"],\"lease\":\"process\",\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
+	eq "$REPLY_CODE" "201"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://browseoff.ripdev.io/)" "404"
+
+	capi POST /1.0/apps \
+		"{\"name\":\"browsereap\",\"hosts\":[\"browsereap.ripdev.io\"],\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
+	eq "$REPLY_CODE" "201"
+	local reap_id
+	reap_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	local i
+	for i in $(seq 1 80); do
+		capi GET "/1.0/apps/$reap_id"
+		[[ "$REPLY_CODE" == "404" ]] && break
+		sleep 0.25
+	done
+	eq "$REPLY_CODE" "404"
+
+	local id
+	id="$(cat "$BROWSE_APP_FILE")"
+	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
+		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		echo "caddy reload failed; see $CADDY_LOG" >&2
+		return 1
+	fi
+	capi GET "/1.0/apps/$id"
+	eq "$REPLY_CODE" "200"
+	capi GET /1.0/browse
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" '"enabled":true'
+	[[ "$REPLY_BODY" != *"$BROWSE_ROOT"* ]]
+	capi DELETE "/1.0/apps/$id"
+	eq "$REPLY_CODE" "204"
+}
+
+case_browse_cold_restart_and_conflict() {
+	[[ -f "$BROWSE_COLD_ROOT/cold.txt" ]] || {
+		echo "cold browse fixture disappeared: $BROWSE_COLD_ROOT/cold.txt" >&2
+		return 1
+	}
+	eq "$(http_body https://coldbrowse.ripdev.io/cold.txt)" "cold-root"
+	capi GET '/1.0/tls/ask?domain=coldbrowse.ripdev.io'
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" '"claim":"cold"'
+	capi POST /1.0/apps '{"name":"conflict","hosts":["coldbrowse.ripdev.io"]}'
+	eq "$REPLY_CODE" "409"
+	json_has "$REPLY_BODY" 'cold:coldbrowse.ripdev.io'
+	stop_caddy
+	start_caddy || return 1
+	[[ -f "$BROWSE_COLD_ROOT/cold.txt" ]] || {
+		echo "cold browse fixture disappeared across restart: $BROWSE_COLD_ROOT/cold.txt" >&2
+		return 1
+	}
+	eq "$(http_body https://coldbrowse.ripdev.io/cold.txt)" "cold-root"
+	capi GET /1.0/apps
+	[[ "$REPLY_BODY" != *'coldbrowse.ripdev.io'* ]]
 }
 
 # --- main -----------------------------------------------------------------
@@ -4117,7 +4236,7 @@ group "files"
 test "register exact-host app with ordered roots" case_files_setup
 test "ordered roots + ETag + HEAD + range" case_files_order_and_http_semantics
 test "SPA shell, proxy_first, strict request path" case_files_shell_proxy_first_and_paths
-test "fixed MIME and Cache-Control classes" case_files_response_policy
+test "independent MIME and cache policies" case_files_response_policy
 test "strict site/files JSON fields reject" case_files_strict_hot_fields
 test "cascade: site files off beats global on" case_files_cascade_off
 
@@ -4126,6 +4245,13 @@ test "register ordinary upstream; no sendfile configuration" case_sendfile_setup
 test "GET, HEAD, and byte range stream the selected file" case_sendfile_get_head_and_range
 test "application metadata wins; conditional request returns 304" case_sendfile_metadata_and_conditional
 test "missing target returns 502 without leaking instruction" case_sendfile_failure_strips_instruction
+
+group "browse"
+test "hot browsable root lists, previews, redirects, and indexes" case_browse_setup_and_listing
+test "raw delivery and one renderer work across hosts" case_browse_raw_and_renderer
+test "renderer saturation, timeout, and failure statuses" case_browse_renderer_bounds
+test "site off, heartbeat reap, process reload, and redacted status" case_browse_cascade_lease_and_status
+test "cold root survives restart and conflicts with hot claims" case_browse_cold_restart_and_conflict
 
 report
 exit $?

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="{{.AssetBase}}/browse.css">
+<script defer src="{{.AssetBase}}/browse.js"></script>
+</head>
+<body>
+<header>
+<nav aria-label="Breadcrumb">
+{{range .Breadcrumbs}}<a href="{{.URL}}">{{.Name}}</a><span>/</span>{{end}}
+</nav>
+<h1>{{.Title}}</h1>
+</header>
+<main>
+<table>
+<thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+<tbody>
+{{with .Parent}}<tr><td><a href="{{.URL}}">../</a></td><td></td><td></td><td></td></tr>{{end}}
+{{range .Entries}}
+<tr class="{{.Kind}}">
+<td>{{if .PreviewURL}}<img class="preview" src="{{.PreviewURL}}" alt="">{{end}}<svg class="icon"><use href="{{$.AssetBase}}/icons.svg#{{.Icon}}"></use></svg>{{if .URL}}<a href="{{.URL}}">{{.Name}}{{if eq .Kind "directory"}}/{{end}}</a>{{else}}{{.Name}}{{end}}</td>
+<td>{{.SizeText}}</td><td><time datetime="{{.ModifiedText}}">{{.ModifiedText}}</time></td>
+<td>{{if .RawURL}}<a href="{{.RawURL}}">raw</a>{{end}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</main>
+</body>
+</html>
