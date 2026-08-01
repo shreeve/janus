@@ -81,6 +81,35 @@ func cmdUpstream(args []string) {
 	}))
 }
 
+// cmdSendfile: upstream response-instruction fixture. The requested path
+// selects ordinary, metadata-override, and missing-target responses.
+func cmdSendfile(args []string) {
+	var sock, path string
+	flagValues(args, map[string]*string{"--sock": &sock, "--path": &path})
+	if sock == "" || path == "" {
+		die("usage: testkit sendfile --sock S --path F")
+	}
+	serveUnix(sock, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/missing":
+			w.Header().Set("X-Sendfile", path+".missing")
+		case "/custom":
+			w.Header().Set("X-Sendfile", path)
+			w.Header().Set("Content-Type", "application/x-janus-acceptance")
+			w.Header().Set("Content-Disposition", `attachment; filename="edge.data"`)
+			w.Header().Set("ETag", `"fixture-etag"`)
+			w.Header().Set("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT")
+			w.Header().Set("Cache-Control", "private, no-store")
+		default:
+			w.Header().Set("X-Sendfile", path)
+		}
+		body := "instruction body must not escape"
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, body)
+	}))
+}
+
 // cmdDoorbell: on GET /ring, PUT the new socket as the app's real upstream
 // via /1.0 (awaits the 200), then answer 204.
 func cmdDoorbell(args []string) {

@@ -17,6 +17,7 @@ index says which is which.
 | [`20260722-034619-capability-mdns.md`](20260722-034619-capability-mdns.md) | Capability 5: mdns (LAN presence — `janus.local`, per-app `.local` names, the status front door) |
 | [`20260728-160734-capability-auth.md`](20260728-160734-capability-auth.md) | Capability 6: auth (URL-prefix gates for auth-less apps) |
 | [`20260730-202700-capability-files.md`](20260730-202700-capability-files.md) | Capability 7: files (registered static roots, SPA shell, and directory-gated site hosts) |
+| [`20260801-020600-capability-sendfile.md`](20260801-020600-capability-sendfile.md) | Capability 8: sendfile (always-on final upstream response transformation) |
 | [`20260719-141200-tls-ask.md`](20260719-141200-tls-ask.md) | On-demand TLS gating via `/1.0/tls/ask` |
 
 ## Measurements (claims and their evidence)
@@ -26,6 +27,7 @@ index says which is which.
 | [`20260719-165500-rip-server-performance.md`](20260719-165500-rip-server-performance.md) | The performance ledger: grounding facts, closed doors, every measured result |
 | [`20260720-143705-bench-harness.md`](20260720-143705-bench-harness.md) | Bench rig runbook (the runnable harness is `../bench/`) |
 | `20260720-*-bench-raw-*.txt` | Raw provenance for the ledger's entries — never edited |
+| [`20260801-030843-bench-raw-sendfile.txt`](20260801-030843-bench-raw-sendfile.txt) | Five-run Capability 8 file-delivery comparison |
 
 ## Tutorials (runnable, living)
 

@@ -21,7 +21,10 @@
 // shared users, per-gate allow lists, one host-wide session, and
 // Remote-User strip-and-inject on fall-through, and files (7) serves
 // registered ordered roots and SPA shells with directory-gated site host
-// patterns and trusted Rip-Site context.
+// patterns and trusted Rip-Site context. Sendfile (8) is an always-on
+// reverse-proxy response protocol: a final application X-Sendfile
+// instruction selects any regular file Janus can open, and Janus applies
+// validators, ranges, cache recording, and streaming at the edge.
 //
 // The registry, data plane, and hub state live in pooled process state
 // (caddy.UsagePool), so a Caddy config reload never drops a registration

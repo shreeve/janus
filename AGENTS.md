@@ -9,7 +9,7 @@ or a WebSocket. Everything is memory-only by contract: a restart
 empties the registry and tenants re-register.
 
 **Era: stewardship.** Feature-complete at v1.0.0 — every build-spec
-box ticked; seven cold capabilities shipped. Ongoing work is fix,
+box ticked; eight capabilities shipped. Ongoing work is fix,
 harden, measure. New behavior arrives as a capability through the
 proven loop: **design contract → adversarial review → revise →
 implement → pin in tests → measure** (mdns, capability 5, is the
@@ -27,12 +27,14 @@ second).
    admission. `/1.0` = registry (apps, upstreams, heartbeats, hub).
    Hot JSON never changes the cold admission gate.
 
-3. **Normal Caddyfile only.** No parallel config language. New behavior
-   is a Caddy module / directive with `UnmarshalCaddyfile`, legal
-   values, defaults, and hard errors — same grammar as stock Caddy.
+3. **Normal Caddyfile only.** No parallel config language. Configurable
+   behavior is a Caddy module / directive with `UnmarshalCaddyfile`,
+   legal values, defaults, and hard errors — same grammar as stock
+   Caddy. Always-on proxy protocol behavior has no decorative toggle.
 
-4. **Capabilities are the unit of cold work.** Numbered by landing
-   order; the story (ping → control → cache → hub → mdns → auth → …) never
+4. **Capabilities are the unit of product work.** Numbered by landing
+   order; the story (ping → control → cache → hub → mdns → auth → files →
+   sendfile → …) never
    reorders in docs or `test.sh`. A new one starts at "When adding a
    capability" below — contract doc and adversarial review before code.
 
@@ -84,10 +86,11 @@ second).
 | 5 | **mdns** | LAN presence: `janus.local` + exact-host/site-alias `.local` names; the redacted, conflict-safe App launch dashboard and canonical hand-off (cascades: no — process-wide). |
 | 6 | **auth** | URL-prefix gates for auth-less apps: shared `users`, per-gate allow lists, host-wide `__Host-janus` session, `Remote-User` strip-and-inject (cascades: yes). |
 | 7 | **files** | Registered ordered roots with fixed response classes, terminal non-API routing, SPA shell, and directory-gated `{site}` admission with trusted `Rip-Site` (cascades: yes). |
-| 8+ | next | Future capabilities, each through the loop above. |
+| 8 | **sendfile** | Always-on final upstream `X-Sendfile` transformation: application authorization, Janus validators/ranges/cache recording/streaming (cascades: no; configuration: none). |
+| 9+ | next | Future capabilities, each through the loop above. |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,
-cache, heartbeat, tls, hub, tenant, mdns, auth, files.
+cache, heartbeat, tls, hub, tenant, mdns, auth, files, sendfile.
 
 ## Architecture (short)
 
