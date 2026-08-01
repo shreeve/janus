@@ -182,6 +182,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 		return next.ServeHTTP(w, r)
 	}
+	r, facts := attachAccessFactsRequest(r)
+	if facts != nil {
+		w = &accessResponseWriter{ResponseWriter: w, request: r, facts: facts}
+	}
 	if h.pingEnabled() && (r.URL.Path == "/ping" || r.URL.Path == "/ping/") {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -194,10 +198,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	// 401 here): gate login doors, path allow lists, strip on every
 	// fall-through; authorized gated traffic gets Remote-User injected.
 	if h.authCfg != nil {
+		if h.dp != nil {
+			if provisional, ok := h.dp.registry.resolveRequestHost(r.Host); ok {
+				facts.setOwner(provisional)
+				facts.setClass("auth")
+			}
+		}
 		rr, handled, err := h.serveAuthWall(w, r)
 		if handled || err != nil {
 			return err
 		}
+		facts.clearOwner()
 		r = rr
 		w = &authRespStrip{ResponseWriter: w}
 	}
@@ -226,12 +237,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	var ok bool
 	rec, ok = h.dp.registry.resolveRequestHost(r.Host)
 	if !ok {
+		facts.clearOwner()
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
+	facts.setOwner(rec)
 	if rec.siteValue != "" {
 		r.Header.Set(ripSiteHeader, rec.siteValue)
 	}
 	if assetRequest {
+		facts.setClass("browse_asset")
 		h.serveBrowseAsset(w, r)
 		return nil
 	}
@@ -239,6 +253,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	// the hub claims upgrades to its path only — a non-upgrade request to
 	// the same path flows through the data plane like any other.
 	if h.hubCfg != nil && r.URL.Path == h.hubCfg.path && websocket.IsWebSocketUpgrade(r) {
+		facts.setClass("hub")
 		return h.serveHub(w, r)
 	}
 	if (h.filesEnabled() || h.browseEnabled) && rec.Files != nil {
@@ -250,6 +265,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if h.cacheCfg != nil {
 		return h.serveCache(w, r)
 	}
+	facts.setClass("proxy")
 	return h.dp.serveResolved(w, r, host, rec)
 }
 

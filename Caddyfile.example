@@ -171,12 +171,25 @@
 	}
 }
 
+(janus_access) {
+	# Capability 10 publishes only access entries that Caddy invokes through
+	# this encoder. This durable JSON sink remains authoritative.
+	log {
+		output stderr
+		format janus {
+			time_format rfc3339_nano
+			duration_format seconds
+		}
+	}
+}
+
 # The mdns front door: front-door names serve the status page here; every
 # other host falls through to the automatic HTTP→HTTPS redirects. auth
 # off: this is a plain-HTTP carrier — the __Host- session cookie cannot
 # be set without HTTPS, so an inherited wall here would answer 421 to any
 # data-plane request that reached it.
 http://*.local {
+	import janus_access
 	janus {
 		auth off
 		files off
@@ -190,6 +203,7 @@ http://*.local {
 # that is the cascade's common case, and most sites should look exactly
 # like this.
 example.com, www.example.com {
+	import janus_access
 	janus
 }
 
@@ -201,6 +215,7 @@ example.com, www.example.com {
 # a tenant that never bridges. And this API authenticates itself (the
 # custom headers above), so the cookie wall opts out too.
 api.example.com {
+	import janus_access
 	janus {
 		cache off
 		hub off
@@ -214,6 +229,7 @@ api.example.com {
 # cannot open this door). A session from example.com does not pass here
 # unless carol is in this site's users and the winning gate allow list.
 notes.example.com {
+	import janus_access
 	janus {
 		auth {
 			users {
@@ -233,6 +249,7 @@ notes.example.com {
 # (HIT|MISS|COALESCED|BYPASS) on this site's responses — dev-visible,
 # prod-quiet; drop it once the hit rate is proven.
 pages.example.com {
+	import janus_access
 	janus {
 		cache {
 			ttl 5s
@@ -250,6 +267,7 @@ pages.example.com {
 # here: those machine clients speak tokens, not cookies (a WS upgrade
 # without a session answers 401 on a guarded site).
 chat.example.com {
+	import janus_access
 	janus {
 		hub {
 			max_conns 16384
@@ -262,6 +280,7 @@ chat.example.com {
 # Direct Hub: edge-only connections and fan-out. Empty upstreams and no
 # bridge_path are valid; control-plane publish remains available.
 live.example.com {
+	import janus_access
 	janus {
 		hub {
 			mode direct
@@ -278,6 +297,7 @@ live.example.com {
 # lowers the whole app's floor. Size the per-connection memory budget
 # (~3 MiB adversarial ceiling per connection) against this floor.
 ws-small.example.com {
+	import janus_access
 	janus {
 		hub {
 			max_conns 100
@@ -287,6 +307,7 @@ ws-small.example.com {
 }
 
 ws-large.example.com {
+	import janus_access
 	janus {
 		hub {
 			max_conns 1000
@@ -299,6 +320,7 @@ ws-large.example.com {
 # such handler requires finite exact host matchers; cache omission means
 # revalidate. This site has no worker, heartbeat, shell, or DELETE endpoint.
 downloads.example.com {
+	import janus_access
 	janus {
 		browse {
 			root /srv/downloads
@@ -318,6 +340,7 @@ downloads.example.com {
 # customer domain. Cache stays inherited — an anonymous GET on a
 # registered host is the cache's home turf.
 https:// {
+	import janus_access
 	tls {
 		on_demand
 	}

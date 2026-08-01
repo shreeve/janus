@@ -88,11 +88,12 @@ second).
 | 7 | **files** | Registered ordered roots with fixed cache policies, terminal non-API routing, SPA shell, and directory-gated `{site}` admission with trusted `Rip-Site` (cascades: yes). |
 | 8 | **sendfile** | Always-on final upstream `X-Sendfile` transformation: application authorization, Janus validators/ranges/cache recording/streaming (cascades: no; configuration: none). |
 | 9 | **browse** | Navigable hot and cold roots, embedded/custom themes, bounded extension renderers, strict leases, cold-host reservations, and redacted status (cascades: yes). |
-| 10+ | next | Future capabilities, each through the loop above. |
+| 10 | **access log** | Durable JSON-compatible Caddy encoder plus bounded app-scoped live NDJSON observation (cascades: no; configured by each site's `log`). |
+| 11+ | next | Future capabilities, each through the loop above. |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,
 cache, heartbeat, tls, hub, tenant, mdns, auth, files, sendfile,
-browse.
+browse, access.
 
 ## Architecture (short)
 

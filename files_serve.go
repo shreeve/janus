@@ -117,6 +117,7 @@ func (h *Handler) serveFiles(w http.ResponseWriter, r *http.Request, rec AppReco
 			return false, nil
 		}
 	}
+	accessFactsOf(r).setClass("file")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.NotFound(w, r)
 		return true, nil

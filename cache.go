@@ -99,12 +99,13 @@ type cacheVariant struct {
 	varyNames []string // lowercase allowlisted names from the response Vary
 	reqVals   []string // shared-extraction values, parallel to varyNames
 
-	status    int // always 200
-	header    http.Header
-	body      []byte
-	fillStart time.Time     // TTL anchor: when the fill's upstream request was sent
-	fresh     time.Duration // effective freshness
-	size      int64         // accounted bytes (body + headers + key + overhead)
+	status        int // always 200
+	header        http.Header
+	body          []byte
+	responseClass string
+	fillStart     time.Time     // TTL anchor: when the fill's upstream request was sent
+	fresh         time.Duration // effective freshness
+	size          int64         // accounted bytes (body + headers + key + overhead)
 
 	lastAccess atomic.Int64   // UnixNano; sampled-LRU recency
 	stats      *cacheCounters // this shard's per-app counters
@@ -137,10 +138,11 @@ type cacheFlight struct {
 
 	// Result, written before done closes. Shared with waiters only when
 	// shareable (storable 200, generation current, not detached).
-	shareable bool
-	status    int
-	header    http.Header
-	body      []byte
+	shareable     bool
+	status        int
+	header        http.Header
+	body          []byte
+	responseClass string
 }
 
 // cacheShard is one lock domain of the store.
@@ -186,7 +188,7 @@ func (sh *cacheShard) dkBump(h uint64) {
 	if sh.dk[i1] < 255 {
 		sh.dk[i1]++
 	}
-	if sh.dk[i2] < 255 {
+	if i2 != i1 && sh.dk[i2] < 255 {
 		sh.dk[i2]++
 	}
 }

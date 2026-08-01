@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, an edge authentication wall, registered static files, and X-Sendfile offload, driven by a JSON control API.</strong>
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, an edge authentication wall, registered static files, X-Sendfile offload, and bounded app-scoped access observation, driven by a JSON control API.</strong>
 </p>
 
 ---
 
-**Module names:** `janus` (app) · `http.handlers.janus` (HTTP handler)
+**Module names:** `janus` (app) · `http.handlers.janus` (HTTP handler) · `caddy.logging.encoders.janus` (access encoder)
 
 Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Janus provides the inward face: a memory-resident registry and engines driven by the `/1.0` JSON API. Cold Caddyfile config sets capabilities (such as **control** reachability) and which sites admit traffic into Janus; hot `/1.0` calls decide how admitted hosts map to upstreams, health, certificate allowlisting, and realtime fan-out.
 
@@ -25,6 +25,10 @@ Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Ja
 }
 
 app.example.com {
+	log {
+		output file /var/log/janus/access.json
+		format janus
+	}
 	janus
 }
 ```
@@ -141,6 +145,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 7 | **files** | Registered ordered roots, SPA shells, and directory-gated site hosts | [`capability-files`](docs/20260730-202700-capability-files.md) |
 | 8 | **sendfile** | Always-on final upstream `X-Sendfile` transformation with validators, ranges, cache recording, and streaming | [`capability-sendfile`](docs/20260801-020600-capability-sendfile.md) |
 | 9 | **browse** | Navigable hot and cold roots, content-addressed themes, bounded extension renderers, and process leases | [`capability-browse`](docs/20260801-042700-capability-browse.md) |
+| 10 | **access log** | JSON-compatible durable access log plus bounded app-scoped NDJSON streams on `/1.0` | [`capability-access-log`](docs/20260801-081600-capability-access-log.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -152,7 +157,7 @@ xcaddy build \
   --output ./bin/caddy
 
 go test ./...
-./test.sh   # 14 groups, 168 cases, ending with browse
+./test.sh   # capability-ordered acceptance groups, ending with access
 ```
 
 ### 1. ping (data plane)
@@ -220,6 +225,15 @@ curl -s http://127.0.0.1:7600/1.0/auth      # wall counters + session count
 curl -s http://127.0.0.1:7600/1.0/auth/sessions
 ```
 
+### 10. access log
+
+Each Janus site opts into Caddy access logging with `format janus`. Durable output is byte-equivalent to Caddy's JSON encoder with the same options. Registered-app requests also publish bounded NDJSON to operator streams; Caddy policy remains authoritative, so entries excluded before encoder invocation publish nothing.
+
+```bash
+curl -s http://127.0.0.1:7600/1.0/access
+curl -sN "http://127.0.0.1:7600/1.0/apps/$APP_ID/access?after=0"
+```
+
 ## Build and run
 
 From this repository (local module replacement is automatic when you run `xcaddy` inside the module):
@@ -247,7 +261,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.4.0 \
+  --with github.com/shreeve/janus@v1.5.0 \
   --output ./caddy
 ```
 
@@ -322,6 +336,10 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `auth_cmd.go` | `caddy janus-auth-hash` credential minter |
 | `auth.html` | Embedded login/status page (self-contained; zero external resources) |
 | `control_auth.go` | Auth control surface (`GET /1.0/auth`, session list + revocation) |
+| `access.go` | Pooled access bridge, registration sequence state, bounded event schema |
+| `access_encoder.go` | `caddy.logging.encoders.janus`, wrapping durable JSON |
+| `access_stream.go` | Access status and app-scoped NDJSON control streams |
+| `access_writer.go` | Response outcome observation with optional interfaces preserved |
 | `testkit/` | Go test-support program: fixtures + WS driver for `test.sh` |
 | `bench/` | Committed bench harness (baseline, leak probe, hub arm) |
 | `Caddyfile` | Working cold config (multi-site cascade demos) |

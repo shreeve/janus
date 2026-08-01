@@ -23,6 +23,8 @@ type controlServer struct {
 	mode   string
 	server *http.Server
 	ln     net.Listener
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{}
 }
 
 func (a *App) startControlListeners() error {
@@ -36,6 +38,17 @@ func (a *App) startControlListeners() error {
 		srv := &http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
+		}
+		cs := &controlServer{mode: c.Mode, server: srv, conns: make(map[net.Conn]struct{})}
+		srv.ConnState = func(conn net.Conn, state http.ConnState) {
+			cs.mu.Lock()
+			switch state {
+			case http.StateNew:
+				cs.conns[conn] = struct{}{}
+			case http.StateClosed, http.StateHijacked:
+				delete(cs.conns, conn)
+			}
+			cs.mu.Unlock()
 		}
 		if c.useTLS {
 			// Defaults are the committed dev pair (see certs/README.md);
@@ -82,7 +95,7 @@ func (a *App) startControlListeners() error {
 			ln = tls.NewListener(ln, srv.TLSConfig)
 		}
 
-		cs := &controlServer{mode: c.Mode, server: srv, ln: ln}
+		cs.ln = ln
 		a.controlSrvs = append(a.controlSrvs, cs)
 		a.logger.Info("janus control listening",
 			zap.String("mode", c.Mode),
@@ -102,6 +115,18 @@ func (a *App) startControlListeners() error {
 		}(cs)
 	}
 	return nil
+}
+
+func (s *controlServer) closeConnections() {
+	s.mu.Lock()
+	conns := make([]net.Conn, 0, len(s.conns))
+	for conn := range s.conns {
+		conns = append(conns, conn)
+	}
+	s.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
 }
 
 func (a *App) stopControlListeners() error {
@@ -158,6 +183,9 @@ func (a *App) controlMux() *http.ServeMux {
 		mux.HandleFunc("DELETE "+apps+"/{id}", a.handleAppsDelete)
 		mux.HandleFunc("PUT "+apps+"/{id}/upstreams", a.handleAppsUpstreamsPut)
 		mux.HandleFunc("POST "+apps+"/{id}/heartbeat", a.handleAppsHeartbeat)
+		mux.HandleFunc(apps+"/{id}/access", a.handleAccessStream)
+		mux.HandleFunc("GET "+base+"/1.0/access", a.handleAccessStatus)
+		mux.HandleFunc("GET "+base+"/1.0/access/{$}", a.handleAccessStatus)
 
 		mux.HandleFunc("GET "+base+"/1.0/tls/ask", a.handleTLSAsk)
 

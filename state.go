@@ -82,6 +82,10 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 func (st *janusState) Destruct() error {
 	st.registry.stopSweeper()
 	st.auth.stop()
+	detached := st.registry.tombstoneAll("generation_stop")
+	for _, sub := range detached {
+		close(sub.done)
+	}
 	// Orderly departure: every mdns registration withdraws (PTR
 	// goodbyes; host records age out on their TTL) before the responder
 	// stops.

@@ -1,0 +1,130 @@
+Janus Capability 10 corrected access benchmark raw provenance
+timestamp: 2026-08-01T10:23:58-06:00
+commit: 2df7393ca004840fc61018a9dfd9d09763a512be
+working_tree: uncommitted Capability 9/10 certification and cold-review remediation present
+go version go1.26.5 darwin/arm64
+ProductName:		macOS
+ProductVersion:		26.5.2
+BuildVersion:		25F84
+Darwin pop 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:17 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T8142 arm64
+Apple M5
+command: go test -run '^$' -bench '^BenchmarkAccess(EncoderBridge|RepresentativeCompletion)$' -benchmem -benchtime=500ms -count=5 .
+goos: darwin
+goarch: arm64
+pkg: github.com/shreeve/janus
+cpu: Apple M5
+BenchmarkAccessEncoderBridge/json-baseline-10 	 1016751	       588.1 ns/op	    1425 B/op	       8 allocs/op
+BenchmarkAccessEncoderBridge/json-baseline-10 	 1000000	       586.8 ns/op	    1425 B/op	       8 allocs/op
+BenchmarkAccessEncoderBridge/json-baseline-10 	 1000000	       601.2 ns/op	    1425 B/op	       8 allocs/op
+BenchmarkAccessEncoderBridge/json-baseline-10 	 1000000	       594.8 ns/op	    1425 B/op	       8 allocs/op
+BenchmarkAccessEncoderBridge/json-baseline-10 	 1000000	       590.1 ns/op	    1425 B/op	       8 allocs/op
+BenchmarkAccessEncoderBridge/no-subscribers-10         	  323660	      1835 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/no-subscribers-10         	  330052	      1902 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/no-subscribers-10         	  314272	      1874 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/no-subscribers-10         	  330050	      1810 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/no-subscribers-10         	  335926	      1971 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/one-draining-subscriber-10         	  285832	      2167 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/one-draining-subscriber-10         	  273212	      2232 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/one-draining-subscriber-10         	  271606	      2188 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/one-draining-subscriber-10         	  270568	      2190 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/one-draining-subscriber-10         	  284548	      2181 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/four-subscriber-fanout-10          	  254514	      2408 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/four-subscriber-fanout-10          	  247657	      2429 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/four-subscriber-fanout-10          	  246373	      2412 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/four-subscriber-fanout-10          	  246624	      2413 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/four-subscriber-fanout-10          	  242625	      2454 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/blocked-subscriber-overflow-10     	  332544	      1853 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/blocked-subscriber-overflow-10     	  317236	      1856 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/blocked-subscriber-overflow-10     	  323151	      1853 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/blocked-subscriber-overflow-10     	  300632	      1869 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/blocked-subscriber-overflow-10     	  314229	      1858 ns/op	    3384 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/process-cap-across-registrations-10         	  288724	      2063 ns/op	    3383 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/process-cap-across-registrations-10         	  294663	      2069 ns/op	    3383 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/process-cap-across-registrations-10         	  289908	      2073 ns/op	    3383 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/process-cap-across-registrations-10         	  290533	      2078 ns/op	    3383 B/op	      23 allocs/op
+BenchmarkAccessEncoderBridge/process-cap-across-registrations-10         	  293426	      2079 ns/op	    3383 B/op	      23 allocs/op
+BenchmarkAccessRepresentativeCompletion/registered-file-10               	  302271	      2004 ns/op	    3755 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/registered-file-10               	  305257	      2021 ns/op	    3759 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/registered-file-10               	  308968	      2007 ns/op	    3758 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/registered-file-10               	  293966	      2114 ns/op	    3756 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/registered-file-10               	  303087	      2001 ns/op	    3761 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/sendfile-10                      	  302313	      1973 ns/op	    3584 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/sendfile-10                      	  298604	      1984 ns/op	    3585 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/sendfile-10                      	  304729	      1971 ns/op	    3586 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/sendfile-10                      	  300844	      1978 ns/op	    3586 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/sendfile-10                      	  302804	      1979 ns/op	    3586 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/gzip-10                          	  296194	      2089 ns/op	    3796 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/gzip-10                          	  294847	      2106 ns/op	    3796 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/gzip-10                          	  296858	      2138 ns/op	    3789 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/gzip-10                          	  296558	      2094 ns/op	    3795 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/gzip-10                          	  297084	      2229 ns/op	    3798 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/zstd-10                          	  288853	      2112 ns/op	    3793 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/zstd-10                          	  292524	      2103 ns/op	    3793 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/zstd-10                          	  289185	      2094 ns/op	    3786 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/zstd-10                          	  298099	      2105 ns/op	    3791 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/zstd-10                          	  295476	      2097 ns/op	    3794 B/op	      28 allocs/op
+BenchmarkAccessRepresentativeCompletion/websocket-101-10                 	  307603	      1976 ns/op	    3594 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/websocket-101-10                 	  304539	      1967 ns/op	    3597 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/websocket-101-10                 	  309318	      1971 ns/op	    3593 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/websocket-101-10                 	  309750	      1970 ns/op	    3594 B/op	      26 allocs/op
+BenchmarkAccessRepresentativeCompletion/websocket-101-10                 	  305078	      1984 ns/op	    3596 B/op	      26 allocs/op
+PASS
+ok  	github.com/shreeve/janus	33.850s
+
+command: go test -run '^$' -bench '^BenchmarkAccess(FilesPath|SendfilePath|GzipProxyPath|ZstdProxyPath|WebSocketPath)$' -benchmem -benchtime=1s -count=5 .
+goos: darwin
+goarch: arm64
+pkg: github.com/shreeve/janus
+cpu: Apple M5
+BenchmarkAccessFilesPath/route-only-10         	   40340	     29750 ns/op	  139448 B/op	      59 allocs/op
+BenchmarkAccessFilesPath/route-only-10         	   40051	     29773 ns/op	  139431 B/op	      59 allocs/op
+BenchmarkAccessFilesPath/route-only-10         	   40292	     29752 ns/op	  139431 B/op	      59 allocs/op
+BenchmarkAccessFilesPath/route-only-10         	   40314	     29574 ns/op	  139430 B/op	      59 allocs/op
+BenchmarkAccessFilesPath/route-only-10         	   41029	     29550 ns/op	  139430 B/op	      59 allocs/op
+BenchmarkAccessFilesPath/route-plus-access-10  	   34028	     36187 ns/op	  144838 B/op	     110 allocs/op
+BenchmarkAccessFilesPath/route-plus-access-10  	   33969	     35361 ns/op	  144721 B/op	     110 allocs/op
+BenchmarkAccessFilesPath/route-plus-access-10  	   32524	     38261 ns/op	  144721 B/op	     110 allocs/op
+BenchmarkAccessFilesPath/route-plus-access-10  	   33882	     35733 ns/op	  144648 B/op	     110 allocs/op
+BenchmarkAccessFilesPath/route-plus-access-10  	   33943	     35748 ns/op	  144647 B/op	     110 allocs/op
+BenchmarkAccessSendfilePath/route-only-10      	    6016	    184690 ns/op	 2095123 B/op	     144 allocs/op
+BenchmarkAccessSendfilePath/route-only-10      	    6382	    190996 ns/op	 2094913 B/op	     144 allocs/op
+BenchmarkAccessSendfilePath/route-only-10      	    5986	    186303 ns/op	 2095141 B/op	     144 allocs/op
+BenchmarkAccessSendfilePath/route-only-10      	    6470	    187656 ns/op	 2095216 B/op	     144 allocs/op
+BenchmarkAccessSendfilePath/route-only-10      	    6572	    203027 ns/op	 2095586 B/op	     144 allocs/op
+BenchmarkAccessSendfilePath/route-plus-access-10         	    6084	    204875 ns/op	 2103197 B/op	     209 allocs/op
+BenchmarkAccessSendfilePath/route-plus-access-10         	    5358	    203427 ns/op	 2103251 B/op	     209 allocs/op
+BenchmarkAccessSendfilePath/route-plus-access-10         	    5949	    204571 ns/op	 2102975 B/op	     209 allocs/op
+BenchmarkAccessSendfilePath/route-plus-access-10         	    5774	    204710 ns/op	 2102635 B/op	     209 allocs/op
+BenchmarkAccessSendfilePath/route-plus-access-10         	    5778	    207158 ns/op	 2103385 B/op	     209 allocs/op
+BenchmarkAccessGzipProxyPath/route-only-10               	   16116	     74280 ns/op	  297196 B/op	     140 allocs/op
+BenchmarkAccessGzipProxyPath/route-only-10               	   16346	     72329 ns/op	  297253 B/op	     140 allocs/op
+BenchmarkAccessGzipProxyPath/route-only-10               	   16401	     74119 ns/op	  297127 B/op	     140 allocs/op
+BenchmarkAccessGzipProxyPath/route-only-10               	   16356	     72876 ns/op	  297331 B/op	     140 allocs/op
+BenchmarkAccessGzipProxyPath/route-only-10               	   16431	     74529 ns/op	  297263 B/op	     140 allocs/op
+BenchmarkAccessGzipProxyPath/route-plus-access-10        	   15187	     79307 ns/op	  303597 B/op	     194 allocs/op
+BenchmarkAccessGzipProxyPath/route-plus-access-10        	   14736	     80881 ns/op	  303594 B/op	     194 allocs/op
+BenchmarkAccessGzipProxyPath/route-plus-access-10        	   15046	     80782 ns/op	  303579 B/op	     194 allocs/op
+BenchmarkAccessGzipProxyPath/route-plus-access-10        	   15195	     78391 ns/op	  303828 B/op	     194 allocs/op
+BenchmarkAccessGzipProxyPath/route-plus-access-10        	   14372	     82900 ns/op	  303711 B/op	     194 allocs/op
+BenchmarkAccessZstdProxyPath/route-only-10               	   46054	     26012 ns/op	   15471 B/op	     123 allocs/op
+BenchmarkAccessZstdProxyPath/route-only-10               	   45073	     26611 ns/op	   15481 B/op	     123 allocs/op
+BenchmarkAccessZstdProxyPath/route-only-10               	   45440	     26044 ns/op	   15486 B/op	     123 allocs/op
+BenchmarkAccessZstdProxyPath/route-only-10               	   45794	     26110 ns/op	   15486 B/op	     123 allocs/op
+BenchmarkAccessZstdProxyPath/route-only-10               	   46467	     26283 ns/op	   15470 B/op	     123 allocs/op
+BenchmarkAccessZstdProxyPath/route-plus-access-10        	   38107	     31687 ns/op	   21342 B/op	     177 allocs/op
+BenchmarkAccessZstdProxyPath/route-plus-access-10        	   37969	     31490 ns/op	   21283 B/op	     177 allocs/op
+BenchmarkAccessZstdProxyPath/route-plus-access-10        	   37083	     32153 ns/op	   21297 B/op	     177 allocs/op
+BenchmarkAccessZstdProxyPath/route-plus-access-10        	   37789	     31677 ns/op	   21309 B/op	     177 allocs/op
+BenchmarkAccessZstdProxyPath/route-plus-access-10        	   38372	     31450 ns/op	   21362 B/op	     177 allocs/op
+BenchmarkAccessWebSocketPath/route-only-10               	   13941	     84637 ns/op	   42293 B/op	     172 allocs/op
+BenchmarkAccessWebSocketPath/route-only-10               	   13894	     86158 ns/op	   42283 B/op	     172 allocs/op
+BenchmarkAccessWebSocketPath/route-only-10               	   14671	     84776 ns/op	   42286 B/op	     172 allocs/op
+BenchmarkAccessWebSocketPath/route-only-10               	   14112	     83525 ns/op	   42298 B/op	     172 allocs/op
+BenchmarkAccessWebSocketPath/route-only-10               	   14162	     83393 ns/op	   42280 B/op	     172 allocs/op
+BenchmarkAccessWebSocketPath/route-plus-access-10        	   13342	     89657 ns/op	   47354 B/op	     219 allocs/op
+BenchmarkAccessWebSocketPath/route-plus-access-10        	   13467	     88251 ns/op	   47357 B/op	     219 allocs/op
+BenchmarkAccessWebSocketPath/route-plus-access-10        	   13598	     90743 ns/op	   47340 B/op	     219 allocs/op
+BenchmarkAccessWebSocketPath/route-plus-access-10        	   13261	     91153 ns/op	   47348 B/op	     219 allocs/op
+BenchmarkAccessWebSocketPath/route-plus-access-10        	   13356	     88690 ns/op	   47363 B/op	     219 allocs/op
+PASS
+ok  	github.com/shreeve/janus	60.598s

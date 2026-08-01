@@ -31,6 +31,7 @@ const (
 var errBrowseListingTooLarge = errors.New("directory listing too large")
 
 func (h *Handler) serveBrowseAsset(w http.ResponseWriter, r *http.Request) {
+	accessFactsOf(r).setClass("browse_asset")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.NotFound(w, r)
 		return
@@ -258,6 +259,7 @@ func (h *Handler) serveBrowseFile(w http.ResponseWriter, r *http.Request, file *
 }
 
 func (h *Handler) serveBrowseListing(w http.ResponseWriter, r *http.Request, root *os.Root, configured activeBrowseRoot, relative, requestPath string) {
+	accessFactsOf(r).setClass("browse_listing")
 	directory, err := root.Open(relative)
 	if err != nil {
 		http.NotFound(w, r)
@@ -484,6 +486,7 @@ func (b *cappedBuffer) Write(value []byte) (int, error) {
 }
 
 func (h *Handler) serveRenderedFile(w http.ResponseWriter, r *http.Request, renderer *browseRenderer, rootPath, relative, requestPath string) {
+	accessFactsOf(r).setClass("browse_render")
 	totalLimit := browseDefaultConcurrency
 	if h.browseCfg.Concurrency != nil {
 		totalLimit = *h.browseCfg.Concurrency

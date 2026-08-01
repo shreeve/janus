@@ -34,8 +34,11 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	host := normalizeHostHeader(r.Host)
 	rec, ok := st.registry.resolveRequestHost(r.Host)
 	if !ok {
+		accessFactsOf(r).clearOwner()
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
+	accessFactsOf(r).setOwner(rec)
+	accessFactsOf(r).setClass("hub")
 
 	// Origin check: fails → 403, no upgrade, no bridge.
 	if !hubOriginAllowed(cfg, r, host) {
@@ -134,6 +137,12 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 		// Client departure before 101: no connection, no close bridge.
 		hub.removeConn(c)
 		return nil
+	}
+	if facts := accessFactsOf(r); facts != nil {
+		facts.mu.Lock()
+		facts.upgraded = true
+		facts.outcome = "upgraded"
+		facts.mu.Unlock()
 	}
 	if !c.attachWS(ws) {
 		// A close (teardown, host removal, kick) raced the upgrade:

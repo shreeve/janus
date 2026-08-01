@@ -95,6 +95,7 @@ type AppRecord struct {
 	// internal to the registry snapshot.
 	siteSuffix string
 	siteValue  string
+	access     *accessState
 }
 
 func (rec *AppRecord) clone() AppRecord {
@@ -271,6 +272,7 @@ type appRegistry struct {
 	hosts  map[string]string     // host → holding app id (first-wins)
 	sites  map[string]string     // pattern suffix → holding app id
 	browse *browseSupervisor
+	access *accessBridge
 
 	// purge is the cache's purge hook, invoked (outside the registry
 	// lock, after the generation bump inside it) on every purge event:
@@ -320,6 +322,19 @@ func newAppRegistry() *appRegistry {
 		now:   time.Now,
 		ttl:   defaultHeartbeatTTL,
 	}
+}
+
+// bindAccess installs the pooled bridge under the same lock registration
+// creation uses to allocate access state. Overlapping generations must bind
+// the same separately pooled bridge.
+func (r *appRegistry) bindAccess(bridge *accessBridge) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.access != nil && r.access != bridge {
+		return errors.New("janus access: registry already bound to another bridge")
+	}
+	r.access = bridge
+	return nil
 }
 
 // setPurge points the purge hook at the current config generation's cache
@@ -444,6 +459,9 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 		ID: id, Name: name, Hosts: hosts, Upstreams: append([]Upstream{}, upstreams...),
 		Site: site, Files: files, BridgePath: bridgePath, Lease: lease,
 		gen: new(atomic.Uint64), siteSuffix: suffix,
+	}
+	if r.access != nil {
+		rec.access = r.access.newState()
 	}
 	if lease == "heartbeat" {
 		rec.heartbeatAt = r.now()
@@ -794,26 +812,20 @@ func (r *appRegistry) sweepExpired() []string {
 	now := r.now()
 	r.mu.Lock()
 	var reaped []string
+	var detached []*accessSubscriber
 	for id, rec := range r.apps {
 		if rec.Lease == "process" {
 			continue
 		}
 		if now.Sub(rec.heartbeatAt) > r.ttl {
-			for _, h := range rec.Hosts {
-				delete(r.hosts, h)
-			}
-			if rec.Site != nil {
-				delete(r.sites, rec.siteSuffix)
-				for alias := range rec.Site.Aliases {
-					delete(r.hosts, alias)
-				}
-			}
-			delete(r.apps, id)
-			rec.gen.Add(1) // reap is a purge event
+			detached = append(detached, r.removeLocked(rec, "registration_reaped")...)
 			reaped = append(reaped, id)
 		}
 	}
 	r.mu.Unlock()
+	for _, sub := range detached {
+		close(sub.done)
+	}
 	for _, id := range reaped {
 		r.purgeApp(id)
 		// Reap kills the registration itself: the hub dies with it.
@@ -874,18 +886,11 @@ func (r *appRegistry) delete(id string) error {
 		r.mu.Unlock()
 		return errUnknownApp(id)
 	}
-	for _, h := range rec.Hosts {
-		delete(r.hosts, h)
-	}
-	if rec.Site != nil {
-		delete(r.sites, rec.siteSuffix)
-		for alias := range rec.Site.Aliases {
-			delete(r.hosts, alias)
-		}
-	}
-	delete(r.apps, id)
-	rec.gen.Add(1) // delete is a purge event
+	detached := r.removeLocked(rec, "registration_deleted")
 	r.mu.Unlock()
+	for _, sub := range detached {
+		close(sub.done)
+	}
 	r.purgeApp(id)
 	// DELETE kills the registration itself: the hub dies with it.
 	if r.hubTeardown != nil {
@@ -898,6 +903,43 @@ func (r *appRegistry) delete(id string) error {
 		r.mdnsNotify()
 	}
 	return nil
+}
+
+// removeLocked is the one registration-removal cut shared by DELETE, reap,
+// and final pooled-state destruction. Caller holds r.mu.
+func (r *appRegistry) removeLocked(rec *AppRecord, reason string) []*accessSubscriber {
+	for _, h := range rec.Hosts {
+		delete(r.hosts, h)
+	}
+	if rec.Site != nil {
+		delete(r.sites, rec.siteSuffix)
+		for alias := range rec.Site.Aliases {
+			delete(r.hosts, alias)
+		}
+	}
+	delete(r.apps, rec.ID)
+	rec.gen.Add(1)
+	if rec.access == nil {
+		return nil
+	}
+	rec.access.mu.Lock()
+	detached := rec.access.tombstoneLocked(reason)
+	rec.access.mu.Unlock()
+	return detached
+}
+
+func (r *appRegistry) tombstoneAll(reason string) []*accessSubscriber {
+	r.mu.Lock()
+	var detached []*accessSubscriber
+	records := make([]*AppRecord, 0, len(r.apps))
+	for _, rec := range r.apps {
+		records = append(records, rec)
+	}
+	for _, rec := range records {
+		detached = append(detached, r.removeLocked(rec, reason)...)
+	}
+	r.mu.Unlock()
+	return detached
 }
 
 // heartbeatAges reports each registered app's age since its last
