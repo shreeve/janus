@@ -7,6 +7,7 @@
 //	testkit cacheup   --sock S --hits F
 //	testkit authup    --sock S --hits F
 //	testkit hubtenant --sock S --hits F --playbook F ID…
+//	testkit sendfile  --sock S --path F
 //	testkit wedge     --host H
 //	testkit ws        HOST ORIGIN|- COOKIE|- CMD…
 //	testkit json get KEY        (stdin JSON object → field value)
@@ -41,6 +42,8 @@ func main() {
 		cmdAuthUpstream(args)
 	case "hubtenant":
 		cmdHubTenant(args)
+	case "sendfile":
+		cmdSendfile(args)
 	case "wedge":
 		cmdWedge(args)
 	case "ws":

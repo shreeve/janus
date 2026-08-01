@@ -22,7 +22,7 @@ import (
 
 // --- helpers ----------------------------------------------------------------
 
-func newTestDataPlane(t *testing.T) (*dataPlane, *appRegistry) {
+func newTestDataPlane(t testing.TB) (*dataPlane, *appRegistry) {
 	t.Helper()
 	reg := newAppRegistry()
 	return newDataPlane(reg, nil), reg
@@ -30,7 +30,7 @@ func newTestDataPlane(t *testing.T) (*dataPlane, *appRegistry) {
 
 // startUnixHTTP serves handler on a fresh unix socket and returns its path.
 // A short MkdirTemp pattern keeps the path under the darwin 104-byte limit.
-func startUnixHTTP(t *testing.T, handler http.Handler) string {
+func startUnixHTTP(t testing.TB, handler http.Handler) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "janus")
 	if err != nil {
@@ -48,7 +48,7 @@ func startUnixHTTP(t *testing.T, handler http.Handler) string {
 	return sock
 }
 
-func registerApp(t *testing.T, reg *appRegistry, host string, ups ...Upstream) string {
+func registerApp(t testing.TB, reg *appRegistry, host string, ups ...Upstream) string {
 	t.Helper()
 	rec, err := reg.create("app", []string{host}, "")
 	if err != nil {

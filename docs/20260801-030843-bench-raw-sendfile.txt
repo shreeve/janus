@@ -1,0 +1,32 @@
+command:
+  go test -run '^$' -bench '^BenchmarkSendfileDelivery$' -benchmem -count=5
+
+scope:
+  1 MiB regular file; complete request construction and response delivery to
+  a discard ResponseWriter. registered-file opens and serves through the
+  Capability 7 handler. proxied-sendfile traverses the Janus unix-socket
+  reverse proxy, transforms X-Sendfile, opens the file at Janus, and streams
+  it. proxied-worker-bytes traverses the same proxy while the worker opens and
+  streams the file.
+
+goos: darwin
+goarch: arm64
+pkg: github.com/shreeve/janus
+cpu: Apple M5
+BenchmarkSendfileDelivery/registered-file-10         	   23271	     50505 ns/op	20761.73 MB/s	   39239 B/op	      35 allocs/op
+BenchmarkSendfileDelivery/registered-file-10         	   23802	     50077 ns/op	20939.27 MB/s	   39210 B/op	      35 allocs/op
+BenchmarkSendfileDelivery/registered-file-10         	   24241	     49654 ns/op	21117.55 MB/s	   39210 B/op	      35 allocs/op
+BenchmarkSendfileDelivery/registered-file-10         	   24111	     49819 ns/op	21047.74 MB/s	   39210 B/op	      35 allocs/op
+BenchmarkSendfileDelivery/registered-file-10         	   23790	     50774 ns/op	20651.77 MB/s	   39210 B/op	      35 allocs/op
+BenchmarkSendfileDelivery/proxied-sendfile-10        	   15294	     76210 ns/op	13759.03 MB/s	   13541 B/op	     109 allocs/op
+BenchmarkSendfileDelivery/proxied-sendfile-10        	   15667	     74595 ns/op	14056.94 MB/s	   13485 B/op	     109 allocs/op
+BenchmarkSendfileDelivery/proxied-sendfile-10        	   16885	     70527 ns/op	14867.75 MB/s	   13495 B/op	     109 allocs/op
+BenchmarkSendfileDelivery/proxied-sendfile-10        	   17152	     69743 ns/op	15034.87 MB/s	   13472 B/op	     109 allocs/op
+BenchmarkSendfileDelivery/proxied-sendfile-10        	   16842	     71742 ns/op	14615.90 MB/s	   13495 B/op	     109 allocs/op
+BenchmarkSendfileDelivery/proxied-worker-bytes-10    	    3320	    359039 ns/op	2920.51 MB/s	   13982 B/op	     115 allocs/op
+BenchmarkSendfileDelivery/proxied-worker-bytes-10    	    3444	    344691 ns/op	3042.08 MB/s	   14026 B/op	     115 allocs/op
+BenchmarkSendfileDelivery/proxied-worker-bytes-10    	    3554	    339239 ns/op	3090.97 MB/s	   13933 B/op	     115 allocs/op
+BenchmarkSendfileDelivery/proxied-worker-bytes-10    	    3424	    357683 ns/op	2931.58 MB/s	   14023 B/op	     115 allocs/op
+BenchmarkSendfileDelivery/proxied-worker-bytes-10    	    3475	    375016 ns/op	2796.09 MB/s	   13999 B/op	     115 allocs/op
+PASS
+ok  	github.com/shreeve/janus	18.500s

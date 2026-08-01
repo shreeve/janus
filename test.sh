@@ -4,7 +4,7 @@
 # For operators/users: prove cold capabilities behave end-to-end.
 # Developers still use idiomatic `go test ./...` while building.
 #
-# Groups run in capability order: ping (1), control (2), …, files (7) last.
+# Groups run in capability order: ping (1), control (2), …, sendfile (8) last.
 #
 #   ./test.sh
 #   NO_COLOR=1 ./test.sh
@@ -273,7 +273,8 @@ cleanup() {
 		"$ROOT"/.test-cache-burst-* "$ROOT"/.test-cache-fail-* \
 		"$ROOT/.test-cache-cap-codes" "$ROOT/.test-cache-race" \
 		"$ROOT"/.test-auth-*
-	rm -rf "$ROOT/.test-files" "$ROOT"/.test-mdns-*
+	rm -rf "$ROOT/.test-files" "$ROOT/.test-sendfile" "$ROOT"/.test-mdns-*
+	rm -f "$ROOT/.test-sendfile-app-id"
 }
 
 trap cleanup EXIT INT TERM
@@ -3832,6 +3833,79 @@ case_files_cascade_off() {
 	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://filesoff.ripdev.io/ordered.txt)" "503"
 }
 
+# --- cases: sendfile --------------------------------------------------------
+
+SENDFILE_APP_FILE="$ROOT/.test-sendfile-app-id"
+SENDFILE_SOCK="$ROOT/run/sendfile.sock"
+SENDFILE_PATH="$ROOT/.test-sendfile/report.txt"
+
+case_sendfile_setup() {
+	mkdir -p "$ROOT/.test-sendfile"
+	printf '0123456789-sendfile\n' >"$SENDFILE_PATH"
+	rm -f "$SENDFILE_SOCK"
+	printf '%s\n' "$SENDFILE_SOCK" >>"$DATA_SOCKS_FILE"
+	"$TESTKIT" sendfile --sock "$SENDFILE_SOCK" --path "$SENDFILE_PATH" \
+		>>"$ROOT/.test-fixtures.log" 2>&1 &
+	printf '%s\n' "$!" >>"$DATA_PIDS_FILE"
+	local i
+	for i in $(seq 1 50); do
+		[[ -S "$SENDFILE_SOCK" ]] && break
+		sleep 0.1
+	done
+	[[ -S "$SENDFILE_SOCK" ]] || return 1
+
+	capi POST /1.0/apps '{"name":"sendfile","hosts":["sendfile.ripdev.io"]}'
+	eq "$REPLY_CODE" "201"
+	local id
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	ok "-n \"$id\"" "no id in $REPLY_BODY"
+	printf '%s' "$id" >"$SENDFILE_APP_FILE"
+	capi PUT "/1.0/apps/$id/upstreams" \
+		"{\"upstreams\":[{\"path\":\"$SENDFILE_SOCK\"}]}"
+	eq "$REPLY_CODE" "200"
+}
+
+case_sendfile_get_head_and_range() {
+	local headers body
+	headers="$ROOT/.test-sendfile/headers"
+	body="$(curl -sS -D "$headers" --max-time 5 https://sendfile.ripdev.io/file)"
+	eq "$body" "0123456789-sendfile"
+	! tr -d '\r' <"$headers" | awk -F': ' 'tolower($1)=="x-sendfile" {found=1} END {exit !found}'
+
+	eq "$(curl -sS -I -o /dev/null -w '%{http_code} %{size_download}' --max-time 5 \
+		https://sendfile.ripdev.io/file)" "200 0"
+	eq "$(curl -sS -H 'Range: bytes=2-5' --max-time 5 \
+		https://sendfile.ripdev.io/file)" "2345"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Range: bytes=2-5' --max-time 5 \
+		https://sendfile.ripdev.io/file)" "206"
+}
+
+case_sendfile_metadata_and_conditional() {
+	local headers
+	headers="$ROOT/.test-sendfile/custom-headers"
+	curl -sS -o /dev/null -D "$headers" --max-time 5 https://sendfile.ripdev.io/custom
+	local clean
+	clean="$(tr -d '\r' <"$headers")"
+	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="content-type" && $2=="application/x-janus-acceptance" {found=1} END {exit !found}'
+	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="content-disposition" && $2=="attachment; filename=\"edge.data\"" {found=1} END {exit !found}'
+	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="etag" && $2=="\"fixture-etag\"" {found=1} END {exit !found}'
+	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="cache-control" && $2=="private, no-store" {found=1} END {exit !found}'
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' -H 'If-None-Match: "fixture-etag"' \
+		--max-time 5 https://sendfile.ripdev.io/custom)" "304"
+}
+
+case_sendfile_failure_strips_instruction() {
+	local headers code
+	headers="$ROOT/.test-sendfile/missing-headers"
+	code="$(curl -sS -o /dev/null -D "$headers" -w '%{http_code}' --max-time 5 \
+		https://sendfile.ripdev.io/missing)"
+	eq "$code" "502"
+	local clean
+	clean="$(tr -d '\r' <"$headers")"
+	! printf '%s' "$clean" | awk -F': ' 'tolower($1)=="x-sendfile" {found=1} END {exit !found}'
+	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="cache-control" && $2=="no-store" {found=1} END {exit !found}'
+}
+
 # --- main -----------------------------------------------------------------
 
 SUITE_START_NS=$(now_ns)
@@ -4046,6 +4120,12 @@ test "SPA shell, proxy_first, strict request path" case_files_shell_proxy_first_
 test "fixed MIME and Cache-Control classes" case_files_response_policy
 test "strict site/files JSON fields reject" case_files_strict_hot_fields
 test "cascade: site files off beats global on" case_files_cascade_off
+
+group "sendfile"
+test "register ordinary upstream; no sendfile configuration" case_sendfile_setup
+test "GET, HEAD, and byte range stream the selected file" case_sendfile_get_head_and_range
+test "application metadata wins; conditional request returns 304" case_sendfile_metadata_and_conditional
+test "missing target returns 502 without leaking instruction" case_sendfile_failure_strips_instruction
 
 report
 exit $?

@@ -1,4 +1,4 @@
-# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth, (7) files
+# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth, (7) files, (8) sendfile
 #
 # *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
 #

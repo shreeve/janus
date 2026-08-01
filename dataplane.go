@@ -115,6 +115,7 @@ func newDataPlane(reg *appRegistry, logger *zap.Logger) *dataPlane {
 	}
 	dp.transport = &http.Transport{
 		DialContext:         dp.dialUpstream,
+		DisableCompression:  true,
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
 	}
@@ -247,6 +248,7 @@ const (
 // errWorkerMarked503 aborts a proxy attempt on a marked 503 so the retry
 // loop can select another upstream. Only raised for replayable requests.
 var errWorkerMarked503 = errors.New("worker answered a marked 503")
+var errSendfileUpgrade = errors.New("worker answered 101 with X-Sendfile")
 
 func marked503(resp *http.Response) bool {
 	return resp.StatusCode == http.StatusServiceUnavailable &&
@@ -439,11 +441,30 @@ func (dp *dataPlane) upstreamHealth(ups []Upstream) (total, healthy int) {
 	return total, healthy
 }
 
+// sendfileResponseStripper removes the internal instruction at every
+// ResponseWriter commit, including informational responses. Unwrap preserves
+// optional writer capabilities through http.ResponseController.
+type sendfileResponseStripper struct{ http.ResponseWriter }
+
+func (w *sendfileResponseStripper) WriteHeader(status int) {
+	w.Header().Del(sendfileHeader)
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *sendfileResponseStripper) Write(p []byte) (int, error) {
+	w.Header().Del(sendfileHeader)
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *sendfileResponseStripper) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // attemptState is one proxy attempt's per-request state, carried on the
 // outbound request context so per-socket ReverseProxy structs are reusable.
 type attemptState struct {
 	canReplay bool
+	autoGzip  bool
 	err       error
+	writer    sendfileResponseStripper
 
 	// bodyErr is the first read failure on the worker's response body: the
 	// worker died after response headers landed. ErrorHandler never sees
@@ -455,12 +476,16 @@ type attemptState struct {
 // bodyWatcher wraps a worker's response body and records the first read
 // failure on the attempt. io.EOF is the normal end of body, never recorded.
 type bodyWatcher struct {
-	rc io.ReadCloser
-	at *attemptState
+	rc      io.ReadCloser
+	at      *attemptState
+	trailer http.Header
 }
 
 func (b *bodyWatcher) Read(p []byte) (n int, err error) {
 	n, err = b.rc.Read(p)
+	if err == io.EOF {
+		b.trailer.Del(sendfileHeader)
+	}
 	if err != nil && err != io.EOF {
 		b.at.bodyErr = err
 	}
@@ -489,18 +514,29 @@ func attemptOf(ctx context.Context) *attemptState {
 func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 	host := sockHost(path)
 	rp := &httputil.ReverseProxy{
-		Transport:  dp.transport,
+		Transport:  sendfileTransport{base: dp.transport},
 		BufferPool: dp.buffers,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
 			pr.Out.URL.Host = host
 			pr.Out.Host = pr.In.Host
+			pr.Out.Header.Del(sendfileHeader)
+			pr.Out.Trailer.Del(sendfileHeader)
+			if pr.Out.Header.Get("Accept-Encoding") == "" &&
+				pr.Out.Header.Get("Range") == "" &&
+				pr.Out.Method != http.MethodHead {
+				pr.Out.Header.Set("Accept-Encoding", "gzip")
+				if st := attemptOf(pr.Out.Context()); st != nil {
+					st.autoGzip = true
+				}
+			}
 			pr.SetXForwarded()
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			// Scrub the internal correlation id from every client response
 			// (surfacing it in the access log is future work).
 			resp.Header.Del(ripMarkHeader)
+			resp.Trailer.Del(sendfileHeader)
 			st := attemptOf(resp.Request.Context())
 			if marked503(resp) {
 				if st != nil && st.canReplay {
@@ -514,11 +550,23 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 				resp.Header.Del(workerBusyHeader)
 				resp.Header.Del(workerDrainingHeader)
 			}
+			if resp.StatusCode == http.StatusSwitchingProtocols {
+				if _, present := headerValues(resp.Header, sendfileHeader); present {
+					resp.Header.Del(sendfileHeader)
+					return errSendfileUpgrade
+				}
+				return nil
+			}
+			if ringClassOf(resp.Request.Context()) == ringClassBridge {
+				resp.Header.Del(sendfileHeader)
+			} else if dp.applySendfile(resp) {
+				return nil
+			}
 			// Watch the body copy so a worker dying mid-response is a
 			// health event. A 101 body is the upgraded connection itself
 			// (the proxy needs it as an io.ReadWriteCloser) — never wrap.
 			if st != nil && resp.StatusCode != http.StatusSwitchingProtocols {
-				resp.Body = &bodyWatcher{rc: resp.Body, at: st}
+				resp.Body = &bodyWatcher{rc: resp.Body, at: st, trailer: resp.Trailer}
 			}
 			return nil
 		},
@@ -541,6 +589,7 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	defer st.inflight.Add(-1)
 
 	at := &attemptState{canReplay: replayable(r)}
+	at.writer.ResponseWriter = w
 
 	// The transport closes the outbound body even when the dial fails; hand
 	// it a wrapper so the client's body (guaranteed unread on a dial error)
@@ -568,7 +617,7 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 			panic(v)
 		}
 	}()
-	st.proxy.ServeHTTP(w, attempt)
+	st.proxy.ServeHTTP(&at.writer, attempt)
 	if at.err == nil {
 		dp.markMidResponseFailure(at, r, path, st)
 		return true, false
@@ -576,6 +625,11 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	if errors.Is(at.err, errWorkerMarked503) {
 		// Marked 503: flow control, not failure — no health accounting.
 		return false, true
+	}
+	if errors.Is(at.err, errSendfileUpgrade) {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return true, false
 	}
 	if r.Context().Err() != nil {
 		return true, false // client gone; nothing to write, nothing to blame

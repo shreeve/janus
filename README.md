@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, and an edge authentication wall for auth-less apps, driven by a JSON control API.</strong>
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, an edge authentication wall, registered static files, and X-Sendfile offload, driven by a JSON control API.</strong>
 </p>
 
 ---
@@ -20,6 +20,7 @@ Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Ja
 		cache
 		hub
 		mdns
+		files
 	}
 }
 
@@ -137,6 +138,8 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 4 | **hub** | Per-app WebSocket fan-out terminated at the edge; tenants observe and steer over HTTP | [`capability-hub`](docs/20260720-162350-hub-design.md) |
 | 5 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS, and the read-only status front door | [`capability-mdns`](docs/20260722-034619-capability-mdns.md) |
 | 6 | **auth** | URL-prefix gates for auth-less apps: shared users, per-gate allow lists, host-wide session, `Remote-User` strip-and-inject | [`capability-auth`](docs/20260728-160734-capability-auth.md) |
+| 7 | **files** | Registered ordered roots, SPA shells, and directory-gated site hosts | [`capability-files`](docs/20260730-202700-capability-files.md) |
+| 8 | **sendfile** | Always-on final upstream `X-Sendfile` transformation with validators, ranges, cache recording, and streaming | [`capability-sendfile`](docs/20260801-020600-capability-sendfile.md) |
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -148,7 +151,7 @@ xcaddy build \
   --output ./bin/caddy
 
 go test ./...
-./test.sh   # 11 groups, 149 cases, in capability order: ping, control, apps, data, cache, heartbeat, tls, hub, tenant, mdns, auth
+./test.sh   # 13 groups, 163 cases, ending with files and sendfile
 ```
 
 ### 1. ping (data plane)
