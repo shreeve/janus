@@ -37,8 +37,10 @@ func (h *Handler) serveCache(w http.ResponseWriter, r *http.Request) error {
 	host := normalizeHostHeader(r.Host)
 	rec, ok := dp.registry.resolveRequestHost(r.Host) // generation snapshot rides rec.genSnap
 	if !ok {
+		accessFactsOf(r).clearOwner()
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
+	accessFactsOf(r).setOwner(rec)
 
 	if cacheBypassRequest(r) {
 		return c.bypassServe(w, r, dp, cc, host, rec)
@@ -90,6 +92,8 @@ func (h *Handler) serveCache(w http.ResponseWriter, r *http.Request) error {
 					age := int64(now.Sub(v.fillStart) / time.Second)
 					status, header, body := v.status, v.header, v.body
 					sh.mu.Unlock()
+					accessFactsOf(r).setCache("hit")
+					accessFactsOf(r).setClass(v.responseClass)
 					return writeCachedResponse(w, status, header, body, age, "HIT", cc.debug)
 				}
 			}
@@ -113,10 +117,12 @@ func (h *Handler) serveCache(w http.ResponseWriter, r *http.Request) error {
 			if cc.debug {
 				w.Header().Set(cacheDebugHeader, "BYPASS")
 			}
+			accessFactsOf(r).setCache("bypass")
 			return dp.serveResolved(w, r, host, rec)
 		}
 		f.waiters++
 		sh.mu.Unlock()
+		accessFactsOf(r).setCache("bypass")
 		return c.awaitFill(w, r, dp, cc, sh, f, rec)
 	}
 
@@ -133,6 +139,7 @@ func (h *Handler) serveCache(w http.ResponseWriter, r *http.Request) error {
 	sh.ctr.misses.Add(1)
 	sh.appStats(rec.ID).misses.Add(1)
 	sh.mu.Unlock()
+	accessFactsOf(r).setCache("miss")
 
 	return c.fill(w, r, dp, cc, host, rec, sh, key, ckey, ckeyHash, f)
 }
@@ -140,6 +147,7 @@ func (h *Handler) serveCache(w http.ResponseWriter, r *http.Request) error {
 // bypassServe proceeds through the standard decision table exactly as
 // today — doorbell, marked-503 retry, health accounting, all unchanged.
 func (c *cacheStore) bypassServe(w http.ResponseWriter, r *http.Request, dp *dataPlane, cc *cacheSite, host string, rec AppRecord) error {
+	accessFactsOf(r).setCache("bypass")
 	home := c.shardFor(rec.ID)
 	home.ctr.bypass.Add(1)
 	home.appStats(rec.ID).bypass.Add(1)
@@ -192,6 +200,8 @@ func (c *cacheStore) awaitFill(w http.ResponseWriter, r *http.Request, dp *dataP
 		if f.shareable && !f.detached.Load() {
 			sh.ctr.coalesced.Add(1)
 			sh.appStats(rec.ID).coalesced.Add(1)
+			accessFactsOf(r).setCache("coalesced")
+			accessFactsOf(r).setClass(f.responseClass)
 			return writeCachedResponse(w, f.status, f.header, f.body, -1, "COALESCED", cc.debug)
 		}
 		// The fill produced something per-client (or failed): the
@@ -218,7 +228,9 @@ func (c *cacheStore) awaitFill(w http.ResponseWriter, r *http.Request, dp *dataP
 		w.Header().Set(cacheDebugHeader, "BYPASS")
 	}
 	// Fresh resolve: the registry may have changed while we held.
-	return dp.serve(w, r)
+	err := dp.serve(w, r)
+	accessFactsOf(r).setCache("bypass")
+	return err
 }
 
 // --- the fill (leader) ---------------------------------------------------------
@@ -241,7 +253,7 @@ type fillState struct {
 // purge may have detached it first), optionally sets the one-ttl
 // do-not-coalesce mark, publishes the shareable outcome, and wakes the
 // waiters.
-func (ld *fillState) release(shareable bool, status int, header http.Header, body []byte, mark bool) {
+func (ld *fillState) release(shareable bool, status int, header http.Header, body []byte, responseClass string, mark bool) {
 	if ld.released {
 		return
 	}
@@ -256,7 +268,7 @@ func (ld *fillState) release(shareable bool, status int, header http.Header, bod
 	}
 	sh.mu.Unlock()
 	ld.f.shareable = shareable
-	ld.f.status, ld.f.header, ld.f.body = status, header, body
+	ld.f.status, ld.f.header, ld.f.body, ld.f.responseClass = status, header, body, responseClass
 	close(ld.f.done)
 }
 
@@ -268,7 +280,7 @@ func (c *cacheStore) fill(w http.ResponseWriter, r *http.Request, dp *dataPlane,
 	fr := &fillRecorder{w: w, cc: cc, onUnshareable: func() {
 		// Header-time early release: waiters fall through instead of
 		// holding for a body that will never be shared.
-		ld.release(false, 0, nil, nil, true)
+		ld.release(false, 0, nil, nil, "", true)
 	}}
 	if cc.debug {
 		w.Header().Set(cacheDebugHeader, "MISS")
@@ -281,11 +293,16 @@ func (c *cacheStore) fill(w http.ResponseWriter, r *http.Request, dp *dataPlane,
 			// ErrAbortHandler; the flight must not strand its waiters.
 			// A truncated fill is never stored; the panic keeps
 			// unwinding after this.
-			ld.release(false, 0, nil, nil, true)
+			ld.release(false, 0, nil, nil, "", true)
 		}
 	}()
 	err := dp.serveResolved(fr, r, host, rec)
 	completed = true
+	if facts := accessFactsOf(r); facts != nil {
+		facts.mu.Lock()
+		fr.responseClass = facts.responseClass
+		facts.mu.Unlock()
+	}
 	ld.complete(r, fr, err)
 	return err
 }
@@ -302,7 +319,7 @@ func (ld *fillState) complete(r *http.Request, fr *fillRecorder, err error) {
 		// everything else marks the key do-not-coalesce for one ttl so a
 		// never-storable hot route cannot cycle waiter pulses forever.
 		mark := !(r.Context().Err() != nil && !fr.wroteHeader)
-		ld.release(false, 0, nil, nil, mark)
+		ld.release(false, 0, nil, nil, "", mark)
 		return
 	}
 
@@ -316,13 +333,13 @@ func (ld *fillState) complete(r *http.Request, fr *fillRecorder, err error) {
 
 	// Sharing is gated by storability — the proof the response is not
 	// per-client — never by whether the bytes happen to be retained.
-	ld.release(true, fr.status, header, body, false)
-	ld.c.storeFill(ld.sh, ld.key, ld.f, ld.ckeyHash, fr.varyNames, reqVals, fr.status, header, body, ld.fillStart, fr.freshness)
+	ld.release(true, fr.status, header, body, fr.responseClass, false)
+	ld.c.storeFill(ld.sh, ld.key, ld.f, ld.ckeyHash, fr.varyNames, reqVals, fr.status, header, body, fr.responseClass, ld.fillStart, fr.freshness)
 }
 
 // storeFill admits a storable fill into the shard: generation fence,
 // doorkeeper, per-app share cap, shard budget — in that order.
-func (c *cacheStore) storeFill(sh *cacheShard, key string, f *cacheFlight, ckeyHash uint64, varyNames, reqVals []string, status int, header http.Header, body []byte, fillStart time.Time, fresh time.Duration) {
+func (c *cacheStore) storeFill(sh *cacheShard, key string, f *cacheFlight, ckeyHash uint64, varyNames, reqVals []string, status int, header http.Header, body []byte, responseClass string, fillStart time.Time, fresh time.Duration) {
 	appID := f.appID
 	size := int64(len(body)) + int64(len(key)) + headerBytes(header) + cacheEntryOverhead
 	if size > sh.budget {
@@ -363,17 +380,18 @@ func (c *cacheStore) storeFill(sh *cacheShard, key string, f *cacheFlight, ckeyH
 	}
 
 	v := &cacheVariant{
-		key:       key,
-		appID:     appID,
-		varyNames: varyNames,
-		reqVals:   reqVals,
-		status:    status,
-		header:    header,
-		body:      body,
-		fillStart: fillStart,
-		fresh:     fresh,
-		size:      size,
-		stats:     sh.appStats(appID),
+		key:           key,
+		appID:         appID,
+		varyNames:     varyNames,
+		reqVals:       reqVals,
+		status:        status,
+		header:        header,
+		body:          body,
+		responseClass: responseClass,
+		fillStart:     fillStart,
+		fresh:         fresh,
+		size:          size,
+		stats:         sh.appStats(appID),
 	}
 	v.lastAccess.Store(now.UnixNano())
 	sh.insertVariantLocked(v)
@@ -430,6 +448,7 @@ type fillRecorder struct {
 	abandoned      bool
 	writeErr       bool
 	written        int64
+	responseClass  string
 }
 
 func (fr *fillRecorder) Header() http.Header { return fr.w.Header() }

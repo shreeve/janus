@@ -127,8 +127,10 @@ func (dp *dataPlane) serve(w http.ResponseWriter, r *http.Request) error {
 	host := normalizeHostHeader(r.Host)
 	rec, ok := dp.registry.resolveRequestHost(r.Host)
 	if !ok {
+		accessFactsOf(r).clearOwner()
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
+	accessFactsOf(r).setOwner(rec)
 	return dp.serveResolved(w, r, host, rec)
 }
 
@@ -136,9 +138,11 @@ func (dp *dataPlane) serve(w http.ResponseWriter, r *http.Request) error {
 // record (the cache resolves once and reuses the record; the ring loop
 // still re-resolves after every wake).
 func (dp *dataPlane) serveResolved(w http.ResponseWriter, r *http.Request, host string, rec AppRecord) error {
+	accessFactsOf(r).setOwner(rec)
 	rings := 0
 	for {
 		if len(rec.Upstreams) == 0 {
+			accessFactsOf(r).setClass("janus")
 			return dp.unavailable(w, rec.ID, "upstreams empty (down on purpose)")
 		}
 		bell, isBell := doorbellOf(rec)
@@ -146,6 +150,7 @@ func (dp *dataPlane) serveResolved(w http.ResponseWriter, r *http.Request, host 
 			return dp.proxyWorkers(w, r, rec)
 		}
 		if rings >= dp.maxRings {
+			accessFactsOf(r).setClass("janus")
 			return dp.unavailable(w, rec.ID, fmt.Sprintf("ring retry cap (%d) reached", dp.maxRings))
 		}
 		rings++
@@ -156,10 +161,13 @@ func (dp *dataPlane) serveResolved(w http.ResponseWriter, r *http.Request, host 
 			var ok bool
 			rec, ok = dp.registry.resolveHost(host)
 			if !ok {
+				accessFactsOf(r).clearOwner()
 				return caddyhttp.Error(http.StatusNotFound,
 					fmt.Errorf("janus: host %q vanished during ring", host))
 			}
+			accessFactsOf(r).setOwner(rec)
 		case ringBootError:
+			accessFactsOf(r).setClass("janus")
 			// Forward the tenant's 503 verbatim; it carries the boot error.
 			if out.contentType != "" {
 				w.Header().Set("Content-Type", out.contentType)
@@ -170,11 +178,13 @@ func (dp *dataPlane) serveResolved(w http.ResponseWriter, r *http.Request, host 
 			_, err := w.Write(out.body)
 			return err
 		case ringOverflow:
+			accessFactsOf(r).setClass("janus")
 			return dp.unavailable(w, rec.ID, "ring waiter cap reached")
 		case ringClientGone:
 			// Client disconnected during the hold; abandon this holder only.
 			return nil
 		default: // ringFailed: connection error / timeout / EOF / bogus status
+			accessFactsOf(r).setClass("janus")
 			return dp.unavailable(w, rec.ID, "ring failed: "+out.reason)
 		}
 	}
@@ -209,6 +219,7 @@ func normalizeHostHeader(hostport string) string {
 }
 
 func (dp *dataPlane) unavailable(w http.ResponseWriter, appID, reason string) error {
+	// Availability failures are Janus-owned final responses.
 	dp.logger.Warn("janus data plane unavailable",
 		zap.String("app", appID),
 		zap.String("reason", reason),
@@ -253,6 +264,26 @@ var errSendfileUpgrade = errors.New("worker answered 101 with X-Sendfile")
 func marked503(resp *http.Response) bool {
 	return resp.StatusCode == http.StatusServiceUnavailable &&
 		(resp.Header.Get(workerBusyHeader) != "" || resp.Header.Get(workerDrainingHeader) != "")
+}
+
+func scrubTrailerDeclaration(header http.Header, name string) {
+	values, present := headerValues(header, "Trailer")
+	if !present {
+		return
+	}
+	var kept []string
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.TrimSpace(token)
+			if token != "" && !strings.EqualFold(token, name) {
+				kept = append(kept, token)
+			}
+		}
+	}
+	header.Del("Trailer")
+	if len(kept) > 0 {
+		header.Set("Trailer", strings.Join(kept, ", "))
+	}
 }
 
 // replayable reports whether the request can be safely delivered to another
@@ -303,9 +334,11 @@ func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, rec Ap
 				// this is the common path).
 				w.Header().Set("Retry-After", retryAfter)
 				w.Header().Set("Cache-Control", "no-store")
+				accessFactsOf(r).setClass("janus")
 				http.Error(w, "all workers busy", http.StatusServiceUnavailable)
 				return nil
 			}
+			accessFactsOf(r).setClass("janus")
 			return dp.unavailable(w, rec.ID, "all upstreams unhealthy")
 		}
 		final, busy := dp.proxyOnce(w, r, path, st)
@@ -479,15 +512,30 @@ type bodyWatcher struct {
 	rc      io.ReadCloser
 	at      *attemptState
 	trailer http.Header
+	facts   *accessFacts
+	ctx     context.Context
 }
 
 func (b *bodyWatcher) Read(p []byte) (n int, err error) {
 	n, err = b.rc.Read(p)
 	if err == io.EOF {
+		if values, present := headerValues(b.trailer, ripMarkHeader); present {
+			b.facts.setMark(values, true)
+		}
+		b.trailer.Del(ripMarkHeader)
 		b.trailer.Del(sendfileHeader)
 	}
 	if err != nil && err != io.EOF {
 		b.at.bodyErr = err
+		if b.facts != nil {
+			b.facts.mu.Lock()
+			if b.ctx != nil && b.ctx.Err() != nil {
+				b.facts.outcome = "client_canceled"
+			} else if b.facts.outcome != "client_canceled" {
+				b.facts.outcome = "upstream_aborted"
+			}
+			b.facts.mu.Unlock()
+		}
 	}
 	return n, err
 }
@@ -533,9 +581,10 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 			pr.SetXForwarded()
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			// Scrub the internal correlation id from every client response
-			// (surfacing it in the access log is future work).
+			markValues, markPresent := headerValues(resp.Header, ripMarkHeader)
 			resp.Header.Del(ripMarkHeader)
+			scrubTrailerDeclaration(resp.Header, ripMarkHeader)
+			resp.Trailer.Del(ripMarkHeader)
 			resp.Trailer.Del(sendfileHeader)
 			st := attemptOf(resp.Request.Context())
 			if marked503(resp) {
@@ -550,8 +599,14 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 				resp.Header.Del(workerBusyHeader)
 				resp.Header.Del(workerDrainingHeader)
 			}
+			facts := accessFactsOf(resp.Request)
+			facts.setMark(markValues, markPresent)
+			_, sendfilePresent := headerValues(resp.Header, sendfileHeader)
+			if sendfilePresent && ringClassOf(resp.Request.Context()) != ringClassBridge {
+				facts.setClass("sendfile")
+			}
 			if resp.StatusCode == http.StatusSwitchingProtocols {
-				if _, present := headerValues(resp.Header, sendfileHeader); present {
+				if sendfilePresent {
 					resp.Header.Del(sendfileHeader)
 					return errSendfileUpgrade
 				}
@@ -566,7 +621,10 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 			// health event. A 101 body is the upgraded connection itself
 			// (the proxy needs it as an io.ReadWriteCloser) — never wrap.
 			if st != nil && resp.StatusCode != http.StatusSwitchingProtocols {
-				resp.Body = &bodyWatcher{rc: resp.Body, at: st, trailer: resp.Trailer}
+				resp.Body = &bodyWatcher{
+					rc: resp.Body, at: st, trailer: resp.Trailer,
+					facts: facts, ctx: resp.Request.Context(),
+				}
 			}
 			return nil
 		},
@@ -589,6 +647,10 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 	defer st.inflight.Add(-1)
 
 	at := &attemptState{canReplay: replayable(r)}
+	if recFacts := accessFactsOf(r); recFacts != nil {
+		recFacts.attempt(path)
+		recFacts.setClass("proxy")
+	}
 	at.writer.ResponseWriter = w
 
 	// The transport closes the outbound body even when the dial fails; hand

@@ -26,7 +26,9 @@
 // instruction selects any regular file Janus can open, and Janus applies
 // validators, ranges, cache recording, and streaming at the edge. Browse
 // (9) turns selected hot and cold roots into navigable spaces with a
-// content-addressed theme and bounded extension renderers.
+// content-addressed theme and bounded extension renderers. Access log
+// (10) wraps Caddy's JSON encoder without changing durable bytes and
+// publishes bounded app-scoped NDJSON through the control plane.
 //
 // The registry, data plane, and hub state live in pooled process state
 // (caddy.UsagePool), so a Caddy config reload never drops a registration

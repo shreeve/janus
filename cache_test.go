@@ -1,6 +1,7 @@
 package janus
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
 // --- harness ------------------------------------------------------------------
@@ -66,6 +68,14 @@ func (ch *cacheHarness) do(t *testing.T, method, host, target string, kv ...stri
 }
 
 func (ch *cacheHarness) stats() cacheStats { return ch.store.snapshot() }
+
+func cacheRequestFacts(method, target string) (*http.Request, *accessFacts) {
+	r := httptest.NewRequest(method, target, nil)
+	facts := &accessFacts{cacheVerdict: "off"}
+	ctx := context.WithValue(r.Context(), caddyhttp.ExtraLogFieldsCtxKey, new(caddyhttp.ExtraLogFields))
+	ctx = context.WithValue(ctx, accessFactsContextKey{}, facts)
+	return r.WithContext(ctx), facts
+}
 
 // flightWaiters reads the waiter count of the coalescing key's flight.
 func (ch *cacheHarness) flightWaiters(host, target string, hdr http.Header) int {
@@ -413,35 +423,71 @@ func TestCacheTTLAnchorIsFillStart(t *testing.T) {
 	clock.Store(base.UnixNano())
 	ch.store.now = func() time.Time { return time.Unix(0, clock.Load()) }
 
-	// Each request holds until it receives one token.
-	hold := make(chan struct{})
-	u := &countingUpstream{entered: make(chan struct{}, 16), hold: hold}
-	ch.register(t, "app.test", u)
+	var hits atomic.Int32
+	entered := make(chan chan struct{}, 1)
+	socket := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		release := make(chan struct{})
+		entered <- release
+		<-release
+		body := "body:" + r.RequestURI
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	registerApp(t, ch.reg, "app.test", Upstream{Path: socket})
 
-	serve := func() chan struct{} {
-		done := make(chan struct{})
+	serve := func() chan error {
+		done := make(chan error, 1)
 		go func() {
-			defer close(done)
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.Host = "app.test"
-			ch.h.ServeHTTP(httptest.NewRecorder(), r, nil)
+			done <- ch.h.ServeHTTP(httptest.NewRecorder(), r, nil)
 		}()
 		return done
+	}
+	awaitEntered := func(phase string, done <-chan error) chan struct{} {
+		t.Helper()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case release := <-entered:
+			return release
+		case err := <-done:
+			t.Fatalf("%s completed without reaching upstream: error=%v hits=%d stats=%+v",
+				phase, err, hits.Load(), ch.stats().cacheStatsBucket)
+		case <-timer.C:
+			t.Fatalf("%s did not reach upstream within 5s: hits=%d stats=%+v",
+				phase, hits.Load(), ch.stats().cacheStatsBucket)
+		}
+		return nil
+	}
+	releaseAndAwait := func(phase string, release chan struct{}, done <-chan error) {
+		t.Helper()
+		close(release)
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s returned error: %v", phase, err)
+			}
+		case <-timer.C:
+			t.Fatalf("%s did not complete within 5s: hits=%d stats=%+v",
+				phase, hits.Load(), ch.stats().cacheStatsBucket)
+		}
 	}
 
 	// First fill primes the doorkeeper (not admitted).
 	d1 := serve()
-	<-u.entered
-	hold <- struct{}{}
-	<-d1
+	releaseAndAwait("first fill", awaitEntered("first fill", d1), d1)
 
 	// Second fill starts at base and completes 900ms later: the stored
 	// entry's age must anchor at fill START.
 	d2 := serve()
-	<-u.entered
+	release2 := awaitEntered("second fill", d2)
 	clock.Store(base.Add(900 * time.Millisecond).UnixNano())
-	hold <- struct{}{}
-	<-d2
+	releaseAndAwait("second fill", release2, d2)
 	if s := ch.stats(); s.Stores != 1 {
 		t.Fatalf("precondition: want 1 store, got %+v", s.cacheStatsBucket)
 	}
@@ -450,10 +496,8 @@ func TestCacheTTLAnchorIsFillStart(t *testing.T) {
 	// fill-end anchor would still serve it.
 	clock.Store(base.Add(1100 * time.Millisecond).UnixNano())
 	d3 := serve()
-	<-u.entered // reaches the worker again: the entry was expired
-	hold <- struct{}{}
-	<-d3
-	if got := u.hits.Load(); got != 3 {
+	releaseAndAwait("expired refill", awaitEntered("expired refill", d3), d3)
+	if got := hits.Load(); got != 3 {
 		t.Fatalf("entry outlived ttl measured from fill start (hits %d)", got)
 	}
 }
@@ -607,6 +651,20 @@ func TestDoorkeeperAdmitsOnSecondSighting(t *testing.T) {
 	}
 }
 
+func TestDoorkeeperOneSightingWithCollidingPositions(t *testing.T) {
+	sh := newCacheStore(defaultCacheMaxBytes, defaultCacheAppShare).shards[0]
+	const hash = uint64(37)<<32 | 37
+	sh.mu.Lock()
+	sh.dkBump(hash)
+	afterOne := sh.dkCount(hash)
+	sh.dkBump(hash)
+	afterTwo := sh.dkCount(hash)
+	sh.mu.Unlock()
+	if afterOne != 1 || afterTwo != 2 {
+		t.Fatalf("colliding positions counted sightings as %d then %d, want 1 then 2", afterOne, afterTwo)
+	}
+}
+
 // --- max_body -------------------------------------------------------------------
 
 func TestCacheMaxBodyStreamsUncached(t *testing.T) {
@@ -640,14 +698,16 @@ func TestCoalescingNMissesOneFill(t *testing.T) {
 	const n = 8
 	var wg sync.WaitGroup
 	results := make([]*httptest.ResponseRecorder, n)
+	facts := make([]*accessFacts, n)
 	// Leader first, deterministically.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r, requestFacts := cacheRequestFacts(http.MethodGet, "/")
+		facts[0] = requestFacts
 		r.Host = "app.test"
 		rr := httptest.NewRecorder()
-		ch.h.ServeHTTP(rr, r, nil)
+		_ = ch.h.serveCache(rr, r)
 		results[0] = rr
 	}()
 	<-u.entered // the leader is inside the worker
@@ -656,10 +716,11 @@ func TestCoalescingNMissesOneFill(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r, requestFacts := cacheRequestFacts(http.MethodGet, "/")
+			facts[i] = requestFacts
 			r.Host = "app.test"
 			rr := httptest.NewRecorder()
-			ch.h.ServeHTTP(rr, r, nil)
+			_ = ch.h.serveCache(rr, r)
 			results[i] = rr
 		}()
 	}
@@ -683,8 +744,11 @@ func TestCoalescingNMissesOneFill(t *testing.T) {
 	}
 	// COALESCED responses carry no Age (they are the fill, not a reuse).
 	for i := 1; i < n; i++ {
-		if v := results[i].Header().Get(cacheDebugHeader); v != "COALESCED" && v != "MISS" {
-			t.Fatalf("waiter %d verdict %q", i, v)
+		if v := results[i].Header().Get(cacheDebugHeader); v != "COALESCED" {
+			t.Fatalf("waiter %d debug verdict %q", i, v)
+		}
+		if got := facts[i].cacheVerdict; got != "coalesced" {
+			t.Fatalf("waiter %d access verdict %q, want coalesced", i, got)
 		}
 	}
 }
@@ -697,28 +761,32 @@ func TestCoalescingWaiterCapOverflowFallsThrough(t *testing.T) {
 	ch.register(t, "app.test", u)
 
 	var wg sync.WaitGroup
-	serve := func() {
+	serve := func(factsOut chan<- *accessFacts) {
 		defer wg.Done()
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r, facts := cacheRequestFacts(http.MethodGet, "/")
+		if factsOut != nil {
+			factsOut <- facts
+		}
 		r.Host = "app.test"
 		rr := httptest.NewRecorder()
-		ch.h.ServeHTTP(rr, r, nil)
+		_ = ch.h.serveCache(rr, r)
 		if rr.Code != http.StatusOK {
 			t.Errorf("nobody gets a manufactured 503; got %d", rr.Code)
 		}
 	}
 	wg.Add(1)
-	go serve()
+	go serve(nil)
 	<-u.entered // leader in the worker
 	for range 2 {
 		wg.Add(1)
-		go serve()
+		go serve(nil)
 	}
 	waitFor(t, "two waiters", func() bool {
 		return ch.flightWaiters("app.test", "/", http.Header{}) == 2
 	})
+	overflowFacts := make(chan *accessFacts, 1)
 	wg.Add(1)
-	go serve() // third waiter overflows the cap → falls through to the worker
+	go serve(overflowFacts) // third waiter overflows the cap → falls through to the worker
 	<-u.entered
 	close(release)
 	wg.Wait()
@@ -728,6 +796,9 @@ func TestCoalescingWaiterCapOverflowFallsThrough(t *testing.T) {
 	}
 	if s := ch.stats(); s.WaiterOverflow != 1 {
 		t.Fatalf("want waiter_overflow=1, got %+v", s.cacheStatsBucket)
+	}
+	if got := (<-overflowFacts).cacheVerdict; got != "bypass" {
+		t.Fatalf("overflow access verdict %q, want bypass", got)
 	}
 }
 
@@ -750,12 +821,14 @@ func TestCoalescingWaiterDeadlineFallsThrough(t *testing.T) {
 
 	wg.Add(1)
 	var waiter *httptest.ResponseRecorder
+	var waiterFacts *accessFacts
 	go func() { // waiter whose deadline expires mid-hold
 		defer wg.Done()
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r, facts := cacheRequestFacts(http.MethodGet, "/")
+		waiterFacts = facts
 		r.Host = "app.test"
 		rr := httptest.NewRecorder()
-		ch.h.ServeHTTP(rr, r, nil)
+		_ = ch.h.serveCache(rr, r)
 		waiter = rr
 	}()
 	<-u.entered // the expired waiter fell through and reached the worker
@@ -767,6 +840,9 @@ func TestCoalescingWaiterDeadlineFallsThrough(t *testing.T) {
 	}
 	if s := ch.stats(); s.WaiterExpired != 1 {
 		t.Fatalf("want waiter_expired=1, got %+v", s.cacheStatsBucket)
+	}
+	if got := waiterFacts.cacheVerdict; got != "bypass" {
+		t.Fatalf("expired waiter access verdict %q, want bypass", got)
 	}
 }
 
@@ -783,6 +859,7 @@ func TestCoalescingFillFailureFallsThroughAndMarks(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var leader, waiter *httptest.ResponseRecorder
+	var waiterFacts *accessFacts
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -796,10 +873,11 @@ func TestCoalescingFillFailureFallsThroughAndMarks(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r, facts := cacheRequestFacts(http.MethodGet, "/")
+		waiterFacts = facts
 		r.Host = "app.test"
 		rr := httptest.NewRecorder()
-		ch.h.ServeHTTP(rr, r, nil)
+		_ = ch.h.serveCache(rr, r)
 		waiter = rr
 	}()
 	waitFor(t, "one waiter", func() bool {
@@ -818,6 +896,9 @@ func TestCoalescingFillFailureFallsThroughAndMarks(t *testing.T) {
 	}
 	if s := ch.stats(); s.Coalesced != 0 || s.Stores != 0 {
 		t.Fatalf("nothing shared, nothing stored: %+v", s.cacheStatsBucket)
+	}
+	if got := waiterFacts.cacheVerdict; got != "bypass" {
+		t.Fatalf("non-shareable waiter access verdict %q, want bypass", got)
 	}
 
 	// The key now carries a do-not-coalesce mark: the next request
@@ -894,13 +975,15 @@ func TestPurgeDetachesWaiters(t *testing.T) {
 	<-u.entered
 
 	var waiter *httptest.ResponseRecorder
+	var waiterFacts *accessFacts
 	waiterDone := make(chan struct{})
 	go func() {
 		defer close(waiterDone)
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r, facts := cacheRequestFacts(http.MethodGet, "/")
+		waiterFacts = facts
 		r.Host = "app.test"
 		rr := httptest.NewRecorder()
-		ch.h.ServeHTTP(rr, r, nil)
+		_ = ch.h.serveCache(rr, r)
 		waiter = rr
 	}()
 	waitFor(t, "one waiter", func() bool {
@@ -917,6 +1000,9 @@ func TestPurgeDetachesWaiters(t *testing.T) {
 	<-waiterDone
 	if waiter.Code != http.StatusOK || waiter.Body.String() != "new" {
 		t.Fatalf("detached waiter got %d %q, want the new worker's response", waiter.Code, waiter.Body.String())
+	}
+	if got := waiterFacts.cacheVerdict; got != "bypass" {
+		t.Fatalf("detached waiter access verdict %q, want bypass", got)
 	}
 	close(release)
 	<-leaderDone
@@ -1046,7 +1132,7 @@ func primeAndStore(c *cacheStore, appID, key string, gen *atomic.Uint64, body []
 	sh.mu.Unlock()
 	f := &cacheFlight{appID: appID, gen: gen, genSnap: gen.Load()}
 	before := sh.ctr.stores.Load()
-	c.storeFill(sh, key, f, hash, nil, nil, http.StatusOK, http.Header{}, body, access, time.Hour)
+	c.storeFill(sh, key, f, hash, nil, nil, http.StatusOK, http.Header{}, body, "proxy", access, time.Hour)
 	return sh.ctr.stores.Load() == before+1
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -69,6 +70,16 @@ type App struct {
 	// releases them.
 	state *janusState
 
+	// access is the separately pooled access bridge. Stream ownership is
+	// generation-local even though registration sequence state is pooled.
+	access             *accessBridge
+	accessReleased     bool
+	accessStreamsMu    sync.Mutex
+	accessStreams      map[*accessSubscriber]struct{}
+	accessStreamsWG    sync.WaitGroup
+	accessStopping     bool
+	accessStopDeadline time.Time
+
 	// appsReg is the memory-only apps registry (hot /1.0/apps).
 	appsReg *appRegistry
 
@@ -129,6 +140,12 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if a.HeartbeatTTL < 0 {
 		return fmt.Errorf("janus: heartbeat_ttl must be positive, got %v", time.Duration(a.HeartbeatTTL))
 	}
+	access, err := acquireAccessBridge(a.logger)
+	if err != nil {
+		return err
+	}
+	a.access = access
+	a.accessStreams = make(map[*accessSubscriber]struct{})
 	stI, _, err := janusPool.LoadOrNew(janusStateKey, func() (caddy.Destructor, error) {
 		return newJanusState(a.logger, time.Duration(a.HeartbeatTTL))
 	})
@@ -136,6 +153,9 @@ func (a *App) Provision(ctx caddy.Context) error {
 		return err
 	}
 	a.state = stI.(*janusState)
+	if err := a.state.registry.bindAccess(a.access); err != nil {
+		return err
+	}
 	a.appsReg = a.state.registry
 	a.dp = a.state.dp
 	a.hubs = a.state.hubs
@@ -193,6 +213,7 @@ func (a *App) Start() error {
 	if err := a.startControlListeners(); err != nil {
 		// A partially started app never receives Stop: close whatever
 		// listeners came up before rejecting.
+		a.stopAccessStreams()
 		if serr := a.stopControlListeners(); serr != nil {
 			a.logger.Error("janus control unwind", zap.Error(serr))
 		}
@@ -200,6 +221,7 @@ func (a *App) Start() error {
 		return err
 	}
 	if err := a.startMdns(); err != nil {
+		a.stopAccessStreams()
 		if serr := a.stopControlListeners(); serr != nil {
 			a.logger.Error("janus control unwind", zap.Error(serr))
 		}
@@ -218,6 +240,7 @@ func (a *App) Start() error {
 // state.
 func (a *App) Stop() error {
 	a.stopBrowse()
+	a.stopAccessStreams()
 	cerr := a.stopControlListeners()
 	merr := a.stopMdns()
 	if cerr != nil {
@@ -237,14 +260,61 @@ func (a *App) Cleanup() error {
 	if a.state != nil {
 		a.state.browse.releaseCold(a)
 	}
+	var stateErr error
 	if a.state != nil {
 		deleted, err := janusPool.Delete(janusStateKey)
 		if !deleted {
 			a.state.mdns.generationRetired(a)
 		}
-		return err
+		stateErr = err
+		a.state = nil
 	}
-	return nil
+	if a.access != nil && !a.accessReleased {
+		a.accessReleased = true
+		accessErr := releaseAccessBridge()
+		a.access = nil
+		if stateErr == nil {
+			stateErr = accessErr
+		}
+	}
+	return stateErr
+}
+
+func (a *App) stopAccessStreams() {
+	deadline := time.Now().Add(accessWriteDeadline)
+	a.accessStreamsMu.Lock()
+	if a.accessStopping {
+		a.accessStreamsMu.Unlock()
+		return
+	}
+	a.accessStopping = true
+	a.accessStopDeadline = deadline
+	subs := make([]*accessSubscriber, 0, len(a.accessStreams))
+	for sub := range a.accessStreams {
+		subs = append(subs, sub)
+	}
+	a.accessStreamsMu.Unlock()
+	for _, sub := range subs {
+		if sub.controller != nil {
+			_ = sub.controller.SetWriteDeadline(deadline)
+		}
+		a.detachAccessSubscriber(sub, "generation_stop")
+	}
+	done := make(chan struct{})
+	go func() {
+		a.accessStreamsWG.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		for _, server := range a.controlSrvs {
+			server.closeConnections()
+		}
+		<-done
+	}
 }
 
 // Interface guards

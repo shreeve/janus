@@ -1,4 +1,4 @@
-# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth, (7) files, (8) sendfile, (9) browse
+# Janus — capability order: (1) ping, (2) control, (3) cache, (4) hub, (5) mdns, (6) auth, (7) files, (8) sendfile, (9) browse, (10) access log
 #
 # *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
 #
@@ -150,6 +150,17 @@
 
 (ripdev_tls) {
 	tls certs/ripdev.io.crt certs/ripdev.io.key
+	import janus_access
+}
+
+(janus_access) {
+	log {
+		output file .test-access.log
+		format janus {
+			time_format rfc3339_nano
+			duration_format seconds
+		}
+	}
 }
 
 # Catchall — any other *.ripdev.io name inherits global ping on
@@ -313,6 +324,7 @@ authcarol.ripdev.io {
 # wall inherited by an on-demand catch-all would wall every unknown
 # host — opt catchalls out explicitly.
 https://:8443 {
+	import janus_access
 	tls {
 		on_demand
 		issuer internal

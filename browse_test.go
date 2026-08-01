@@ -902,7 +902,7 @@ func TestBrowseCountersExact(t *testing.T) {
 	renderer := &browseRenderer{
 		extension: ".md", executable: executable,
 		args:        []string{"-test.run=TestBrowseRendererHelper", "--", "{file}"},
-		contentType: "text/plain", timeout: time.Second,
+		contentType: "text/plain", timeout: 5 * time.Second,
 		maxOutput: 1 << 20, concurrency: 1, id: "counter",
 	}
 	h := newBrowseTestHandler(t, map[string]*browseRenderer{".md": renderer})

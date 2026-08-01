@@ -279,11 +279,22 @@ func TestStartUnwindsOnPartialFailure(t *testing.T) {
 			{Mode: "internal", network: "unix", addr: good, Listen: good},
 			{Mode: "local", network: "unix", addr: bad, Listen: bad},
 		},
-		logger:  zap.NewNop(),
-		appsReg: newAppRegistry(),
-		hubs:    newHubSet(),
-		ctx:     caddy.Context{Context: context.Background()},
+		logger:        zap.NewNop(),
+		appsReg:       newAppRegistry(),
+		hubs:          newHubSet(),
+		ctx:           caddy.Context{Context: context.Background()},
+		accessStreams: make(map[*accessSubscriber]struct{}),
 	}
+	bridge, err := newAccessBridge(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.access = bridge
+	state := bridge.newState()
+	sub := &accessSubscriber{state: state, lines: make(chan *accessLine, 1), done: make(chan struct{})}
+	state.subscribers[sub] = struct{}{}
+	bridge.subscribers = 1
+	app.accessStreams[sub] = struct{}{}
 
 	if err := app.Start(); err == nil {
 		t.Fatal("want Start to fail on the unbindable listener")
@@ -293,6 +304,64 @@ func TestStartUnwindsOnPartialFailure(t *testing.T) {
 	}
 	if _, err := net.Dial("unix", good); err == nil {
 		t.Fatal("first listener still accepting after failed Start")
+	}
+	if !sub.detached || sub.reason != "generation_stop" {
+		t.Fatalf("failed Start left subscriber attached: %+v", sub)
+	}
+	select {
+	case <-sub.done:
+	default:
+		t.Fatal("failed Start did not wake subscriber")
+	}
+	if bridge.subscribers != 0 || bridge.counters.streamCloses.Load() != 1 {
+		t.Fatalf("failed Start subscriber accounting: subscribers=%d closes=%d",
+			bridge.subscribers, bridge.counters.streamCloses.Load())
+	}
+}
+
+func TestStartUnwindsStreamsBeforeControlOnMdnsFailure(t *testing.T) {
+	dir, err := os.MkdirTemp("", "janus-start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	good := filepath.Join(dir, "good.sock")
+	app := newTestMdnsApp(t, &MdnsSettings{Interfaces: []string{"janus-test-does-not-exist0"}})
+	app.Control = []Control{{Mode: "internal", network: "unix", addr: good, Listen: good}}
+	app.logger = zap.NewNop()
+	app.ctx = caddy.Context{Context: context.Background()}
+	app.accessStreams = make(map[*accessSubscriber]struct{})
+	bridge, err := newAccessBridge(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.appsReg.bindAccess(bridge); err != nil {
+		t.Fatal(err)
+	}
+	app.access = bridge
+	state := bridge.newState()
+	sub := &accessSubscriber{state: state, lines: make(chan *accessLine, 1), done: make(chan struct{})}
+	state.subscribers[sub] = struct{}{}
+	bridge.subscribers = 1
+	app.accessStreams[sub] = struct{}{}
+
+	if err := app.Start(); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("want mDNS interface failure, got %v", err)
+	}
+	if len(app.controlSrvs) != 0 {
+		t.Fatalf("want no leaked control servers, got %d", len(app.controlSrvs))
+	}
+	if !sub.detached || sub.reason != "generation_stop" {
+		t.Fatalf("failed mDNS start left subscriber attached: %+v", sub)
+	}
+	select {
+	case <-sub.done:
+	default:
+		t.Fatal("failed mDNS start did not wake subscriber")
+	}
+	if bridge.subscribers != 0 || bridge.counters.streamCloses.Load() != 1 {
+		t.Fatalf("failed mDNS start subscriber accounting: subscribers=%d closes=%d",
+			bridge.subscribers, bridge.counters.streamCloses.Load())
 	}
 }
 
