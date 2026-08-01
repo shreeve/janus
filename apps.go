@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,10 +57,12 @@ type Upstream struct {
 
 // AppRecord is one registered app in the hot registry.
 type AppRecord struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Hosts     []string   `json:"hosts"`
-	Upstreams []Upstream `json:"upstreams"`
+	ID        string       `json:"id"`
+	Name      string       `json:"name"`
+	Hosts     []string     `json:"hosts"`
+	Upstreams []Upstream   `json:"upstreams"`
+	Site      *SitePolicy  `json:"site,omitempty"`
+	Files     *FilesPolicy `json:"files,omitempty"`
 
 	// BridgePath is the tenant's hub bridge endpoint (optional; empty =
 	// hub handshakes answer 503). Cold config never carries it: which URL
@@ -84,12 +88,31 @@ type AppRecord struct {
 	// consistent — a fill's snapshot can never pair a post-swap
 	// generation with pre-swap sockets.
 	genSnap uint64
+
+	// siteSuffix is the normalized suffix owned by Site. siteValue is the
+	// request-local label resolved from a pattern or alias. Both stay
+	// internal to the registry snapshot.
+	siteSuffix string
+	siteValue  string
 }
 
 func (rec *AppRecord) clone() AppRecord {
 	out := *rec
 	out.Hosts = append([]string{}, rec.Hosts...)
 	out.Upstreams = append([]Upstream{}, rec.Upstreams...)
+	out.Site = cloneSitePolicy(rec.Site)
+	out.Files = cloneFilesPolicy(rec.Files)
+	return out
+}
+
+func (rec AppRecord) concreteHosts() []string {
+	out := append([]string{}, rec.Hosts...)
+	if rec.Site != nil {
+		for host := range rec.Site.Aliases {
+			out = append(out, host)
+		}
+		sort.Strings(out)
+	}
 	return out
 }
 
@@ -114,6 +137,10 @@ func errHostConflict(host, holder string) *apiError {
 		Status: http.StatusConflict,
 		Msg:    fmt.Sprintf("host %q is already claimed by app %q", host, holder),
 	}
+}
+
+func errSiteConflict(format string, args ...any) *apiError {
+	return &apiError{Status: http.StatusConflict, Msg: fmt.Sprintf(format, args...)}
 }
 
 // --- validation ------------------------------------------------------------
@@ -241,6 +268,7 @@ type appRegistry struct {
 	mu    sync.RWMutex
 	apps  map[string]*AppRecord // id → record
 	hosts map[string]string     // host → holding app id (first-wins)
+	sites map[string]string     // pattern suffix → holding app id
 
 	// purge is the cache's purge hook, invoked (outside the registry
 	// lock, after the generation bump inside it) on every purge event:
@@ -286,6 +314,7 @@ func newAppRegistry() *appRegistry {
 	return &appRegistry{
 		apps:  map[string]*AppRecord{},
 		hosts: map[string]string{},
+		sites: map[string]string{},
 		now:   time.Now,
 		ttl:   defaultHeartbeatTTL,
 	}
@@ -304,10 +333,31 @@ func (r *appRegistry) purgeApp(id string) {
 }
 
 func (r *appRegistry) create(name string, hosts []string, bridgePath string) (AppRecord, error) {
+	return r.createWithPolicyAndUpstreams(name, hosts, nil, nil, bridgePath, nil)
+}
+
+func (r *appRegistry) createWithPolicy(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgePath string) (AppRecord, error) {
+	return r.createWithPolicyAndUpstreams(name, hosts, site, files, bridgePath, nil)
+}
+
+func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgePath string, upstreams []Upstream) (AppRecord, error) {
 	if err := validateAppName(name); err != nil {
 		return AppRecord{}, err
 	}
-	hosts, err := normalizeHosts(hosts)
+	if (len(hosts) > 0) == (site != nil) {
+		return AppRecord{}, errBadRequest("exactly one of hosts or site is required")
+	}
+	var err error
+	var suffix string
+	if site != nil {
+		site, suffix, err = normalizeSitePolicy(site)
+	} else {
+		hosts, err = normalizeHosts(hosts)
+	}
+	if err != nil {
+		return AppRecord{}, err
+	}
+	files, err = normalizeFilesPolicy(files, site != nil)
 	if err != nil {
 		return AppRecord{}, err
 	}
@@ -316,12 +366,37 @@ func (r *appRegistry) create(name string, hosts []string, bridgePath string) (Ap
 			return AppRecord{}, err
 		}
 	}
+	if err := validateUpstreams(upstreams); err != nil {
+		return AppRecord{}, err
+	}
 
 	r.mu.Lock()
-	for _, h := range hosts {
+	claims := append([]string(nil), hosts...)
+	if site != nil {
+		for alias := range site.Aliases {
+			claims = append(claims, alias)
+		}
+	}
+	for _, h := range claims {
 		if holder, taken := r.hosts[h]; taken {
 			r.mu.Unlock()
 			return AppRecord{}, errHostConflict(h, holder)
+		}
+		if heldSuffix, holder, taken := r.patternClaimForExactLocked(h); taken {
+			r.mu.Unlock()
+			return AppRecord{}, errSiteConflict("host %q conflicts with site pattern suffix %q held by app %q", h, heldSuffix, holder)
+		}
+	}
+	if suffix != "" {
+		if held, holder, conflict := r.patternConflictLocked(suffix); conflict {
+			r.mu.Unlock()
+			return AppRecord{}, errSiteConflict("site pattern suffix %q conflicts with suffix %q held by app %q", suffix, held, holder)
+		}
+		for host, holder := range r.hosts {
+			if hostUnderSuffix(host, suffix) {
+				r.mu.Unlock()
+				return AppRecord{}, errSiteConflict("site pattern suffix %q conflicts with host %q held by app %q", suffix, host, holder)
+			}
 		}
 	}
 	var id string
@@ -337,7 +412,11 @@ func (r *appRegistry) create(name string, hosts []string, bridgePath string) (Ap
 		}
 	}
 	// Registration counts as the first heartbeat.
-	rec := &AppRecord{ID: id, Name: name, Hosts: hosts, Upstreams: []Upstream{}, BridgePath: bridgePath, heartbeatAt: r.now(), gen: new(atomic.Uint64)}
+	rec := &AppRecord{
+		ID: id, Name: name, Hosts: hosts, Upstreams: append([]Upstream{}, upstreams...),
+		Site: site, Files: files, BridgePath: bridgePath,
+		heartbeatAt: r.now(), gen: new(atomic.Uint64), siteSuffix: suffix,
+	}
 	// Host claim is a purge event (docs/20260720-033201-capability-microcache.md
 	// O5): bump the (fresh) generation in the same critical section as the
 	// registry write; the entry drop below runs after the lock releases.
@@ -345,6 +424,12 @@ func (r *appRegistry) create(name string, hosts []string, bridgePath string) (Ap
 	r.apps[id] = rec
 	for _, h := range hosts {
 		r.hosts[h] = id
+	}
+	if site != nil {
+		r.sites[suffix] = id
+		for alias := range site.Aliases {
+			r.hosts[alias] = id
+		}
 	}
 	out := rec.clone()
 	r.mu.Unlock()
@@ -366,6 +451,42 @@ func (r *appRegistry) list() []AppRecord {
 	return out
 }
 
+func hostUnderSuffix(host, suffix string) bool {
+	return strings.HasSuffix(host, "."+suffix)
+}
+
+func suffixesOverlap(a, b string) bool {
+	return a == b || hostUnderSuffix(a, b) || hostUnderSuffix(b, a)
+}
+
+func (r *appRegistry) patternClaimForExactLocked(host string) (suffix, holder string, ok bool) {
+	for suffix, holder := range r.sites {
+		if hostUnderSuffix(host, suffix) {
+			return suffix, holder, true
+		}
+	}
+	return "", "", false
+}
+
+func (r *appRegistry) patternConflictLocked(suffix string) (held, holder string, ok bool) {
+	for held, holder := range r.sites {
+		if suffixesOverlap(suffix, held) {
+			return held, holder, true
+		}
+	}
+	return "", "", false
+}
+
+func siteDirectoryExists(dir, site string) bool {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	info, err := root.Lstat(site)
+	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0
+}
+
 // resolveHost maps a public host to its app record (data-plane lookup).
 // The returned record is a shallow snapshot sharing the record's slice
 // backing arrays: every registry write replaces Hosts and Upstreams
@@ -373,14 +494,81 @@ func (r *appRegistry) list() []AppRecord {
 // published backing array is immutable. Callers read, never mutate.
 func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	id, ok := r.hosts[host]
-	if !ok {
+	var site string
+	if ok {
+		rec := r.apps[id]
+		if rec.Site != nil {
+			site = rec.Site.Aliases[host]
+		}
+		out := *rec
+		out.genSnap = out.gen.Load()
+		out.siteValue = site
+		r.mu.RUnlock()
+		if site != "" && !siteDirectoryExists(out.Site.Dir, site) {
+			return AppRecord{}, false
+		}
+		return out, true
+	}
+	if net.ParseIP(host) != nil {
+		r.mu.RUnlock()
 		return AppRecord{}, false
 	}
-	rec := *r.apps[id]
-	rec.genSnap = rec.gen.Load()
-	return rec, true
+	var rec *AppRecord
+	for suffix, appID := range r.sites {
+		if !hostUnderSuffix(host, suffix) {
+			continue
+		}
+		capture := strings.TrimSuffix(host, "."+suffix)
+		if strings.Contains(capture, ".") || validateSiteLabel(capture, "site") != nil {
+			continue
+		}
+		rec = r.apps[appID]
+		site = capture
+		break
+	}
+	if rec == nil {
+		r.mu.RUnlock()
+		return AppRecord{}, false
+	}
+	out := *rec
+	out.genSnap = out.gen.Load()
+	out.siteValue = site
+	r.mu.RUnlock()
+	if !siteDirectoryExists(out.Site.Dir, site) {
+		return AppRecord{}, false
+	}
+	return out, true
+}
+
+// resolveRequestHost preserves exact-host normalization while requiring a
+// syntactically valid DNS authority before a pattern may match.
+func (r *appRegistry) resolveRequestHost(authority string) (AppRecord, bool) {
+	host := normalizeHostHeader(authority)
+	r.mu.RLock()
+	_, exact := r.hosts[host]
+	r.mu.RUnlock()
+	if exact {
+		return r.resolveHost(host)
+	}
+	rawHost := authority
+	if strings.Contains(authority, ":") {
+		var port string
+		var err error
+		rawHost, port, err = net.SplitHostPort(authority)
+		if err != nil || port == "" {
+			return AppRecord{}, false
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return AppRecord{}, false
+		}
+	}
+	rawHost = strings.ToLower(strings.TrimSuffix(rawHost, "."))
+	if net.ParseIP(rawHost) != nil || validateHostname(rawHost) != nil {
+		return AppRecord{}, false
+	}
+	return r.resolveHost(rawHost)
 }
 
 // exists reports whether the app id is currently registered (the hub
@@ -449,10 +637,18 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgePath
 	}
 	var removed map[string]bool
 	if hosts != nil {
+		if rec.Site != nil {
+			r.mu.Unlock()
+			return AppRecord{}, errBadRequest("a site-pattern app does not support hosts PATCH")
+		}
 		for _, h := range newHosts {
 			if holder, taken := r.hosts[h]; taken && holder != id {
 				r.mu.Unlock()
 				return AppRecord{}, errHostConflict(h, holder)
+			}
+			if suffix, holder, taken := r.patternClaimForExactLocked(h); taken {
+				r.mu.Unlock()
+				return AppRecord{}, errSiteConflict("host %q conflicts with site pattern suffix %q held by app %q", h, suffix, holder)
 			}
 		}
 		kept := map[string]bool{}
@@ -477,8 +673,15 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgePath
 	if bridgePath != nil {
 		rec.BridgePath = *bridgePath
 	}
+	routingChanged := hosts != nil || bridgePath != nil
+	if routingChanged {
+		rec.gen.Add(1)
+	}
 	out := rec.clone()
 	r.mu.Unlock()
+	if routingChanged {
+		r.purgeApp(id)
+	}
 	// Removed hosts stop resolving to the app: their hub connections
 	// close through the internal mechanism (all other membership stays).
 	if len(removed) > 0 && r.hubHostsRemoved != nil {
@@ -545,6 +748,12 @@ func (r *appRegistry) sweepExpired() []string {
 		if now.Sub(rec.heartbeatAt) > r.ttl {
 			for _, h := range rec.Hosts {
 				delete(r.hosts, h)
+			}
+			if rec.Site != nil {
+				delete(r.sites, rec.siteSuffix)
+				for alias := range rec.Site.Aliases {
+					delete(r.hosts, alias)
+				}
 			}
 			delete(r.apps, id)
 			rec.gen.Add(1) // reap is a purge event
@@ -615,6 +824,12 @@ func (r *appRegistry) delete(id string) error {
 	for _, h := range rec.Hosts {
 		delete(r.hosts, h)
 	}
+	if rec.Site != nil {
+		delete(r.sites, rec.siteSuffix)
+		for alias := range rec.Site.Aliases {
+			delete(r.hosts, alias)
+		}
+	}
 	delete(r.apps, id)
 	rec.gen.Add(1) // delete is a purge event
 	r.mu.Unlock()
@@ -651,9 +866,12 @@ func (r *appRegistry) heartbeatAges() map[string]time.Duration {
 func (a *App) appsRegistry() *appRegistry { return a.appsReg }
 
 type appCreateRequest struct {
-	Name       string   `json:"name"`
-	Hosts      []string `json:"hosts"`
-	BridgePath string   `json:"bridge_path"`
+	Name       string          `json:"name"`
+	Hosts      json.RawMessage `json:"hosts"`
+	Site       json.RawMessage `json:"site"`
+	Files      json.RawMessage `json:"files"`
+	Upstreams  json.RawMessage `json:"upstreams"`
+	BridgePath string          `json:"bridge_path"`
 }
 
 type appPatchRequest struct {
@@ -712,12 +930,70 @@ func (a *App) handleAppsCreate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	rec, err := a.appsRegistry().create(req.Name, req.Hosts, req.BridgePath)
+	if (req.Hosts == nil) == (req.Site == nil) {
+		writeAPIError(w, errBadRequest("exactly one of hosts or site is required"))
+		return
+	}
+	if string(req.Hosts) == "null" || string(req.Site) == "null" || string(req.Files) == "null" {
+		writeAPIError(w, errBadRequest("hosts, site, and files must not be null"))
+		return
+	}
+	var hosts []string
+	var site *SitePolicy
+	var files *FilesPolicy
+	var upstreams []Upstream
+	if req.Hosts != nil {
+		if err := json.Unmarshal(req.Hosts, &hosts); err != nil {
+			writeAPIError(w, errBadRequest("hosts must be an array of strings"))
+			return
+		}
+	}
+	if req.Site != nil {
+		var value SitePolicy
+		if err := decodeStrictRaw(req.Site, &value); err != nil {
+			writeAPIError(w, errBadRequest("invalid site: %v", err))
+			return
+		}
+		site = &value
+	}
+	if req.Files != nil {
+		var value FilesPolicy
+		if err := decodeStrictRaw(req.Files, &value); err != nil {
+			writeAPIError(w, errBadRequest("invalid files: %v", err))
+			return
+		}
+		files = &value
+	}
+	if req.Upstreams != nil {
+		if string(req.Upstreams) == "null" {
+			writeAPIError(w, errBadRequest("upstreams must be an array"))
+			return
+		}
+		if err := json.Unmarshal(req.Upstreams, &upstreams); err != nil {
+			writeAPIError(w, errBadRequest("upstreams must be an array"))
+			return
+		}
+	}
+	rec, err := a.appsRegistry().createWithPolicyAndUpstreams(
+		req.Name, hosts, site, files, req.BridgePath, upstreams,
+	)
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": rec.ID})
+}
+
+func decodeStrictRaw(raw json.RawMessage, value any) error {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(value); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing data")
+	}
+	return nil
 }
 
 func (a *App) handleAppsList(w http.ResponseWriter, r *http.Request) {

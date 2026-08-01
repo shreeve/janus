@@ -44,6 +44,10 @@ type App struct {
 	// default user set. Default: off. Sites may override.
 	Auth *AuthSettings `json:"auth,omitempty"`
 
+	// Files is the global default for the site-scoped registered-file
+	// service. Default: off. Sites may override.
+	Files *bool `json:"files,omitempty"`
+
 	// HeartbeatTTL is how long a registered app may go without a
 	// heartbeat before its registration is reaped (same effect as
 	// DELETE). Default: 15s. The JANUS_HEARTBEAT_TTL environment

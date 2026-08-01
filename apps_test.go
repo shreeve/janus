@@ -412,6 +412,54 @@ func TestAppsHTTPLifecycle(t *testing.T) {
 	}
 }
 
+func TestAppsCreateOptionalInitialUpstreamsAndStrictPut(t *testing.T) {
+	mux := newTestControlMux(t)
+	create := func(body string) (int, map[string]any) {
+		return doJSON(t, mux, http.MethodPost, "/1.0/apps", body)
+	}
+	for _, body := range []string{
+		`{"name":"omitted","hosts":["omitted.test"]}`,
+		`{"name":"empty","hosts":["empty.test"],"upstreams":[]}`,
+	} {
+		code, response := create(body)
+		if code != http.StatusCreated {
+			t.Fatalf("create %s: %d %v", body, code, response)
+		}
+		id := response["id"].(string)
+		code, record := doJSON(t, mux, http.MethodGet, "/1.0/apps/"+id, "")
+		if code != http.StatusOK || len(record["upstreams"].([]any)) != 0 {
+			t.Fatalf("empty initial upstreams: %d %v", code, record)
+		}
+	}
+	code, response := create(`{"name":"initial","hosts":["initial.test"],"upstreams":[{"path":"/run/w.sock"}]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("nonempty create: %d %v", code, response)
+	}
+	id := response["id"].(string)
+	_, record := doJSON(t, mux, http.MethodGet, "/1.0/apps/"+id, "")
+	upstreams := record["upstreams"].([]any)
+	if len(upstreams) != 1 || upstreams[0].(map[string]any)["path"] != "/run/w.sock" {
+		t.Fatalf("initial upstreams not stored atomically: %v", record)
+	}
+	for _, body := range []string{
+		`{"name":"null","hosts":["null.test"],"upstreams":null}`,
+		`{"name":"mixed","hosts":["mixed.test"],"upstreams":[{"path":"/run/bell.sock","doorbell":true},{"path":"/run/w.sock"}]}`,
+	} {
+		code, _ := create(body)
+		if code != http.StatusBadRequest {
+			t.Fatalf("invalid initial upstreams accepted: %s → %d", body, code)
+		}
+	}
+	code, _ = doJSON(t, mux, http.MethodPut, "/1.0/apps/"+id+"/upstreams", `{}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("PUT omitted upstreams accepted: %d", code)
+	}
+	code, _ = doJSON(t, mux, http.MethodPut, "/1.0/apps/"+id+"/upstreams", `{"upstreams":[]}`)
+	if code != http.StatusOK {
+		t.Fatalf("PUT explicit empty rejected: %d", code)
+	}
+}
+
 func asAPIError(err error, target **apiError) bool {
 	ae, ok := err.(*apiError)
 	if ok {

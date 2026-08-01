@@ -16,6 +16,7 @@ index says which is which.
 | [`20260720-162350-hub-design.md`](20260720-162350-hub-design.md) | Capability 4: hub (per-app WebSocket fan-out) |
 | [`20260722-034619-capability-mdns.md`](20260722-034619-capability-mdns.md) | Capability 5: mdns (LAN presence — `janus.local`, per-app `.local` names, the status front door) |
 | [`20260728-160734-capability-auth.md`](20260728-160734-capability-auth.md) | Capability 6: auth (URL-prefix gates for auth-less apps) |
+| [`20260730-202700-capability-files.md`](20260730-202700-capability-files.md) | Capability 7: files (registered static roots, SPA shell, and directory-gated site hosts) |
 | [`20260719-141200-tls-ask.md`](20260719-141200-tls-ask.md) | On-demand TLS gating via `/1.0/tls/ask` |
 
 ## Measurements (claims and their evidence)

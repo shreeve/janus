@@ -132,12 +132,14 @@ func TestCacheKeyIsWireBytes(t *testing.T) {
 	u := &countingUpstream{}
 	ch.register(t, "app.test", u)
 
-	// /a%2Fb and /a/b are two keys: fill and admit each independently.
+	// /a%62 and /ab are two legal wire keys with the same decoded path:
+	// fill and admit each independently. Encoded slash is rejected by the
+	// unconditional request-path gate.
 	for range 3 {
-		ch.get(t, "app.test", "/a%2Fb")
+		ch.get(t, "app.test", "/a%62")
 	}
 	for range 3 {
-		ch.get(t, "app.test", "/a/b")
+		ch.get(t, "app.test", "/ab")
 	}
 	// 2 fills per key (doorkeeper admits on the second), 1 hit each.
 	if got := u.hits.Load(); got != 4 {
@@ -148,7 +150,7 @@ func TestCacheKeyIsWireBytes(t *testing.T) {
 		t.Fatalf("want 2 hits and 2 stores, got hits=%d stores=%d", s.Hits, s.Stores)
 	}
 	// The hit bodies stay per-key.
-	if body := ch.get(t, "app.test", "/a%2Fb").Body.String(); body != "body:/a%2Fb" {
+	if body := ch.get(t, "app.test", "/a%62").Body.String(); body != "body:/a%62" {
 		t.Fatalf("encoded-path key served %q", body)
 	}
 }

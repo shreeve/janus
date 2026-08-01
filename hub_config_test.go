@@ -15,6 +15,7 @@ import (
 func TestParseHubDirectiveGlobal(t *testing.T) {
 	d := caddyfile.NewTestDispenser(`janus {
 		hub {
+			mode direct
 			path /realtime
 			max_conns 16384
 			max_frame 128kb
@@ -29,6 +30,9 @@ func TestParseHubDirectiveGlobal(t *testing.T) {
 	hs := app.Hub
 	if hs == nil || hs.Enabled == nil || !*hs.Enabled {
 		t.Fatal("hub with a block must be enabled")
+	}
+	if hs.Mode == nil || *hs.Mode != "direct" {
+		t.Fatalf("mode parse: %+v", hs)
 	}
 	if *hs.Path != "/realtime" || *hs.MaxConns != 16384 || *hs.MaxFrame != 128_000 || *hs.MaxChannels != 64 {
 		t.Fatalf("knob parse: %+v", hs)
@@ -47,6 +51,8 @@ func TestParseHubDirectiveForms(t *testing.T) {
 		"janus {\n hub {\n origin any \n} \n}",
 		"janus {\n hub {\n origin same \n} \n}",
 		"janus {\n hub {\n origin a.example.com b.example.com \n} \n}",
+		"janus {\n hub {\n mode bridge \n} \n}",
+		"janus {\n hub {\n mode direct \n} \n}",
 	} {
 		d := caddyfile.NewTestDispenser(cf)
 		if err := new(App).UnmarshalCaddyfile(d); err != nil {
@@ -63,6 +69,8 @@ func TestParseHubDirectiveHardErrors(t *testing.T) {
 		`janus { hub on off }`,                       // two arguments
 		`janus { hub off { path /x } }`,              // block on an off switch
 		`janus { hub { bogus 1 } }`,                  // unknown subdirective
+		`janus { hub { mode } }`,                     // mode missing
+		`janus { hub { mode automatic } }`,           // illegal mode
 		`janus { hub { path } }`,                     // path missing argument
 		`janus { hub { path relative } }`,            // path not /-prefixed
 		`janus { hub { path "/x?y" } }`,              // path with ?
@@ -130,14 +138,15 @@ func TestHubCascade(t *testing.T) {
 
 	// Unmentioned keys inherit the global values; named keys override.
 	path := "/rt"
+	direct := "direct"
 	frame := int64(128 << 10)
 	conns := 99
-	app := &App{Hub: &HubSettings{Enabled: boolPtr(true), Path: &path, MaxFrame: &frame}}
+	app := &App{Hub: &HubSettings{Enabled: boolPtr(true), Mode: &direct, Path: &path, MaxFrame: &frame}}
 	h := &Handler{Hub: &HubSettings{Enabled: boolPtr(true), MaxConns: &conns}, app: app, dp: &dataPlane{}}
 	if err := h.provisionHub(); err != nil {
 		t.Fatal(err)
 	}
-	if h.hubCfg.path != "/rt" || h.hubCfg.maxFrame != 128<<10 || h.hubCfg.maxConns != 99 || h.hubCfg.maxChannels != hubDefaultMaxChannels {
+	if h.hubCfg.mode != "direct" || h.hubCfg.path != "/rt" || h.hubCfg.maxFrame != 128<<10 || h.hubCfg.maxConns != 99 || h.hubCfg.maxChannels != hubDefaultMaxChannels {
 		t.Fatalf("per-key cascade: %+v", h.hubCfg)
 	}
 

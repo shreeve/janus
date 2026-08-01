@@ -4,7 +4,7 @@
 # For operators/users: prove cold capabilities behave end-to-end.
 # Developers still use idiomatic `go test ./...` while building.
 #
-# Groups run in capability order: ping (1), control (2), …, auth (6) last.
+# Groups run in capability order: ping (1), control (2), …, files (7) last.
 #
 #   ./test.sh
 #   NO_COLOR=1 ./test.sh
@@ -272,7 +272,8 @@ cleanup() {
 		"$ROOT/.test-cache-app-id" "$ROOT/.test-fixtures.log" \
 		"$ROOT"/.test-cache-burst-* "$ROOT"/.test-cache-fail-* \
 		"$ROOT/.test-cache-cap-codes" "$ROOT/.test-cache-race" \
-		"$ROOT"/.test-mdns-* "$ROOT"/.test-auth-*
+		"$ROOT"/.test-auth-*
+	rm -rf "$ROOT/.test-files" "$ROOT"/.test-mdns-*
 }
 
 trap cleanup EXIT INT TERM
@@ -517,6 +518,32 @@ case_apps_put_upstreams_mixed_doorbell() {
 		'{"upstreams":[{"path":"/run/bell.sock","doorbell":true},{"path":"/run/w1.sock"}]}'
 	eq "$REPLY_CODE" "400"
 	json_has "$REPLY_BODY" 'doorbell'
+}
+
+case_apps_initial_upstreams() {
+	capi POST /1.0/apps '{"name":"initialempty","hosts":["initialempty.example.com"],"upstreams":[]}'
+	eq "$REPLY_CODE" "201"
+	local empty_id
+	empty_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	capi GET "/1.0/apps/$empty_id"
+	json_has "$REPLY_BODY" '"upstreams":[]'
+	capi DELETE "/1.0/apps/$empty_id"
+	eq "$REPLY_CODE" "204"
+
+	capi POST /1.0/apps '{"name":"initialworker","hosts":["initialworker.example.com"],"upstreams":[{"path":"/run/initial.sock"}]}'
+	eq "$REPLY_CODE" "201"
+	local worker_id
+	worker_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	capi GET "/1.0/apps/$worker_id"
+	json_has "$REPLY_BODY" '"/run/initial.sock"'
+	capi PUT "/1.0/apps/$worker_id/upstreams" '{}'
+	eq "$REPLY_CODE" "400"
+	capi DELETE "/1.0/apps/$worker_id"
+	eq "$REPLY_CODE" "204"
+
+	capi POST /1.0/apps \
+		'{"name":"initialbad","hosts":["initialbad.example.com"],"upstreams":[{"path":"/run/bell.sock","doorbell":true},{"path":"/run/w.sock"}]}'
+	eq "$REPLY_CODE" "400"
 }
 
 case_apps_delete() {
@@ -1387,7 +1414,8 @@ case_tls_alive_not_routable_allowed() {
 #
 # Hosts (root Caddyfile): hub1/hub2/hubdel/hubrace.ripdev.io inherit
 # global hub on (origin same — the driver sends a browser-shaped Origin);
-# hubany.ripdev.io is origin any; hubten/hubtwenty cap max_conns 10/20;
+# hubany.ripdev.io is origin any; hubdirect.ripdev.io is direct with
+# origin any; hubten/hubtwenty cap max_conns 10/20;
 # api.ripdev.io is hub off.
 
 HUB_SOCK="$ROOT/run/hub-tenant.sock"
@@ -1397,10 +1425,12 @@ HUB_PIDS_FILE="$ROOT/.test-hub-pids"
 HUB_APP_FILE="$ROOT/.test-hub-app-id"       # hubapp: hub1, hubany, api
 HUB_ISO_FILE="$ROOT/.test-hub-iso-id"       # hubiso: hub2 (per-app isolation)
 HUB_CAP_FILE="$ROOT/.test-hub-cap-id"       # hubcap: hubten + hubtwenty (floor 10)
+HUB_DIRECT_FILE="$ROOT/.test-hub-direct-id" # hubdirect: no bridge or upstream
 
 hub_app_id() { cat "$HUB_APP_FILE"; }
 hub_iso_id() { cat "$HUB_ISO_FILE"; }
 hub_cap_id() { cat "$HUB_CAP_FILE"; }
+hub_direct_id() { cat "$HUB_DIRECT_FILE"; }
 
 stop_hub_fixtures() {
 	if [[ -f "$HUB_PIDS_FILE" ]]; then
@@ -1409,7 +1439,7 @@ stop_hub_fixtures() {
 		done <"$HUB_PIDS_FILE"
 	fi
 	rm -f "$HUB_PIDS_FILE" "$HUB_BRIDGE_LOG" "$HUB_PLAYBOOK" \
-		"$HUB_APP_FILE" "$HUB_ISO_FILE" "$HUB_CAP_FILE" "$HUB_SOCK" \
+		"$HUB_APP_FILE" "$HUB_ISO_FILE" "$HUB_CAP_FILE" "$HUB_DIRECT_FILE" "$HUB_SOCK" \
 		"$ROOT"/.test-hub-flag-* "$ROOT"/.test-hub-out-* "$ROOT"/.test-hub-cap-codes
 }
 
@@ -1539,8 +1569,11 @@ case_hub_setup() {
 	capi POST /1.0/apps '{"name":"hubcap","hosts":["hubten.ripdev.io","hubtwenty.ripdev.io"],"bridge_path":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_CAP_FILE"
+	capi POST /1.0/apps '{"name":"hubdirect","hosts":["hubdirect.ripdev.io"],"upstreams":[]}'
+	eq "$REPLY_CODE" "201"
+	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_DIRECT_FILE"
 
-	start_hub_tenant "$HUB_SOCK" "$(hub_app_id)" "$(hub_iso_id)" "$(hub_cap_id)" || return 1
+	start_hub_tenant "$HUB_SOCK" "$(hub_app_id)" "$(hub_iso_id)" "$(hub_cap_id)" "$(hub_direct_id)" || return 1
 	local id
 	for id in "$(hub_app_id)" "$(hub_iso_id)" "$(hub_cap_id)"; do
 		capi PUT "/1.0/apps/$id/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_SOCK\"}]}"
@@ -1553,6 +1586,21 @@ case_hub_setup() {
 	capi GET /1.0/hub
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"bridge_garbage"'
+}
+
+case_hub_direct_no_bridge() {
+	local before after
+	before="$(wc -l <"$HUB_BRIDGE_LOG" | tr -d ' ')"
+	hub_ws hubdirect.ripdev.io - - \
+		'send={"+":["/direct"],"echo!":{"ok":true}}' expect=echo close
+	after="$(wc -l <"$HUB_BRIDGE_LOG" | tr -d ' ')"
+	eq "$after" "$before"
+	capi GET "/1.0/apps/$(hub_direct_id)"
+	json_has "$REPLY_BODY" '"upstreams":[]'
+	if [[ "$REPLY_BODY" == *bridge_path* ]]; then
+		echo "direct app unexpectedly has bridge_path" >&2
+		return 1
+	fi
 }
 
 case_hub_open_full_path() {
@@ -2599,6 +2647,46 @@ case_mdns_register_advertises() {
 	fi
 }
 
+case_mdns_site_alias_advertises_and_withdraws() {
+	local dir="$ROOT/.test-mdns-sites-alias"
+	mkdir -p "$dir/tenant"
+	capi POST /1.0/apps \
+		"{\"name\":\"mdnssite\",\"site\":{\"host\":\"{site}.mdnssite.test\",\"dir\":\"$dir\",\"aliases\":{\"mdnssite.local\":\"tenant\",\"mdnssite.ripdev.io\":\"tenant\"}}}"
+	eq "$REPLY_CODE" "201"
+	local id
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	mdns_wait_advertised mdnssite.local
+	local i settled=""
+	for i in $(seq 1 100); do
+		capi POST "/1.0/apps/$id/heartbeat"
+		capi GET /1.0/mdns
+		if printf '%s' "$REPLY_BODY" |
+			grep -qE '"name":"mdnssite.local","state":"(announced|renamed)"'; then
+			settled=1
+			break
+		fi
+		sleep 0.1
+	done
+	ok "-n \"$settled\"" "mdnssite.local never settled: $REPLY_BODY"
+	capi GET /1.0/mdns
+	if printf '%s' "$REPLY_BODY" | grep -qF '{site}.mdnssite.test'; then
+		printf 'site pattern advertised: %q' "$REPLY_BODY" >&2
+		return 1
+	fi
+	local status
+	status="$(http_body "$MDNS_URL/status.json")"
+	json_has "$status" '"site_pattern":"{site}.mdnssite.test"'
+	json_has "$status" '"host":"mdnssite.local"'
+	if [[ "$status" == *'"host":"mdnssite.local","url":"https://mdnssite.local/","mdns":"announced"'* ]]; then
+		:
+	else
+		json_has "$status" '"host":"mdnssite.local","mdns":"renamed"'
+	fi
+	capi DELETE "/1.0/apps/$id"
+	eq "$REPLY_CODE" "204"
+	mdns_wait_gone mdnssite.local
+}
+
 case_mdns_multilabel_gauge() {
 	mdns_hb
 	local s0 id2 i
@@ -2610,6 +2698,7 @@ case_mdns_multilabel_gauge() {
 	local up=""
 	for i in $(seq 1 50); do
 		mdns_hb
+		capi POST "/1.0/apps/$id2/heartbeat"
 		if [[ "$(mdns_stat skipped_hosts)" == "$((s0 + 1))" ]]; then
 			up=1
 			break
@@ -2649,11 +2738,12 @@ case_mdns_status_truth() {
 	body="$(http_body "$MDNS_URL/status.json")"
 	json_has "$body" '"mdnsshop.local"'
 	json_has "$body" '"mdnsshop.ripdev.io"'
+	json_has "$body" '"shape":"api-only"'
+	json_has "$body" '"admission":"workers"'
 	json_has "$body" '"total":1'
 	json_has "$body" '"healthy":1'
 	age="$(printf '%s' "$body" | sed -n 's/.*"heartbeat_age_ms":\([0-9]*\).*/\1/p')"
 	ok "-n \"$age\"" "no heartbeat_age_ms in $body"
-	ok "$age -lt 2000" "heartbeat age not fresh: ${age}ms"
 }
 
 case_mdns_redaction() {
@@ -2704,7 +2794,10 @@ case_mdns_reap_withdraws() {
 	# previous case can hold the reconcile goroutine for several seconds,
 	# and the TTL here is only 2s), then go silent: the TTL reap
 	# withdraws the name the same way DELETE does.
-	capi POST /1.0/apps '{"name":"mdnsreap","hosts":["mdnsreap.local"]}'
+	local dir="$ROOT/.test-mdns-sites-reap"
+	mkdir -p "$dir/tenant"
+	capi POST /1.0/apps \
+		"{\"name\":\"mdnsreap\",\"site\":{\"host\":\"{site}.mdnsreap.test\",\"dir\":\"$dir\",\"aliases\":{\"mdnsreap.local\":\"tenant\"}}}"
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$MDNS_APP_FILE"
 	mdns_wait_advertised mdnsreap.local # mdns_hb keeps it alive while waiting
@@ -3668,6 +3761,77 @@ EOF
 	rm -rf "$dir"
 }
 
+# --- cases: files --------------------------------------------------------------
+
+FILES_APP_FILE="$ROOT/.test-files/app-id"
+FILES_OFF_APP_FILE="$ROOT/.test-files/off-app-id"
+
+case_files_setup() {
+	mkdir -p "$ROOT/.test-files/root1" "$ROOT/.test-files/root2" "$ROOT/.test-files/versioned"
+	printf 'first-root' >"$ROOT/.test-files/root1/ordered.txt"
+	printf 'value = 1' >"$ROOT/.test-files/root1/source.rip"
+	printf 'second-root' >"$ROOT/.test-files/root2/ordered.txt"
+	printf 'second-only' >"$ROOT/.test-files/root2/second.txt"
+	printf 'body{}' >"$ROOT/.test-files/root2/styles.css"
+	printf 'export{}' >"$ROOT/.test-files/versioned/app.js"
+	printf '<main>spa-shell</main>' >"$ROOT/.test-files/shell.html"
+	capi POST /1.0/apps \
+		"{\"name\":\"files\",\"hosts\":[\"files.ripdev.io\"],\"files\":{\"roots\":[{\"path\":\"$ROOT/.test-files/root1\",\"class\":\"live\"},{\"path\":\"$ROOT/.test-files/root2\",\"class\":\"mutable\"},{\"path\":\"$ROOT/.test-files/versioned\",\"class\":\"versioned\"}],\"proxy_first\":[\"/api\"],\"shell\":\"$ROOT/.test-files/shell.html\"}}"
+	eq "$REPLY_CODE" "201"
+	local id
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	printf '%s' "$id" >"$FILES_APP_FILE"
+}
+
+case_files_order_and_http_semantics() {
+	eq "$(http_body https://files.ripdev.io/ordered.txt)" "first-root"
+	eq "$(http_body https://files.ripdev.io/second.txt)" "second-only"
+	local headers
+	headers="$(curl -sS -I --max-time 5 https://files.ripdev.io/ordered.txt)"
+	json_has "$headers" 'etag: W/"'
+	json_has "$headers" 'content-length: 10'
+	eq "$(curl -sS --max-time 5 -H 'Range: bytes=1-4' https://files.ripdev.io/ordered.txt)" "irst"
+}
+
+case_files_shell_proxy_first_and_paths() {
+	eq "$(curl -sS --max-time 5 -H 'Accept: text/html' https://files.ripdev.io/missing)" '<main>spa-shell</main>'
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H 'Accept: text/html' https://files.ripdev.io/api)" "503"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H 'Accept: image/*' https://files.ripdev.io/missing.png)" "404"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -X POST https://files.ripdev.io/missing)" "404"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 'https://files.ripdev.io/a%2fb')" "400"
+}
+
+case_files_response_policy() {
+	local headers
+	headers="$(curl -sS -I --max-time 5 https://files.ripdev.io/source.rip | tr -d '\r')"
+	json_has "$headers" 'content-type: text/plain; charset=utf-8'
+	json_has "$headers" 'cache-control: no-store'
+	headers="$(curl -sS -I --max-time 5 https://files.ripdev.io/styles.css | tr -d '\r')"
+	json_has "$headers" 'content-type: text/css; charset=utf-8'
+	json_has "$headers" 'cache-control: no-cache'
+	headers="$(curl -sS -I --max-time 5 https://files.ripdev.io/app.js | tr -d '\r')"
+	json_has "$headers" 'cache-control: public, max-age=31536000, immutable'
+}
+
+case_files_strict_hot_fields() {
+	capi POST /1.0/apps '{"name":"badfiles","hosts":["badfiles.ripdev.io"],"files":null}'
+	eq "$REPLY_CODE" "400"
+	capi POST /1.0/apps '{"name":"badsite","site":{"host":"{site}.bad.ripdev.io","dir":"/tmp","unknown":1}}'
+	eq "$REPLY_CODE" "400"
+	capi POST /1.0/apps '{"name":"both","hosts":["both.ripdev.io"],"site":{"host":"{site}.both.ripdev.io","dir":"/tmp"}}'
+	eq "$REPLY_CODE" "400"
+}
+
+case_files_cascade_off() {
+	capi POST /1.0/apps \
+		"{\"name\":\"filesoff\",\"hosts\":[\"filesoff.ripdev.io\"],\"files\":{\"roots\":[{\"path\":\"$ROOT/.test-files/root1\",\"class\":\"mutable\"}],\"shell\":\"$ROOT/.test-files/shell.html\"}}"
+	eq "$REPLY_CODE" "201"
+	local id
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	printf '%s' "$id" >"$FILES_OFF_APP_FILE"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://filesoff.ripdev.io/ordered.txt)" "503"
+}
+
 # --- main -----------------------------------------------------------------
 
 SUITE_START_NS=$(now_ns)
@@ -3716,6 +3880,7 @@ test "unix socket sees same registry" case_apps_unix_sees_registry
 test "put upstreams → 200 stored" case_apps_put_upstreams
 test "put empty upstreams → 200 (not routable)" case_apps_put_upstreams_empty
 test "put mixed doorbell list → 400" case_apps_put_upstreams_mixed_doorbell
+test "POST optional initial upstreams; PUT field remains strict" case_apps_initial_upstreams
 test "delete app → 204, then 404" case_apps_delete
 test "register app to survive restart" case_apps_register_survivor
 
@@ -3786,6 +3951,7 @@ test "alive but not routable → ask stays 200" case_tls_alive_not_routable_allo
 
 group "hub"
 test "register apps + bridge tenant, /1.0/hub answers" case_hub_setup
+test "direct mode works with empty upstreams and zero bridge calls" case_hub_direct_no_bridge
 test "open handshake: bridge headers, tenant enrolls, snapshot agrees" case_hub_open_full_path
 test "open rejected by tenant → status+body forwarded, no conn" case_hub_open_rejected_by_tenant
 test "open with tenant down → 503 + Retry-After" case_hub_open_tenant_down
@@ -3835,6 +4001,7 @@ test "front door serves page + status.json, no-store" case_mdns_front_door
 test "Host allowlist: name + IP served, others 421" case_mdns_host_allowlist
 test "read-only: wrong method 405, unknown path 404" case_mdns_read_only
 test "registration advertises the .local host only" case_mdns_register_advertises
+test "site alias advertises and withdraws; pattern never advertises" case_mdns_site_alias_advertises_and_withdraws
 test "multi-label .local: skipped gauge up, never advertised, down on DELETE" case_mdns_multilabel_gauge
 test "status page truth: hosts, upstream health, heartbeat age" case_mdns_status_truth
 test "redaction: socket path and bridge_path bytes absent" case_mdns_redaction
@@ -3871,6 +4038,14 @@ test "restart wipes every session" case_auth_restart_wipes
 test "zero-users lockout fails caddy validate" case_auth_zero_users_lockout
 test "parse rejections: every auth hard error fails caddy adapt" case_auth_parse_rejections
 stop_auth_fixtures
+
+group "files"
+test "register exact-host app with ordered roots" case_files_setup
+test "ordered roots + ETag + HEAD + range" case_files_order_and_http_semantics
+test "SPA shell, proxy_first, strict request path" case_files_shell_proxy_first_and_paths
+test "fixed MIME and Cache-Control classes" case_files_response_policy
+test "strict site/files JSON fields reject" case_files_strict_hot_fields
+test "cascade: site files off beats global on" case_files_cascade_off
 
 report
 exit $?

@@ -197,11 +197,11 @@ func (a *App) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 // handleTLSAsk answers Caddy's on_demand_tls ask: may a certificate be
 // minted for this domain? 200 = the domain is a host claimed by a
 // registered app; 404 = it is not (Caddy denies on any non-200). The
-// match is exact after hostname normalization (lowercase, trailing dot
-// stripped) — the registry holds exact hosts only, never wildcards.
-// Allowance follows the registry lifecycle: register → allowed; DELETE
-// or TTL reap → denied. Heartbeat ≠ readiness: an alive app with empty
-// upstreams keeps its allowance — a reload never breaks TLS.
+// lookup uses the same normalized exact, alias, and directory-gated site
+// resolution as HTTP. Allowance follows the registry lifecycle and the
+// live direct-child gate: register → allowed; DELETE, TTL reap, or site
+// directory removal → denied. Heartbeat ≠ readiness: an alive app with
+// empty upstreams keeps its allowance — a reload never breaks TLS.
 func (a *App) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 	domain := r.URL.Query().Get("domain")
 	if domain == "" {
@@ -209,7 +209,7 @@ func (a *App) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := normalizeHostHeader(domain)
-	rec, ok := a.appsRegistry().resolveHost(name)
+	rec, ok := a.appsRegistry().resolveRequestHost(domain)
 	if !ok {
 		writeAPIError(w, &apiError{
 			Status: http.StatusNotFound,
@@ -231,6 +231,7 @@ func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
 		"ping":        cascadeBool(nil, a.Ping, false),
 		"mdns":        a.Mdns != nil,
 		"auth":        len(a.authEnabledSites()) > 0,
+		"files":       cascadeBool(nil, a.Files, false),
 		"control":     a.controlPublicInfo(),
 	})
 }

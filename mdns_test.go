@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -458,6 +459,50 @@ func TestMdnsReconcileTransitions(t *testing.T) {
 	}
 	if snap.withdraws != w0+1 {
 		t.Fatalf("disable withdraws: %d, want %d", snap.withdraws, w0+1)
+	}
+}
+
+func TestMdnsSiteAliasAdvertiseDeleteAndReap(t *testing.T) {
+	reg, clock := newClockedRegistry(t, 10*time.Second)
+	fake := &fakeResponder{}
+	adv := newTestAdvertiser(t, reg, fake)
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+		t.Fatal(err)
+	}
+	adv.reconcile()
+	create := func(name, alias string) AppRecord {
+		rec, err := reg.createWithPolicy(name, nil, &SitePolicy{
+			Host:    "{site}." + name + ".test",
+			Dir:     t.TempDir(),
+			Aliases: map[string]string{alias: "tenant"},
+		}, nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rec
+	}
+	deleted := create("delete", "delete.local")
+	adv.reconcile()
+	snap := adv.snapshot("janus.local")
+	if len(snap.entries) != 2 || snap.entries[1].Name != "delete.local" || snap.entries[1].App != deleted.ID {
+		t.Fatalf("site alias create: %+v", snap.entries)
+	}
+	if err := reg.delete(deleted.ID); err != nil {
+		t.Fatal(err)
+	}
+	adv.reconcile()
+	if snap = adv.snapshot("janus.local"); len(snap.entries) != 1 {
+		t.Fatalf("site alias delete: %+v", snap.entries)
+	}
+	reaped := create("reap", "reap.local")
+	adv.reconcile()
+	clock.advance(11 * time.Second)
+	if ids := reg.sweepExpired(); len(ids) != 1 || ids[0] != reaped.ID {
+		t.Fatalf("reaped ids=%v", ids)
+	}
+	adv.reconcile()
+	if snap = adv.snapshot("janus.local"); len(snap.entries) != 1 {
+		t.Fatalf("site alias reap: %+v", snap.entries)
 	}
 }
 
@@ -1029,11 +1074,94 @@ func TestMdnsSnapshotRedaction(t *testing.T) {
 	if err := json.Unmarshal(body, &snap); err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.Apps) != 1 || snap.Apps[0].Upstreams.Total != 1 || snap.Apps[0].Upstreams.Healthy != 1 {
+	if len(snap.Apps) != 1 || snap.Apps[0].Workers.Total != 1 || snap.Apps[0].Workers.Healthy != 1 ||
+		snap.Apps[0].Shape != "api-only" || snap.Apps[0].Admission != "workers" {
 		t.Fatalf("snapshot apps: %+v", snap.Apps)
 	}
 	if snap.Apps[0].HeartbeatAgeMS < 0 || snap.Apps[0].HeartbeatAgeMS > 10_000 {
 		t.Fatalf("heartbeat age: %d", snap.Apps[0].HeartbeatAgeMS)
+	}
+}
+
+func TestMdnsStatusShapeAdmissionLaunchAndConflict(t *testing.T) {
+	app := newTestMdnsApp(t, &MdnsSettings{})
+	root := t.TempDir()
+	shell := filepath.Join(t.TempDir(), "index.html")
+	appOnly, err := app.appsReg.createWithPolicy("apponly", []string{"apponly.test"}, nil, &FilesPolicy{
+		Roots: []FilesRoot{{Path: root, Class: filesClassMutable}},
+		Shell: shell,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := app.appsReg.createWithPolicy("full", []string{"full.test"}, nil, &FilesPolicy{
+		Roots:      []FilesRoot{{Path: root, Class: filesClassLive}},
+		ProxyFirst: []string{"/PRIVATE-api"},
+		Shell:      shell,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.appsReg.setUpstreams(full.ID, []Upstream{{Path: "/tmp/SECRET-doorbell.sock", Doorbell: true}}); err != nil {
+		t.Fatal(err)
+	}
+	site, err := app.appsReg.createWithPolicy("sites", nil, &SitePolicy{
+		Host:    "{site}.sites.test",
+		Dir:     filepath.Join(t.TempDir(), "SECRET-site-dir"),
+		Aliases: map[string]string{"launch.local": "tenant"},
+	}, &FilesPolicy{
+		Roots: []FilesRoot{{Path: filepath.Join(t.TempDir(), "SECRET-root"), Class: filesClassMutable}},
+		Shell: filepath.Join(t.TempDir(), "SECRET-shell.html"),
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	patternOnly, err := app.appsReg.createWithPolicy("patternonly", nil, &SitePolicy{
+		Host: "{site}.pattern.test",
+		Dir:  t.TempDir(),
+	}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adv := app.state.mdns
+	adv.mu.Lock()
+	conflict := &mdnsEntry{
+		name: "launch.local", app: site.ID, typ: mdnsTypeAppHost, port: 443,
+		state: mdnsStateRenamed, effective: "launch-2.local",
+	}
+	adv.entries[conflict.key()] = conflict
+	adv.mu.Unlock()
+
+	snap := app.mdnsStatusSnapshot()
+	byName := map[string]mdnsStatusApp{}
+	for _, status := range snap.Apps {
+		byName[status.Name] = status
+	}
+	if got := byName[appOnly.Name]; got.Shape != "app-only" || got.Admission != "none" || got.API || !got.Files {
+		t.Fatalf("app-only status: %+v", got)
+	}
+	if got := byName[full.Name]; got.Shape != "full" || got.Admission != "doorbell" ||
+		got.Workers.Total != 0 || !got.API || !got.Files {
+		t.Fatalf("full doorbell status: %+v", got)
+	}
+	if got := byName[patternOnly.Name]; got.Shape != "api-only" || len(got.Launch) != 0 ||
+		got.SitePattern != "{site}.pattern.test" {
+		t.Fatalf("pattern-only status: %+v", got)
+	}
+	gotSite := byName[site.Name]
+	if gotSite.SitePattern != "{site}.sites.test" || len(gotSite.Aliases) != 1 ||
+		len(gotSite.Launch) != 1 || gotSite.Launch[0].MDNS != mdnsStateRenamed ||
+		gotSite.Launch[0].EffectiveName != "launch-2.local" || gotSite.Launch[0].URL != "" {
+		t.Fatalf("site conflict-safe launch: %+v", gotSite)
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"SECRET-", "PRIVATE-api", "proxy_first", `"roots"`, `"shell"`, `"dir"`} {
+		if strings.Contains(string(body), secret) {
+			t.Errorf("status leaks %q: %s", secret, body)
+		}
 	}
 }
 
@@ -1067,7 +1195,11 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 			t.Errorf("status page references an external resource (%q)", external)
 		}
 	}
-	for _, required := range []string{"/status.json", "No apps registered", "textContent", "no-cors", "location.replace"} {
+	for _, required := range []string{
+		"/status.json", "No apps registered", "textContent", "no-cors", "location.replace",
+		"@media (max-width: 600px)", "min-height: 44px", "full certificate", "publicly trusted LAN hostname",
+		"No concrete launch host configured",
+	} {
 		if !strings.Contains(page, required) {
 			t.Errorf("status page is missing %q", required)
 		}
@@ -1154,10 +1286,10 @@ func TestMdnsSharedDecider(t *testing.T) {
 		{"GET", "/", "janus.local", 200},
 		{"GET", "/status.json", "janus.local", 200},
 		{"HEAD", "/status.json", "janus.local", 200},
-		{"GET", "/", "janus-2.local", 200},          // renamed-mine
-		{"GET", "/", "shop.local", 200},             // hot-advertised-mine
-		{"GET", "/", "janus.lan.ripdev.io", 200},    // canonical-mine
-		{"GET", "/", "janus.local:80", 200},         // port stripped before the check
+		{"GET", "/", "janus-2.local", 200},       // renamed-mine
+		{"GET", "/", "shop.local", 200},          // hot-advertised-mine
+		{"GET", "/", "janus.lan.ripdev.io", 200}, // canonical-mine
+		{"GET", "/", "janus.local:80", 200},      // port stripped before the check
 		{"POST", "/status.json", "janus.local", 405},
 		{"PUT", "/", "janus.local", 405},
 		{"GET", "/anything-else", "janus.local", 404},

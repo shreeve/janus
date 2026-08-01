@@ -124,7 +124,7 @@ func newDataPlane(reg *appRegistry, logger *zap.Logger) *dataPlane {
 // serve applies the data-plane decision table, top to bottom.
 func (dp *dataPlane) serve(w http.ResponseWriter, r *http.Request) error {
 	host := normalizeHostHeader(r.Host)
-	rec, ok := dp.registry.resolveHost(host)
+	rec, ok := dp.registry.resolveRequestHost(r.Host)
 	if !ok {
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}

@@ -33,6 +33,10 @@ type Handler struct {
 	// A non-empty auth { … } block replaces the global config wholesale.
 	Auth *AuthSettings `json:"auth,omitempty"`
 
+	// Files overrides the global registered-file service default for this
+	// site when non-nil.
+	Files *bool `json:"files,omitempty"`
+
 	app    *App
 	dp     *dataPlane
 	logger *zap.Logger
@@ -87,6 +91,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		zap.Bool("cache", h.cacheCfg != nil),
 		zap.Bool("hub", h.hubCfg != nil),
 		zap.Bool("auth", h.authCfg != nil),
+		zap.Bool("files", h.filesEnabled()),
 	)
 	return nil
 }
@@ -99,6 +104,14 @@ func (h *Handler) pingEnabled() bool {
 	return cascadeBool(h.Ping, global, false)
 }
 
+func (h *Handler) filesEnabled() bool {
+	var global *bool
+	if h.app != nil {
+		global = h.app.Files
+	}
+	return cascadeBool(h.Files, global, false)
+}
+
 // ServeHTTP handles admitted requests: on the plain-HTTP port with the
 // mdns front door in shared mode, the handler is the front-door decider
 // (mine serves the front door, not-mine passes through to the next
@@ -107,6 +120,7 @@ func (h *Handler) pingEnabled() bool {
 // everything else routes through the data plane (registry hosts →
 // upstreams; unknown hosts → 404).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	r.Header.Del(ripSiteHeader)
 	if h.app != nil && h.app.mdnsSharedRoutes != nil &&
 		r.TLS == nil && requestLocalPort(r) == h.app.mdnsSharedPort {
 		if h.app.mdnsSharedHostMine(normalizeHostHeader(r.Host)) {
@@ -134,6 +148,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		r = rr
 		w = &authRespStrip{ResponseWriter: w}
 	}
+	if _, err := validatedRequestPath(r); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return nil
+	}
+	var host string
+	var rec AppRecord
+	if h.dp != nil {
+		host = normalizeHostHeader(r.Host)
+		var ok bool
+		rec, ok = h.dp.registry.resolveRequestHost(r.Host)
+		if !ok {
+			return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
+		}
+		if rec.siteValue != "" {
+			r.Header.Set(ripSiteHeader, rec.siteValue)
+		}
+	}
 	// Hub interception (before cache and upstream selection, after ping):
 	// the hub claims upgrades to its path only — a non-upgrade request to
 	// the same path flows through the data plane like any other.
@@ -141,10 +172,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return h.serveHub(w, r)
 	}
 	if h.dp != nil {
+		if h.filesEnabled() && rec.Files != nil {
+			handled, err := h.serveFiles(w, r, rec)
+			if handled || err != nil {
+				return err
+			}
+		}
 		if h.cacheCfg != nil {
 			return h.serveCache(w, r)
 		}
-		return h.dp.serve(w, r)
+		return h.dp.serveResolved(w, r, host, rec)
 	}
 	return caddyhttp.Error(http.StatusNotFound, nil)
 }
@@ -198,6 +235,15 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return err
 			}
 			h.Auth = as
+		case "files":
+			if h.Files != nil {
+				return d.Err("duplicate files directive in the same block")
+			}
+			files, err := parseFilesDirective(d)
+			if err != nil {
+				return err
+			}
+			h.Files = files
 		case "control":
 			return d.Err("control is process-wide; configure it in the global janus options block")
 		case "mdns":
