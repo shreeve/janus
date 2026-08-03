@@ -43,6 +43,12 @@ plus its runnable artifacts.
 | --- | --- |
 | [`counter/index.md`](counter/index.md) | The realtime counter demo: all four capabilities end to end with a Rip tenant (`app.rip` and `Caddyfile.demo` ship alongside) |
 
+## Architecture maps
+
+| Doc | Role |
+| --- | --- |
+| [`20260803-113427-janus-caddy-rip-architecture.md`](20260803-113427-janus-caddy-rip-architecture.md) | Implementation-backed Caddy, Janus, and Rip Server ownership and request-flow map, with rendered SVG and PNG companions |
+
 ## Design history (kept, superseded by the contracts above)
 
 | Doc | Role |

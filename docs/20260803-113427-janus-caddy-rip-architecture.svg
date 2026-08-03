@@ -1,0 +1,360 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1500" viewBox="0 0 1920 1500" role="img" aria-labelledby="title desc">
+  <title id="title">Caddy, Janus, and Rip Server architecture</title>
+  <desc id="desc">Caddy terminates public traffic and sends admitted requests to Janus. Janus provides a hot registry, control API, request pipeline, ten edge capabilities, Unix worker routing, and a reload-safe hub. Rip Server registers, heartbeats, publishes workers, and uses a doorbell to reload on demand.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#06101d"/>
+      <stop offset="0.55" stop-color="#0a1627"/>
+      <stop offset="1" stop-color="#11152a"/>
+    </linearGradient>
+    <linearGradient id="janusGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#12343b"/>
+      <stop offset="1" stop-color="#102832"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="9" stdDeviation="12" flood-color="#000814" flood-opacity="0.48"/>
+    </filter>
+    <marker id="arrowData" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#62d5f3"/>
+    </marker>
+    <marker id="arrowHot" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f4b860"/>
+    </marker>
+    <marker id="arrowRip" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#caa4ff"/>
+    </marker>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .title { fill:#f7fbff; font-size:42px; font-weight:760; letter-spacing:-0.8px; }
+      .subtitle { fill:#9db1c8; font-size:18px; }
+      .region { fill:#0d1b2d; stroke:#31506e; stroke-width:2; }
+      .region-rip { fill:#17172a; stroke:#654d83; stroke-width:2; }
+      .region-title { fill:#f4f8fc; font-size:23px; font-weight:720; }
+      .region-note { fill:#8ea6bd; font-size:14px; }
+      .card { fill:#13263b; stroke:#397299; stroke-width:1.8; }
+      .janus-card { fill:url(#janusGlow); stroke:#45b996; stroke-width:1.8; }
+      .rip-card { fill:#272039; stroke:#9d74d1; stroke-width:1.8; }
+      .state-card { fill:#272638; stroke:#d29d4e; stroke-width:1.8; }
+      .actor-card { fill:#0f2135; stroke:#397ea4; stroke-width:1.7; }
+      .card-title { fill:#f4f8fc; font-size:20px; font-weight:710; }
+      .card-kicker { fill:#66d9ef; font-size:13px; font-weight:750; letter-spacing:1.4px; }
+      .janus-kicker { fill:#5ee0b6; }
+      .rip-kicker { fill:#c9a3ff; }
+      .hot-kicker { fill:#f4b860; }
+      .body { fill:#c0cfdd; font-size:15px; }
+      .body-small { fill:#aebfd0; font-size:13px; }
+      .muted { fill:#7990a7; font-size:12px; }
+      .pipeline { fill:#0d2029; stroke:#2d7f6c; stroke-width:1.4; }
+      .pipe-num { fill:#09151d; stroke:#5ee0b6; stroke-width:1.5; }
+      .pipe-num-text { fill:#5ee0b6; font-size:13px; font-weight:800; text-anchor:middle; dominant-baseline:middle; }
+      .pipe-title { fill:#eefbf7; font-size:14px; font-weight:680; }
+      .pipe-note { fill:#89a9a0; font-size:11px; }
+      .edge-data { fill:none; stroke:#62d5f3; stroke-width:3; marker-end:url(#arrowData); }
+      .edge-hot { fill:none; stroke:#f4b860; stroke-width:3; stroke-dasharray:9 7; marker-end:url(#arrowHot); }
+      .edge-rip { fill:none; stroke:#caa4ff; stroke-width:3; marker-end:url(#arrowRip); }
+      .edge-inner { fill:none; stroke:#4d9f8b; stroke-width:2.2; marker-end:url(#arrowData); }
+      .label-bg { fill:#091524; stroke:#243d54; stroke-width:1; }
+      .edge-label { fill:#d9e5ef; font-size:12px; font-weight:650; text-anchor:middle; }
+      .legend { fill:#9fb2c6; font-size:12px; }
+      .cap { fill:#101f31; stroke:#2a465f; stroke-width:1.2; }
+      .cap-num { fill:#5ee0b6; font-size:17px; font-weight:800; }
+      .cap-title { fill:#f3f8fb; font-size:15px; font-weight:700; }
+      .cap-note { fill:#8fa4b8; font-size:11px; }
+      .step { fill:#121f30; stroke:#42566d; stroke-width:1.3; }
+      .step-num { fill:#f4b860; font-size:16px; font-weight:800; text-anchor:middle; dominant-baseline:middle; }
+      .step-text { fill:#dbe5ee; font-size:13px; font-weight:620; text-anchor:middle; }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1500" fill="url(#bg)"/>
+  <circle cx="1680" cy="40" r="360" fill="#4f2d74" opacity="0.08"/>
+  <circle cx="320" cy="1450" r="420" fill="#0f91a8" opacity="0.06"/>
+
+  <text x="64" y="62" class="title">Caddy + Janus + Rip Server</text>
+  <text x="64" y="96" class="subtitle">Cold edge policy, hot tenant registration, and disposable workers — in one implementation-backed map</text>
+  <line x1="1170" y1="66" x2="1218" y2="66" stroke="#62d5f3" stroke-width="3"/>
+  <text x="1230" y="71" class="legend">public/data traffic</text>
+  <line x1="1370" y1="66" x2="1418" y2="66" stroke="#f4b860" stroke-width="3" stroke-dasharray="9 7"/>
+  <text x="1430" y="71" class="legend">hot control</text>
+  <line x1="1540" y1="66" x2="1588" y2="66" stroke="#caa4ff" stroke-width="3"/>
+  <text x="1600" y="71" class="legend">Rip-owned process/socket</text>
+
+  <!-- External actors -->
+  <g filter="url(#shadow)">
+    <rect x="54" y="210" width="210" height="118" rx="18" class="actor-card"/>
+    <text x="78" y="242" class="card-kicker">PUBLIC</text>
+    <text x="78" y="273" class="card-title">Web clients</text>
+    <text x="78" y="298" class="body">Browsers · APIs</text>
+    <text x="78" y="317" class="body-small">HTTPS and WSS</text>
+
+    <rect x="54" y="405" width="210" height="118" rx="18" class="actor-card"/>
+    <text x="78" y="437" class="card-kicker">LOCAL NETWORK</text>
+    <text x="78" y="468" class="card-title">LAN clients</text>
+    <text x="78" y="493" class="body">janus.local</text>
+    <text x="78" y="512" class="body-small">mDNS + HTTP status</text>
+
+    <rect x="54" y="600" width="210" height="132" rx="18" class="actor-card"/>
+    <text x="78" y="632" class="card-kicker">OPERATOR</text>
+    <text x="78" y="663" class="card-title">Caddyfile</text>
+    <text x="78" y="688" class="body">Capabilities + admission</text>
+    <text x="78" y="708" class="body-small">No app names or sockets</text>
+  </g>
+
+  <!-- Caddy + Janus region -->
+  <rect x="304" y="150" width="1000" height="752" rx="26" class="region" filter="url(#shadow)"/>
+  <text x="336" y="190" class="region-title">One Caddy + Janus process</text>
+  <text x="336" y="214" class="region-note">Caddy is the edge; Janus is compiled into it as an app, HTTP handler, and logging encoder.</text>
+
+  <!-- Caddy card -->
+  <rect x="336" y="240" width="270" height="228" rx="18" class="card"/>
+  <text x="360" y="270" class="card-kicker">CADDY CORE</text>
+  <text x="360" y="302" class="card-title">Public edge</text>
+  <text x="360" y="332" class="body">Listeners + connections</text>
+  <text x="360" y="357" class="body">HTTP/1.1 · HTTP/2 · HTTP/3</text>
+  <text x="360" y="382" class="body">TLS, ACME, certificates</text>
+  <text x="360" y="407" class="body">Site matching + routing</text>
+  <text x="360" y="432" class="body">Access-log policy</text>
+  <rect x="360" y="443" width="213" height="6" rx="3" fill="#3f8fc2" opacity="0.65"/>
+
+  <!-- Janus handler -->
+  <rect x="636" y="240" width="634" height="338" rx="18" class="janus-card"/>
+  <text x="660" y="270" class="card-kicker janus-kicker">HTTP.HANDLERS.JANUS · SITE-SCOPED</text>
+  <text x="660" y="302" class="card-title">Admitted request pipeline</text>
+
+  <g>
+    <rect x="660" y="326" width="178" height="72" rx="12" class="pipeline"/>
+    <circle cx="681" cy="348" r="13" class="pipe-num"/>
+    <text x="681" y="348" class="pipe-num-text">1</text>
+    <text x="704" y="352" class="pipe-title">Ping</text>
+    <text x="681" y="378" class="pipe-note">edge-owned /ping</text>
+
+    <rect x="860" y="326" width="178" height="72" rx="12" class="pipeline"/>
+    <circle cx="881" cy="348" r="13" class="pipe-num"/>
+    <text x="881" y="348" class="pipe-num-text">6</text>
+    <text x="904" y="352" class="pipe-title">Auth wall</text>
+    <text x="881" y="378" class="pipe-note">strip/inject Remote-User</text>
+
+    <rect x="1060" y="326" width="186" height="72" rx="12" class="pipeline"/>
+    <text x="1082" y="351" class="pipe-title">Path + host</text>
+    <text x="1082" y="377" class="pipe-note">registry claim or 404</text>
+
+    <path d="M838 362 H858" class="edge-inner"/>
+    <path d="M1038 362 H1058" class="edge-inner"/>
+
+    <rect x="660" y="426" width="178" height="90" rx="12" class="pipeline"/>
+    <circle cx="681" cy="449" r="13" class="pipe-num"/>
+    <text x="681" y="449" class="pipe-num-text">4</text>
+    <text x="704" y="453" class="pipe-title">Hub WSS</text>
+    <text x="681" y="479" class="pipe-note">terminate + fan-out</text>
+    <text x="681" y="498" class="pipe-note">optional HTTP bridge</text>
+
+    <rect x="860" y="426" width="178" height="90" rx="12" class="pipeline"/>
+    <circle cx="881" cy="449" r="13" class="pipe-num"/>
+    <text x="881" y="449" class="pipe-num-text">7</text>
+    <text x="904" y="453" class="pipe-title">Files</text>
+    <circle cx="881" cy="482" r="13" class="pipe-num"/>
+    <text x="881" y="482" class="pipe-num-text">9</text>
+    <text x="904" y="486" class="pipe-title">Browse</text>
+
+    <rect x="1060" y="426" width="186" height="90" rx="12" class="pipeline"/>
+    <circle cx="1082" cy="449" r="13" class="pipe-num"/>
+    <text x="1082" y="449" class="pipe-num-text">3</text>
+    <text x="1105" y="453" class="pipe-title">Micro-cache</text>
+    <text x="1082" y="479" class="pipe-note">coalesce misses</text>
+    <text x="1082" y="498" class="pipe-note">then Unix proxy</text>
+
+    <path d="M1153 398 V414 H749 V424" class="edge-inner"/>
+    <path d="M1153 414 H949 V424" class="edge-inner"/>
+    <path d="M1153 414 V424" class="edge-inner"/>
+  </g>
+  <text x="660" y="549" class="body-small">Final upstream X-Sendfile is transformed by Janus; worker busy/draining signals may retry safely.</text>
+
+  <!-- Process-wide app -->
+  <rect x="336" y="604" width="934" height="260" rx="18" class="janus-card"/>
+  <text x="360" y="634" class="card-kicker janus-kicker">JANUS APP · PROCESS-WIDE</text>
+  <text x="360" y="666" class="card-title">Hot control and in-memory engines</text>
+
+  <rect x="360" y="690" width="360" height="142" rx="14" class="state-card"/>
+  <text x="382" y="718" class="card-kicker hot-kicker">2 · CONTROL API /1.0</text>
+  <text x="382" y="746" class="body">internal Unix · local HTTP · public HTTPS</text>
+  <text x="382" y="771" class="body-small">apps · heartbeat · upstreams · TLS ask</text>
+  <text x="382" y="793" class="body-small">hub publish · access stream · live stats</text>
+  <text x="382" y="815" class="muted">Hot JSON changes registry state, never cold admission.</text>
+
+  <rect x="746" y="690" width="500" height="142" rx="14" class="state-card"/>
+  <text x="768" y="718" class="card-kicker hot-kicker">POOLED PROCESS STATE</text>
+  <text x="768" y="746" class="body">Registry + generations · least-conn data plane · hubs</text>
+  <text x="768" y="771" class="body-small">mDNS advertiser · auth sessions · browse leases · access bridge</text>
+  <text x="768" y="795" class="body-small">Reload keeps registrations and WebSockets; process restart clears registry.</text>
+  <path d="M720 761 H744" class="edge-hot"/>
+
+  <!-- Rip region -->
+  <rect x="1344" y="150" width="522" height="752" rx="26" class="region-rip" filter="url(#shadow)"/>
+  <text x="1376" y="190" class="region-title">One Rip Server tenant</text>
+  <text x="1376" y="214" class="region-note">The tenant announces itself; Janus does not supervise it.</text>
+
+  <rect x="1376" y="240" width="458" height="272" rx="18" class="rip-card"/>
+  <text x="1400" y="270" class="card-kicker rip-kicker">RIP MANAGER</text>
+  <text x="1400" y="302" class="card-title">Registration + supervision</text>
+  <text x="1400" y="332" class="body">POST app: name + host/site + files + upstreams</text>
+  <text x="1400" y="357" class="body">Heartbeat every 5s · DELETE on clean stop</text>
+  <text x="1400" y="382" class="body">PUT complete worker socket lists</text>
+  <text x="1400" y="407" class="body">Watch → generate → validate → drain</text>
+  <text x="1400" y="432" class="body">Hub publish for server-originated dings</text>
+  <text x="1400" y="457" class="body">App-scoped NDJSON access monitor</text>
+  <text x="1400" y="486" class="muted">bridge_path is optional hot state; the manager does not emit it.</text>
+
+  <rect x="1376" y="540" width="220" height="146" rx="18" class="rip-card"/>
+  <text x="1400" y="570" class="card-kicker rip-kicker">DOORBELL</text>
+  <text x="1400" y="601" class="card-title">Demand signal</text>
+  <text x="1400" y="629" class="body">Unix socket</text>
+  <text x="1400" y="653" class="body-small">GET /ring → 204 or 503</text>
+
+  <rect x="1614" y="540" width="220" height="146" rx="18" class="rip-card"/>
+  <text x="1638" y="570" class="card-kicker rip-kicker">WORKERS</text>
+  <text x="1638" y="601" class="card-title">Disposable API pool</text>
+  <text x="1638" y="629" class="body">Unix socket each</text>
+  <text x="1638" y="653" class="body-small">ready + busy/draining protocol</text>
+
+  <rect x="1376" y="716" width="458" height="148" rx="18" class="rip-card"/>
+  <text x="1400" y="746" class="card-kicker rip-kicker">REGISTERED FILE POLICY</text>
+  <text x="1400" y="777" class="card-title">App + static roots</text>
+  <text x="1400" y="805" class="body">Ordered roots · cache policy · proxy-first prefixes</text>
+  <text x="1400" y="830" class="body-small">optional SPA shell · browse flag · patterned {site}</text>
+
+  <!-- Major inter-region arrows and labels -->
+  <path d="M264 269 H334" class="edge-data"/>
+  <rect x="262" y="235" width="76" height="22" rx="11" class="label-bg"/>
+  <text x="300" y="250" class="edge-label">HTTPS/WSS</text>
+
+  <path d="M606 354 H634" class="edge-data"/>
+  <rect x="578" y="320" width="84" height="22" rx="11" class="label-bg"/>
+  <text x="620" y="335" class="edge-label">site route</text>
+
+  <path d="M470 468 V568 H520 V688" class="edge-hot"/>
+  <rect x="452" y="535" width="136" height="22" rx="11" class="label-bg"/>
+  <text x="520" y="550" class="edge-label">on-demand TLS ask</text>
+
+  <path d="M264 666 H318 V260 H334" class="edge-data"/>
+  <rect x="270" y="548" width="112" height="22" rx="11" class="label-bg"/>
+  <text x="326" y="563" class="edge-label">cold Caddyfile</text>
+
+  <path d="M264 464 H302 V790 H744" class="edge-data"/>
+  <rect x="277" y="492" width="112" height="22" rx="11" class="label-bg"/>
+  <text x="333" y="507" class="edge-label">mDNS + status</text>
+
+  <path d="M1178 690 V580" class="edge-hot"/>
+  <rect x="1091" y="624" width="174" height="22" rx="11" class="label-bg"/>
+  <text x="1178" y="639" class="edge-label">host + upstream snapshot</text>
+
+  <path d="M1376 370 C1318 370 1330 882 1278 882 H738 V761 H718" class="edge-hot"/>
+  <rect x="984" y="858" width="205" height="22" rx="11" class="label-bg"/>
+  <text x="1086" y="873" class="edge-label">hot JSON over Unix / HTTP(S)</text>
+
+  <path d="M1270 468 C1334 468 1340 613 1612 613" class="edge-rip"/>
+  <rect x="1246" y="491" width="224" height="22" rx="11" class="label-bg"/>
+  <text x="1358" y="506" class="edge-label">HTTP proxy + optional hub bridge</text>
+
+  <path d="M1614 650 C1510 697 1328 585 1268 520" class="edge-data"/>
+  <rect x="1360" y="648" width="178" height="22" rx="11" class="label-bg"/>
+  <text x="1449" y="663" class="edge-label">response / X-Sendfile</text>
+
+  <path d="M1376 790 C1322 790 1322 502 1268 502" class="edge-rip"/>
+  <rect x="1255" y="748" width="150" height="22" rx="11" class="label-bg"/>
+  <text x="1330" y="763" class="edge-label">Janus reads roots</text>
+
+  <!-- Reload handshake strip -->
+  <text x="64" y="962" class="region-title">Demand-driven API reload</text>
+  <text x="64" y="987" class="region-note">The original request body stays unread until fresh sockets are visible in Janus.</text>
+  <g filter="url(#shadow)">
+    <rect x="64" y="1011" width="230" height="94" rx="16" class="step"/>
+    <circle cx="92" cy="1038" r="16" class="pipe-num"/>
+    <text x="92" y="1038" class="step-num">1</text>
+    <text x="179" y="1061" class="step-text">Rip validates change</text>
+    <text x="179" y="1083" class="step-text">then publishes doorbell</text>
+
+    <rect x="334" y="1011" width="230" height="94" rx="16" class="step"/>
+    <circle cx="362" cy="1038" r="16" class="pipe-num"/>
+    <text x="362" y="1038" class="step-num">2</text>
+    <text x="449" y="1061" class="step-text">Next request selects</text>
+    <text x="449" y="1083" class="step-text">the doorbell</text>
+
+    <rect x="604" y="1011" width="230" height="94" rx="16" class="step"/>
+    <circle cx="632" cy="1038" r="16" class="pipe-num"/>
+    <text x="632" y="1038" class="step-num">3</text>
+    <text x="719" y="1061" class="step-text">Janus sends bodyless</text>
+    <text x="719" y="1083" class="step-text">GET /ring</text>
+
+    <rect x="874" y="1011" width="230" height="94" rx="16" class="step"/>
+    <circle cx="902" cy="1038" r="16" class="pipe-num"/>
+    <text x="902" y="1038" class="step-num">4</text>
+    <text x="989" y="1061" class="step-text">Rip boots + readies</text>
+    <text x="989" y="1083" class="step-text">fresh workers</text>
+
+    <rect x="1144" y="1011" width="230" height="94" rx="16" class="step"/>
+    <circle cx="1172" cy="1038" r="16" class="pipe-num"/>
+    <text x="1172" y="1038" class="step-num">5</text>
+    <text x="1259" y="1061" class="step-text">Rip awaits upstream PUT</text>
+    <text x="1259" y="1083" class="step-text">then answers 204</text>
+
+    <rect x="1414" y="1011" width="442" height="94" rx="16" class="step"/>
+    <circle cx="1442" cy="1038" r="16" class="pipe-num"/>
+    <text x="1442" y="1038" class="step-num">6</text>
+    <text x="1635" y="1061" class="step-text">Janus re-resolves and streams the original request once</text>
+    <text x="1635" y="1083" class="step-text">Hub WebSockets never leave the edge</text>
+  </g>
+  <path d="M294 1058 H332" class="edge-hot"/>
+  <path d="M564 1058 H602" class="edge-hot"/>
+  <path d="M834 1058 H872" class="edge-hot"/>
+  <path d="M1104 1058 H1142" class="edge-hot"/>
+  <path d="M1374 1058 H1412" class="edge-hot"/>
+
+  <!-- Capability inventory -->
+  <text x="64" y="1167" class="region-title">What Janus adds inside Caddy</text>
+  <text x="64" y="1192" class="region-note">Ten shipped capabilities, plus the registry-driven host router, heartbeat reaping, TLS allowlisting, and least-connection Unix proxy.</text>
+
+  <g>
+    <rect x="64" y="1220" width="338" height="90" rx="14" class="cap"/>
+    <text x="84" y="1250" class="cap-num">01</text><text x="124" y="1250" class="cap-title">Ping</text>
+    <text x="84" y="1280" class="cap-note">Edge liveness + site admission proof</text>
+
+    <rect x="426" y="1220" width="338" height="90" rx="14" class="cap"/>
+    <text x="446" y="1250" class="cap-num">02</text><text x="486" y="1250" class="cap-title">Control</text>
+    <text x="446" y="1280" class="cap-note">Authenticated hot /1.0 listeners</text>
+
+    <rect x="788" y="1220" width="338" height="90" rx="14" class="cap"/>
+    <text x="808" y="1250" class="cap-num">03</text><text x="848" y="1250" class="cap-title">Micro-cache</text>
+    <text x="808" y="1280" class="cap-note">Generation fencing + request coalescing</text>
+
+    <rect x="1150" y="1220" width="338" height="90" rx="14" class="cap"/>
+    <text x="1170" y="1250" class="cap-num">04</text><text x="1210" y="1250" class="cap-title">Hub</text>
+    <text x="1170" y="1280" class="cap-note">Edge WebSocket fan-out + HTTP bridge</text>
+
+    <rect x="1512" y="1220" width="344" height="90" rx="14" class="cap"/>
+    <text x="1532" y="1250" class="cap-num">05</text><text x="1572" y="1250" class="cap-title">mDNS</text>
+    <text x="1532" y="1280" class="cap-note">LAN names + redacted status front door</text>
+
+    <rect x="64" y="1330" width="338" height="90" rx="14" class="cap"/>
+    <text x="84" y="1360" class="cap-num">06</text><text x="124" y="1360" class="cap-title">Auth</text>
+    <text x="84" y="1390" class="cap-note">Prefix gates + host-wide edge sessions</text>
+
+    <rect x="426" y="1330" width="338" height="90" rx="14" class="cap"/>
+    <text x="446" y="1360" class="cap-num">07</text><text x="486" y="1360" class="cap-title">Files</text>
+    <text x="446" y="1390" class="cap-note">Registered roots + SPA + site admission</text>
+
+    <rect x="788" y="1330" width="338" height="90" rx="14" class="cap"/>
+    <text x="808" y="1360" class="cap-num">08</text><text x="848" y="1360" class="cap-title">Sendfile</text>
+    <text x="808" y="1390" class="cap-note">Authorized validators, ranges, streaming</text>
+
+    <rect x="1150" y="1330" width="338" height="90" rx="14" class="cap"/>
+    <text x="1170" y="1360" class="cap-num">09</text><text x="1210" y="1360" class="cap-title">Browse</text>
+    <text x="1170" y="1390" class="cap-note">Listings, themes, bounded renderers</text>
+
+    <rect x="1512" y="1330" width="344" height="90" rx="14" class="cap"/>
+    <text x="1532" y="1360" class="cap-num">10</text><text x="1572" y="1360" class="cap-title">Access log</text>
+    <text x="1532" y="1390" class="cap-note">Durable JSON + app-scoped live NDJSON</text>
+  </g>
+
+  <text x="64" y="1464" class="muted">Implementation map · docs/20260803-113427-janus-caddy-rip-architecture.md</text>
+  <text x="1856" y="1464" class="muted" text-anchor="end">Memory-only registry · tenants re-register after process restart</text>
+</svg>
