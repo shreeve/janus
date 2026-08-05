@@ -1071,7 +1071,7 @@ func (a *App) mdnsServeStatus(w http.ResponseWriter, r *http.Request) {
 
 // The snapshot is allowlist-shaped: only the fields below are emitted,
 // so a future registry field stays private on this surface until someone
-// deliberately adds it. Upstream socket paths and bridge_path never
+// deliberately adds it. Upstream socket paths and bridge never
 // appear — counts and health only.
 
 type mdnsStatusWorkers struct {

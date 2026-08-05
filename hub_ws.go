@@ -53,8 +53,8 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	// Hub-enabled site, hub-unready tenant: loud, not a hang.
-	if cfg.mode == "bridge" && rec.BridgePath == "" {
-		return app.hubUnavailable(w, rec.ID, "app has no registered bridge_path")
+	if cfg.mode == "bridge" && rec.Bridge == "" {
+		return app.hubUnavailable(w, rec.ID, "app has no registered bridge")
 	}
 
 	// Admission checks and slot reservation, atomically: reserving before

@@ -1532,7 +1532,7 @@ hub_upgrade_code() {
 }
 
 # start_hub_tenant SOCK APPID… — the recording, scriptable bridge tenant.
-# Serves POST {bridge_path} (records + playbook), answers any other request
+# Serves POST {bridge} (records + playbook), answers any other request
 # with plain:<path>, and heartbeats every app id given (500ms; TTL is 2s).
 start_hub_tenant() {
 	local sock=$1
@@ -1565,13 +1565,13 @@ case_hub_setup() {
 	hub_playbook ''
 
 	# Register the three apps FIRST (ids feed the fixture's heartbeater).
-	capi POST /1.0/apps '{"name":"hubapp","hosts":["hub1.ripdev.io","hubany.ripdev.io","hubdel.ripdev.io","hubrace.ripdev.io","api.ripdev.io"],"bridge_path":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubapp","hosts":["hub1.ripdev.io","hubany.ripdev.io","hubdel.ripdev.io","hubrace.ripdev.io","api.ripdev.io"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_APP_FILE"
-	capi POST /1.0/apps '{"name":"hubiso","hosts":["hub2.ripdev.io"],"bridge_path":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubiso","hosts":["hub2.ripdev.io"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_ISO_FILE"
-	capi POST /1.0/apps '{"name":"hubcap","hosts":["hubten.ripdev.io","hubtwenty.ripdev.io"],"bridge_path":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubcap","hosts":["hubten.ripdev.io","hubtwenty.ripdev.io"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_CAP_FILE"
 	capi POST /1.0/apps '{"name":"hubdirect","hosts":["hubdirect.ripdev.io"],"upstreams":[]}'
@@ -1585,9 +1585,9 @@ case_hub_setup() {
 		eq "$REPLY_CODE" "200"
 	done
 
-	# bridge_path surfaces on GET; /1.0/hub counters answer.
+	# bridge surfaces on GET; /1.0/hub counters answer.
 	capi GET "/1.0/apps/$(hub_app_id)"
-	json_has "$REPLY_BODY" '"bridge_path":"/rt/bridge"'
+	json_has "$REPLY_BODY" '"bridge":"/rt/bridge"'
 	capi GET /1.0/hub
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"bridge_garbage"'
@@ -1602,8 +1602,8 @@ case_hub_direct_no_bridge() {
 	eq "$after" "$before"
 	capi GET "/1.0/apps/$(hub_direct_id)"
 	json_has "$REPLY_BODY" '"upstreams":[]'
-	if [[ "$REPLY_BODY" == *bridge_path* ]]; then
-		echo "direct app unexpectedly has bridge_path" >&2
+	if [[ "$REPLY_BODY" == *bridge* ]]; then
+		echo "direct app unexpectedly has bridge" >&2
 		return 1
 	fi
 }
@@ -1656,11 +1656,11 @@ case_hub_open_tenant_down() {
 	json_has "$hdrs" 'Retry-After'
 }
 
-case_hub_no_bridge_path() {
-	capi PATCH "/1.0/apps/$(hub_app_id)" '{"bridge_path":null}'
+case_hub_no_bridge() {
+	capi PATCH "/1.0/apps/$(hub_app_id)" '{"bridge":null}'
 	eq "$REPLY_CODE" "200"
 	eq "$(hub_upgrade_code hubany.ripdev.io -)" "503"
-	capi PATCH "/1.0/apps/$(hub_app_id)" '{"bridge_path":"/rt/bridge"}'
+	capi PATCH "/1.0/apps/$(hub_app_id)" '{"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "200"
 }
 
@@ -2009,7 +2009,7 @@ case_hub_reload_invisibility() {
 case_hub_teardown_on_delete() {
 	# DELETE tears the hub down: sockets close 1001 "app deregistered";
 	# the snapshot 404s once the registration is gone.
-	capi POST /1.0/apps '{"name":"hubdel","hosts":["hubdel2.ripdev.io"],"bridge_path":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubdel","hosts":["hubdel2.ripdev.io"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	local del_id
 	del_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -2114,7 +2114,7 @@ case_hub_cap_floor_and_reservation() {
 case_hub_open_teardown_race() {
 	# DELETE while an open bridge is pending: the returning 2xx sees the
 	# tombstone — no 101, no zombie connection.
-	capi POST /1.0/apps '{"name":"hubrace","hosts":["hubrace2.ripdev.io"],"bridge_path":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubrace","hosts":["hubrace2.ripdev.io"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	local race_id
 	race_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -2736,7 +2736,7 @@ case_mdns_status_truth() {
 	capi PUT "/1.0/apps/$(mdns_app_id)/upstreams" \
 		'{"upstreams":[{"path":"/tmp/janus-mdns-SENTINEL-xyz.sock"}]}'
 	eq "$REPLY_CODE" "200"
-	capi PATCH "/1.0/apps/$(mdns_app_id)" '{"bridge_path":"/rt/SECRETBRIDGE-xyz"}'
+	capi PATCH "/1.0/apps/$(mdns_app_id)" '{"bridge":"/rt/SECRETBRIDGE-xyz"}'
 	eq "$REPLY_CODE" "200"
 	mdns_hb
 	local body age
@@ -2757,7 +2757,7 @@ case_mdns_redaction() {
 	body="$(http_body "$MDNS_URL/status.json")"
 	page="$(http_body "$MDNS_URL/")"
 	local secret
-	for secret in 'SENTINEL-xyz' 'SECRETBRIDGE-xyz' 'bridge_path'; do
+	for secret in 'SENTINEL-xyz' 'SECRETBRIDGE-xyz' 'bridge'; do
 		if printf '%s%s' "$body" "$page" | grep -qF "$secret"; then
 			printf 'front door leaked %q' "$secret" >&2
 			return 1
@@ -3101,7 +3101,7 @@ auth_login() {
 case_auth_setup() {
 	: >"$AUTH_HITS"
 	: >"$AUTH_PIDS_FILE"
-	capi POST /1.0/apps '{"name":"authapp","hosts":["authwall.ripdev.io","authcarol.ripdev.io"],"bridge_path":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"authapp","hosts":["authwall.ripdev.io","authcarol.ripdev.io"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -4325,7 +4325,7 @@ test "direct mode works with empty upstreams and zero bridge calls" case_hub_dir
 test "open handshake: bridge headers, tenant enrolls, snapshot agrees" case_hub_open_full_path
 test "open rejected by tenant → status+body forwarded, no conn" case_hub_open_rejected_by_tenant
 test "open with tenant down → 503 + Retry-After" case_hub_open_tenant_down
-test "no bridge_path → 503" case_hub_no_bridge_path
+test "no bridge → 503" case_hub_no_bridge
 test "bare name excludes sender's connection; ! includes + strips" case_hub_exclusion_rules
 test "publish ignores ! spelling (no originating conn)" case_hub_publish_ignores_exclusion
 test "? answers ! at the edge; frame still bridged" case_hub_pong_at_edge
@@ -4374,7 +4374,7 @@ test "registration advertises the .local host only" case_mdns_register_advertise
 test "site alias advertises and withdraws; pattern never advertises" case_mdns_site_alias_advertises_and_withdraws
 test "multi-label .local: skipped gauge up, never advertised, down on DELETE" case_mdns_multilabel_gauge
 test "status page truth: hosts, upstream health, heartbeat age" case_mdns_status_truth
-test "redaction: socket path and bridge_path bytes absent" case_mdns_redaction
+test "redaction: socket path and bridge bytes absent" case_mdns_redaction
 test "PATCH reconciles exactly the diff" case_mdns_patch_reconciles
 test "DELETE withdraws, counter moves" case_mdns_delete_withdraws
 test "TTL reap withdraws" case_mdns_reap_withdraws

@@ -46,7 +46,7 @@
 # 4) hub — per-app WebSocket fan-out (site-scoped, cascades)
 #   Global hub ON (path /hub, origin same): upgrades on registered hosts
 #   terminate at Janus; frames fan out at the edge; the tenant observes
-#   through its hot-registered bridge_path and steers via
+#   through its hot-registered bridge and steers via
 #   POST /1.0/apps/{id}/hub/publish.
 #   catchall   *.ripdev.io   → inherit on (default tuning, origin same)
 #   api.ripdev.io            → explicit off (plain HTTP API site)

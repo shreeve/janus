@@ -199,7 +199,7 @@ curl -s http://127.0.0.1:7600/1.0/cache     # hit/miss/coalesce counters
 
 ### 4. hub
 
-WebSocket upgrades on hub-enabled sites terminate at Janus; JSON directive frames fan out per app at the edge, so app reloads never drop a socket. The tenant registers a `bridge_path` to observe frames and steer, and publishes through the control plane.
+WebSocket upgrades on hub-enabled sites terminate at Janus; JSON directive frames fan out per app at the edge, so app reloads never drop a socket. The tenant registers a `bridge` to observe frames and steer, and publishes through the control plane.
 
 ```bash
 curl -s http://127.0.0.1:7600/1.0/hub       # fan-out / bridge counters
@@ -263,7 +263,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.6.0 \
+  --with github.com/shreeve/janus@v1.6.1 \
   --output ./caddy
 ```
 
@@ -317,7 +317,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `control.go` | Control listener config (`control internal/local/public`, `token:…`) |
 | `control_api.go` | Control listeners + `/1.0` mux (meta, health, tls/ask) |
 | `control_hub.go` | Hub control surface (publish, snapshot, counters) |
-| `apps.go` | Hot apps registry (CRUD, upstreams, bridge_path, heartbeats, TTL sweep) |
+| `apps.go` | Hot apps registry (CRUD, upstreams, bridge, heartbeats, TTL sweep) |
 | `dataplane.go` | Host → worker-socket proxying (least-conn, health, marked 503s) |
 | `ring.go` | Doorbell ring: single-flight wake-up for dirty apps |
 | `cache.go` | Micro-cache store: shards, doorkeeper, LRU, purge, counters |

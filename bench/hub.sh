@@ -180,7 +180,7 @@ say "ulimit -n $(ulimit -n)"
 say ""
 
 REPLY=$(curl -s -X POST $CONTROL/1.0/apps -H 'Content-Type: application/json' \
-  -d "{\"name\":\"hubbench\",\"hosts\":[\"$HUB_HOST\"],\"bridge_path\":\"/bench/bridge\"}")
+  -d "{\"name\":\"hubbench\",\"hosts\":[\"$HUB_HOST\"],\"bridge\":\"/bench/bridge\"}")
 APP_ID=$(printf '%s' "$REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 [[ -n "$APP_ID" ]] || die "app registration failed: $REPLY"
 say "app: $APP_ID (host $HUB_HOST, bridge /bench/bridge)"
