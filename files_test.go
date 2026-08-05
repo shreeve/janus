@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -52,6 +53,94 @@ func TestFilesCaddyfileFormsAndCascade(t *testing.T) {
 	}
 	if (&Handler{}).filesEnabled() {
 		t.Fatal("built-in files default must be off")
+	}
+}
+
+func TestFilesPrecompressedCaddyfile(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		want   []string
+	}{
+		{"janus {\n files {\n  precompressed\n }\n}", []string{"br", "zstd", "gzip"}},
+		{"janus {\n files on {\n  precompressed gzip br\n }\n}", []string{"gzip", "br"}},
+	} {
+		app := new(App)
+		if err := app.UnmarshalCaddyfile(caddyfile.NewTestDispenser(tc.source)); err != nil {
+			t.Fatalf("global rejected %q: %v", tc.source, err)
+		}
+		if app.Files == nil || !*app.Files || !slices.Equal(app.FilesPrecompressed, tc.want) {
+			t.Fatalf("global %q: files=%v precompressed=%v", tc.source, app.Files, app.FilesPrecompressed)
+		}
+	}
+	for _, source := range []string{
+		"janus {\n files off {\n  precompressed\n }\n}",
+		"janus {\n files {\n  precompressed br br\n }\n}",
+		"janus {\n files {\n  precompressed bz\n }\n}",
+		"janus {\n files {\n  precompressed\n  precompressed gzip\n }\n}",
+		"janus {\n files {\n  unknown\n }\n}",
+		"janus {\n files {\n  precompressed {\n   gzip\n  }\n }\n}",
+	} {
+		if err := new(App).UnmarshalCaddyfile(caddyfile.NewTestDispenser(source)); err == nil {
+			t.Errorf("global accepted %q", source)
+		}
+	}
+	for _, source := range []string{
+		"janus {\n files {\n  precompressed\n }\n}",
+		"janus {\n files on {\n  precompressed gzip\n }\n}",
+	} {
+		var handler Handler
+		if err := handler.UnmarshalCaddyfile(caddyfile.NewTestDispenser(source)); err == nil {
+			t.Errorf("site accepted process-wide settings %q", source)
+		}
+	}
+}
+
+func TestAcceptedFileEncodings(t *testing.T) {
+	configured := []string{"br", "zstd", "gzip"}
+	for _, tc := range []struct {
+		header string
+		want   []string
+	}{
+		{"", nil},
+		{"gzip;q=0.9, br;q=0.4", []string{"gzip", "br"}},
+		{"gzip, zstd, br", []string{"br", "zstd", "gzip"}},
+		{"br;q=0, *;q=0.8", []string{"zstd", "gzip"}},
+		{"identity;q=1, br;q=0.5", []string{"identity", "br"}},
+		{"identity;q=0.2, br;q=0.8", []string{"br", "identity"}},
+		{"br;q=0, zstd;q=0, gzip;q=0, *;q=0", nil},
+		{"deflate;q=1, *;q=0.5, gzip;q=0", []string{"br", "zstd"}},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "http://app.test/file", nil)
+		if tc.header != "" {
+			req.Header.Set("Accept-Encoding", tc.header)
+		}
+		if got := acceptedFileEncodings(req, configured); !slices.Equal(got, tc.want) {
+			t.Errorf("%q: got %v want %v", tc.header, got, tc.want)
+		}
+	}
+}
+
+func TestFilesPrecompressedJSONValidation(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name    string
+		files   *bool
+		formats []string
+		wantErr bool
+	}{
+		{"unset", nil, nil, false},
+		{"valid", &on, []string{"br", "zstd", "gzip"}, false},
+		{"files absent", nil, []string{"br"}, true},
+		{"files off", &off, []string{"br"}, true},
+		{"unknown", &on, []string{"bz"}, true},
+		{"duplicate", &on, []string{"gzip", "gzip"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateFilesPrecompressed(tc.files, tc.formats)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -299,6 +388,160 @@ func TestServeFilesOrderShellValidatorsHeadAndRange(t *testing.T) {
 	}
 }
 
+func TestServeFilesPrecompressedRepresentations(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	shellDir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bundle := filepath.Join(first, "bundle.json")
+	write(bundle, "identity-bytes")
+	write(bundle+".br", "brotli-bytes")
+	write(bundle+".zst", "zstd-bytes")
+	write(bundle+".gz", "gzip-bytes")
+	write(filepath.Join(first, "plain.json"), "plain-identity")
+	if err := os.Mkdir(filepath.Join(first, "plain.json.br"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(first, "priority.json"), "first-identity")
+	write(filepath.Join(first, "orphan.json.br"), "orphan-sidecar")
+	write(filepath.Join(second, "priority.json"), "second-identity")
+	write(filepath.Join(second, "priority.json.br"), "second-brotli")
+	write(filepath.Join(first, "docs", "index.html"), "index-identity")
+	write(filepath.Join(first, "docs", "index.html.br"), "index-brotli")
+	shell := filepath.Join(shellDir, "index.html")
+	write(shell, "shell-identity")
+	write(shell+".br", "shell-brotli")
+
+	canonicalTime := time.Date(2026, time.August, 5, 1, 0, 0, 0, time.UTC)
+	brotliTime := canonicalTime.Add(time.Hour)
+	if err := os.Chtimes(bundle, canonicalTime, canonicalTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(bundle+".br", brotliTime, brotliTime); err != nil {
+		t.Fatal(err)
+	}
+
+	on := true
+	h := &Handler{
+		app:           &App{Files: &on, FilesPrecompressed: []string{"br", "zstd", "gzip"}},
+		browseEnabled: true,
+		browseCfg:     &BrowseSettings{},
+	}
+	rec := AppRecord{Files: &FilesPolicy{
+		Roots: []FilesRoot{
+			{Path: first, Cache: filesCacheNever, Browse: true},
+			{Path: second, Cache: filesCacheRevalidate},
+		},
+		Shell: shell,
+	}}
+	serve := func(method, target, accept, encoding string, headers http.Header) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, "http://app.test"+target, nil)
+		if accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if encoding != "" {
+			req.Header.Set("Accept-Encoding", encoding)
+		}
+		for name, values := range headers {
+			req.Header[name] = values
+		}
+		out := httptest.NewRecorder()
+		handled, err := h.serveFiles(out, req, rec)
+		if err != nil || !handled {
+			t.Fatalf("%s %s: handled=%v err=%v", method, target, handled, err)
+		}
+		return out
+	}
+
+	br := serve(http.MethodGet, "/bundle.json", "", "br", nil)
+	if br.Code != http.StatusOK || br.Body.String() != "brotli-bytes" {
+		t.Fatalf("br response: code=%d body=%q", br.Code, br.Body.String())
+	}
+	if br.Header().Get("Content-Encoding") != "br" || br.Header().Get("Content-Type") != "application/json" ||
+		br.Header().Get("Vary") != "Accept-Encoding" || br.Header().Get("Content-Length") != "12" ||
+		br.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("br headers: %v", br.Header())
+	}
+	brETag := br.Header().Get("ETag")
+	if !strings.Contains(brETag, "-br\"") || br.Header().Get("Last-Modified") != brotliTime.Format(http.TimeFormat) {
+		t.Fatalf("br validators: etag=%q modified=%q", brETag, br.Header().Get("Last-Modified"))
+	}
+
+	identity := serve(http.MethodGet, "/bundle.json", "", "", nil)
+	if identity.Body.String() != "identity-bytes" || identity.Header().Get("Content-Encoding") != "" ||
+		identity.Header().Get("ETag") == brETag || identity.Header().Get("Vary") != "Accept-Encoding" ||
+		identity.Header().Get("Last-Modified") != canonicalTime.Format(http.TimeFormat) {
+		t.Fatalf("identity response: body=%q headers=%v", identity.Body.String(), identity.Header())
+	}
+
+	head := serve(http.MethodHead, "/bundle.json", "", "br", nil)
+	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Length") != "12" ||
+		head.Header().Get("ETag") != brETag {
+		t.Fatalf("HEAD response: code=%d body=%q headers=%v", head.Code, head.Body.String(), head.Header())
+	}
+	ranged := serve(http.MethodGet, "/bundle.json", "", "br", http.Header{"Range": {"bytes=1-3"}})
+	if ranged.Code != http.StatusPartialContent || ranged.Body.String() != "rot" ||
+		ranged.Header().Get("Content-Encoding") != "br" || ranged.Header().Get("Content-Length") != "3" ||
+		ranged.Header().Get("Content-Range") != "bytes 1-3/12" {
+		t.Fatalf("range response: code=%d body=%q headers=%v", ranged.Code, ranged.Body.String(), ranged.Header())
+	}
+
+	if out := serve(http.MethodGet, "/bundle.json", "", "gzip;q=0.9, br;q=0.4", nil); out.Body.String() != "gzip-bytes" || out.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("q ordering: body=%q headers=%v", out.Body.String(), out.Header())
+	}
+	if out := serve(http.MethodGet, "/bundle.json", "", "br;q=0, *;q=0.8", nil); out.Body.String() != "zstd-bytes" || out.Header().Get("Content-Encoding") != "zstd" {
+		t.Fatalf("wildcard exclusion: body=%q headers=%v", out.Body.String(), out.Header())
+	}
+	if out := serve(http.MethodGet, "/bundle.json", "", "identity;q=1, br;q=0.5", nil); out.Body.String() != "identity-bytes" || out.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("identity preference: body=%q headers=%v", out.Body.String(), out.Header())
+	}
+
+	if out := serve(http.MethodGet, "/bundle.json", "", "br", http.Header{"If-None-Match": {brETag}}); out.Code != http.StatusNotModified {
+		t.Fatalf("br If-None-Match: code=%d headers=%v", out.Code, out.Header())
+	}
+	if out := serve(http.MethodGet, "/bundle.json", "", "", http.Header{"If-None-Match": {brETag}}); out.Code != http.StatusOK {
+		t.Fatalf("br etag validated identity: code=%d", out.Code)
+	}
+	if out := serve(http.MethodGet, "/bundle.json", "", "gzip", http.Header{"If-None-Match": {brETag}}); out.Code != http.StatusOK {
+		t.Fatalf("br etag validated gzip: code=%d", out.Code)
+	}
+	if out := serve(http.MethodGet, "/bundle.json", "", "br", http.Header{"If-Modified-Since": {brotliTime.Format(http.TimeFormat)}}); out.Code != http.StatusNotModified {
+		t.Fatalf("br If-Modified-Since: code=%d headers=%v", out.Code, out.Header())
+	}
+
+	if out := serve(http.MethodGet, "/plain.json", "", "br", nil); out.Body.String() != "plain-identity" || out.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("non-regular sidecar fallback: body=%q headers=%v", out.Body.String(), out.Header())
+	}
+	if out := serve(http.MethodGet, "/priority.json", "", "br", nil); out.Body.String() != "first-identity" || out.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("cross-root sidecar leak: body=%q headers=%v", out.Body.String(), out.Header())
+	}
+	if out := serve(http.MethodGet, "/orphan.json", "", "br", nil); out.Code != http.StatusNotFound {
+		t.Fatalf("orphan sidecar created URL: code=%d body=%q", out.Code, out.Body.String())
+	}
+	if out := serve(http.MethodGet, "/docs/", "", "br", nil); out.Body.String() != "index-brotli" || out.Header().Get("Content-Encoding") != "br" || out.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("index sidecar: body=%q headers=%v", out.Body.String(), out.Header())
+	}
+	if out := serve(http.MethodGet, "/route", "text/html", "br", nil); out.Body.String() != "shell-brotli" || out.Header().Get("Content-Encoding") != "br" || out.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("shell sidecar: body=%q headers=%v", out.Body.String(), out.Header())
+	}
+
+	if err := os.Remove(bundle + ".br"); err != nil {
+		t.Fatal(err)
+	}
+	if out := serve(http.MethodGet, "/bundle.json", "", "br", nil); out.Body.String() != "identity-bytes" || out.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("removed sidecar fallback: body=%q headers=%v", out.Body.String(), out.Header())
+	}
+}
+
 func TestServeFilesRejectsUnsafeRequestPaths(t *testing.T) {
 	h := new(Handler)
 	rec := AppRecord{Files: &FilesPolicy{Roots: []FilesRoot{{Path: t.TempDir(), Cache: filesCacheRevalidate}}, Shell: filepath.Join(t.TempDir(), "index")}}
@@ -492,6 +735,9 @@ func BenchmarkServeFiles(b *testing.B) {
 	if err := os.WriteFile(filepath.Join(first, "first.txt"), []byte("first"), 0o644); err != nil {
 		b.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(first, "first.txt.br"), []byte("brotli"), 0o644); err != nil {
+		b.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(second, "second.txt"), []byte("second"), 0o644); err != nil {
 		b.Fatal(err)
 	}
@@ -499,7 +745,8 @@ func BenchmarkServeFiles(b *testing.B) {
 	if err := os.WriteFile(shell, []byte("<main>shell</main>"), 0o644); err != nil {
 		b.Fatal(err)
 	}
-	h := new(Handler)
+	on := true
+	h := &Handler{app: &App{Files: &on, FilesPrecompressed: []string{"br", "zstd", "gzip"}}}
 	rec := AppRecord{Files: &FilesPolicy{Roots: []FilesRoot{
 		{Path: first, Cache: filesCacheRevalidate},
 		{Path: second, Cache: filesCacheRevalidate},
@@ -508,11 +755,14 @@ func BenchmarkServeFiles(b *testing.B) {
 		name   string
 		target string
 		accept string
+		coding string
 	}{
-		{"first-root-hit", "/first.txt", ""},
-		{"second-root-hit", "/second.txt", ""},
-		{"shell-fallback", "/route", "text/html"},
-		{"static-miss", "/missing.bin", ""},
+		{"first-root-hit", "/first.txt", "", ""},
+		{"precompressed-br-hit", "/first.txt", "", "br"},
+		{"precompressed-fallback", "/second.txt", "", "br"},
+		{"second-root-hit", "/second.txt", "", ""},
+		{"shell-fallback", "/route", "text/html", ""},
+		{"static-miss", "/missing.bin", "", ""},
 	} {
 		b.Run(bench.name, func(b *testing.B) {
 			b.ReportAllocs()
@@ -520,6 +770,9 @@ func BenchmarkServeFiles(b *testing.B) {
 				req := httptest.NewRequest(http.MethodGet, "http://app.test"+bench.target, nil)
 				if bench.accept != "" {
 					req.Header.Set("Accept", bench.accept)
+				}
+				if bench.coding != "" {
+					req.Header.Set("Accept-Encoding", bench.coding)
 				}
 				out := httptest.NewRecorder()
 				if _, err := h.serveFiles(out, req, rec); err != nil {

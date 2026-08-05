@@ -13,6 +13,8 @@
 //	testkit json get KEY        (stdin JSON object → field value)
 //	testkit upstreams HOST      (stdin /1.0/apps JSON → that app's upstreams)
 //	testkit repeat STR N
+//	testkit precompress --input FILE
+//	testkit fetch --ca FILE --accept CODINGS URL
 //	testkit now-ns
 package main
 
@@ -54,6 +56,10 @@ func main() {
 		cmdUpstreams(args)
 	case "repeat":
 		cmdRepeat(args)
+	case "precompress":
+		cmdPrecompress(args)
+	case "fetch":
+		cmdFetch(args)
 	case "now-ns":
 		fmt.Println(time.Now().UnixNano())
 	default:

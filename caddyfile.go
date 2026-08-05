@@ -97,11 +97,12 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if a.Files != nil {
 					return d.Err("duplicate files directive in the same block")
 				}
-				files, err := parseFilesDirective(d)
+				files, precompressed, err := parseFilesDirective(d, true)
 				if err != nil {
 					return err
 				}
 				a.Files = files
+				a.FilesPrecompressed = precompressed
 			case "browse":
 				if a.Browse != nil {
 					return d.Err("duplicate browse directive in the same block")

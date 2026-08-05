@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp/encode"
 )
 
 const ripSiteHeader = "Rip-Site"
@@ -122,7 +124,7 @@ func (h *Handler) serveFiles(w http.ResponseWriter, r *http.Request, rec AppReco
 		http.NotFound(w, r)
 		return true, nil
 	}
-	if h.serveBrowseRoots(w, r, requestPath, hotBrowseRoots(rec.Files.Roots, rec.siteValue), rec.Files.Shell, true) {
+	if h.serveBrowseRootsPrecompressed(w, r, requestPath, hotBrowseRoots(rec.Files.Roots, rec.siteValue), rec.Files.Shell, true, h.filesPrecompressed()) {
 		return true, nil
 	}
 	http.NotFound(w, r)
@@ -144,11 +146,11 @@ func serveRootedFile(w http.ResponseWriter, r *http.Request, rootPath, relative,
 	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
-	serveOpenedFile(w, r, file, info, displayName, class)
+	serveOpenedFileFromRoot(w, r, root, file, info, relative, displayName, class, nil)
 	return true
 }
 
-func serveAbsoluteFile(w http.ResponseWriter, r *http.Request, name string) bool {
+func serveAbsoluteFile(w http.ResponseWriter, r *http.Request, name string, precompressed []string) bool {
 	root, err := os.OpenRoot(filepath.Dir(name))
 	if err != nil {
 		return false
@@ -163,11 +165,41 @@ func serveAbsoluteFile(w http.ResponseWriter, r *http.Request, name string) bool
 	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
-	serveOpenedFile(w, r, file, info, name, filesCacheRevalidate)
+	serveOpenedFileFromRoot(w, r, root, file, info, filepath.Base(name), name, filesCacheRevalidate, precompressed)
 	return true
 }
 
 func serveOpenedFile(w http.ResponseWriter, r *http.Request, file *os.File, info os.FileInfo, name, cache string) {
+	serveOpenedFileFromRoot(w, r, nil, file, info, "", name, cache, nil)
+}
+
+func serveOpenedFileFromRoot(w http.ResponseWriter, r *http.Request, root *os.Root, file *os.File, info os.FileInfo, relative, name, cache string, precompressed []string) {
+	selectedFile, selectedInfo, encoding := file, info, ""
+	if len(precompressed) > 0 {
+		addVaryAcceptEncoding(w.Header())
+		for _, candidate := range acceptedFileEncodings(r, precompressed) {
+			if candidate == "identity" {
+				break
+			}
+			suffix, ok := filesPrecompressedSuffix[candidate]
+			if !ok || root == nil {
+				continue
+			}
+			sidecar, err := root.Open(relative + suffix)
+			if err != nil {
+				continue
+			}
+			sidecarInfo, err := sidecar.Stat()
+			if err != nil || !sidecarInfo.Mode().IsRegular() {
+				sidecar.Close()
+				continue
+			}
+			defer sidecar.Close()
+			selectedFile, selectedInfo, encoding = sidecar, sidecarInfo, candidate
+			break
+		}
+	}
+
 	ext := strings.ToLower(filepath.Ext(name))
 	switch cache {
 	case filesCacheNever:
@@ -189,6 +221,68 @@ func serveOpenedFile(w http.ResponseWriter, r *http.Request, file *os.File, info
 			w.Header().Set("Content-Type", contentType)
 		}
 	}
-	w.Header().Set("ETag", fmt.Sprintf(`W/"%x-%x"`, info.ModTime().UnixNano(), info.Size()))
-	http.ServeContent(w, r, name, info.ModTime(), file)
+	if encoding != "" {
+		w.Header().Set("Content-Encoding", encoding)
+		w.Header().Del("Content-Length")
+		if r.Header.Get("Range") == "" {
+			w.Header().Set("Content-Length", strconv.FormatInt(selectedInfo.Size(), 10))
+		}
+		w.Header().Set("ETag", fmt.Sprintf(`W/"%x-%x-%s"`, selectedInfo.ModTime().UnixNano(), selectedInfo.Size(), encoding))
+	} else {
+		w.Header().Set("ETag", fmt.Sprintf(`W/"%x-%x"`, selectedInfo.ModTime().UnixNano(), selectedInfo.Size()))
+	}
+	http.ServeContent(w, r, name, selectedInfo.ModTime(), selectedFile)
+}
+
+func addVaryAcceptEncoding(header http.Header) {
+	for _, value := range header.Values("Vary") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "Accept-Encoding") {
+				return
+			}
+		}
+	}
+	header.Add("Vary", "Accept-Encoding")
+}
+
+// acceptedFileEncodings preserves Caddy's q-value and configured-order
+// ranking. Caddy exposes wildcards as the literal "*"; expand that position
+// into configured formats while keeping every explicitly named coding,
+// including q=0 exclusions, out of the wildcard set.
+func acceptedFileEncodings(r *http.Request, configured []string) []string {
+	explicit := make(map[string]bool)
+	for _, item := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		name, _, _ := strings.Cut(item, ";")
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" && name != "*" {
+			explicit[name] = true
+		}
+	}
+	enabled := make(map[string]bool, len(configured))
+	for _, format := range configured {
+		enabled[format] = true
+	}
+	var out []string
+	seen := make(map[string]bool, len(configured)+1)
+	appendCandidate := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	for _, candidate := range encode.AcceptedEncodings(r, configured) {
+		switch {
+		case candidate == "identity":
+			appendCandidate(candidate)
+		case candidate == "*":
+			for _, format := range configured {
+				if !explicit[format] {
+					appendCandidate(format)
+				}
+			}
+		case enabled[candidate]:
+			appendCandidate(candidate)
+		}
+	}
+	return out
 }

@@ -50,6 +50,11 @@ type App struct {
 	// service. Default: off. Sites may override.
 	Files *bool `json:"files,omitempty"`
 
+	// FilesPrecompressed is the process-wide ordered set of sidecar
+	// representations admitted by the global files capability. Site
+	// blocks may turn files on or off but cannot retune this order.
+	FilesPrecompressed []string `json:"files_precompressed,omitempty"`
+
 	// Browse is the process-wide theme and renderer configuration.
 	// Presence also enables the global site-scoped browse default.
 	Browse *BrowseSettings `json:"browse,omitempty"`
@@ -162,6 +167,9 @@ func (a *App) Provision(ctx caddy.Context) error {
 	a.browseCtx, a.browseCancel = context.WithCancel(ctx)
 	if a.Browse != nil && a.Files != nil && !*a.Files {
 		return fmt.Errorf("janus browse: global browse conflicts with global files off")
+	}
+	if err := validateFilesPrecompressed(a.Files, a.FilesPrecompressed); err != nil {
+		return err
 	}
 	if err := a.provisionBrowse(); err != nil {
 		return err

@@ -68,15 +68,77 @@ const (
 	filesCacheForever    = "forever"
 )
 
-func parseFilesDirective(d *caddyfile.Dispenser) (*bool, error) {
+var filesDefaultPrecompressed = []string{"br", "zstd", "gzip"}
+
+var filesPrecompressedSuffix = map[string]string{
+	"br":   ".br",
+	"zstd": ".zst",
+	"gzip": ".gz",
+}
+
+func validateFilesPrecompressed(files *bool, formats []string) error {
+	if len(formats) == 0 {
+		return nil
+	}
+	if files == nil || !*files {
+		return fmt.Errorf("janus files: files_precompressed requires files on")
+	}
+	seen := make(map[string]bool, len(formats))
+	for _, format := range formats {
+		if _, ok := filesPrecompressedSuffix[format]; !ok {
+			return fmt.Errorf("janus files: unknown precompressed format %q (want br, zstd, or gzip)", format)
+		}
+		if seen[format] {
+			return fmt.Errorf("janus files: duplicate precompressed format %q", format)
+		}
+		seen[format] = true
+	}
+	return nil
+}
+
+func parseFilesDirective(d *caddyfile.Dispenser, global bool) (*bool, []string, error) {
 	on, err := parseOnOff(d.RemainingArgs())
 	if err != nil {
-		return nil, d.Errf("files: %v", err)
+		return nil, nil, d.Errf("files: %v", err)
 	}
-	if d.NextBlock(d.Nesting()) {
-		return nil, d.Err("files does not support a block")
+	var precompressed []string
+	seenPrecompressed := false
+	for nesting := d.Nesting(); d.NextBlock(nesting); {
+		if !global {
+			return nil, nil, d.Err("files settings are process-wide; set them in the global janus block only")
+		}
+		if !on {
+			return nil, nil, d.Err("files off does not take a block (a block on an off switch is a contradiction)")
+		}
+		switch d.Val() {
+		case "precompressed":
+			if seenPrecompressed {
+				return nil, nil, d.Err("duplicate precompressed directive in the same files block")
+			}
+			seenPrecompressed = true
+			formats := d.RemainingArgs()
+			if len(formats) == 0 {
+				formats = filesDefaultPrecompressed
+			}
+			seenFormats := make(map[string]bool, len(formats))
+			for _, format := range formats {
+				if _, ok := filesPrecompressedSuffix[format]; !ok {
+					return nil, nil, d.Errf("files precompressed: unknown format %q (want br, zstd, or gzip)", format)
+				}
+				if seenFormats[format] {
+					return nil, nil, d.Errf("files precompressed: duplicate format %q", format)
+				}
+				seenFormats[format] = true
+			}
+			precompressed = append([]string(nil), formats...)
+			if d.NextBlock(d.Nesting()) {
+				return nil, nil, d.Err("files precompressed does not take a nested block")
+			}
+		default:
+			return nil, nil, d.Errf("unrecognized files subdirective: %s", d.Val())
+		}
 	}
-	return &on, nil
+	return &on, precompressed, nil
 }
 
 func validateConfiguredPath(p, field string, allowSite bool) error {
