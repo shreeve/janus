@@ -1,0 +1,36 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/shreeve/janus
+cpu: Apple M5
+BenchmarkServeFiles/first-root-hit-10         	   61074	     20122 ns/op	    7210 B/op	      42 allocs/op
+BenchmarkServeFiles/first-root-hit-10         	   51099	     19964 ns/op	    7199 B/op	      42 allocs/op
+BenchmarkServeFiles/first-root-hit-10         	   63561	     19055 ns/op	    7198 B/op	      42 allocs/op
+BenchmarkServeFiles/first-root-hit-10         	   63628	     18827 ns/op	    7199 B/op	      42 allocs/op
+BenchmarkServeFiles/first-root-hit-10         	   63753	     18977 ns/op	    7199 B/op	      42 allocs/op
+BenchmarkServeFiles/precompressed-br-hit-10   	   44338	     27079 ns/op	    8175 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-br-hit-10   	   39672	     28332 ns/op	    8176 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-br-hit-10   	   43183	     28385 ns/op	    8176 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-br-hit-10   	   42930	     27907 ns/op	    8176 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-br-hit-10   	   40144	     29647 ns/op	    8176 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-fallback-10 	   41882	     28318 ns/op	    7975 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-fallback-10 	   41421	     28720 ns/op	    7975 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-fallback-10 	   42410	     28683 ns/op	    7975 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-fallback-10 	   42192	     28356 ns/op	    7975 B/op	      58 allocs/op
+BenchmarkServeFiles/precompressed-fallback-10 	   42494	     29193 ns/op	    7975 B/op	      58 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   43833	     27613 ns/op	    7431 B/op	      48 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   40964	     28176 ns/op	    7431 B/op	      48 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   43278	     28250 ns/op	    7431 B/op	      48 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   44023	     27432 ns/op	    7431 B/op	      48 allocs/op
+BenchmarkServeFiles/second-root-hit-10        	   40351	     28387 ns/op	    7431 B/op	      48 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   33321	     36702 ns/op	    8095 B/op	      58 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   32338	     36118 ns/op	    8095 B/op	      58 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   33397	     37027 ns/op	    8095 B/op	      58 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   32611	     36641 ns/op	    8095 B/op	      58 allocs/op
+BenchmarkServeFiles/shell-fallback-10         	   32866	     37994 ns/op	    8095 B/op	      58 allocs/op
+BenchmarkServeFiles/static-miss-10            	   66656	     18040 ns/op	    6790 B/op	      34 allocs/op
+BenchmarkServeFiles/static-miss-10            	   62109	     18492 ns/op	    6790 B/op	      34 allocs/op
+BenchmarkServeFiles/static-miss-10            	   66298	     18336 ns/op	    6790 B/op	      34 allocs/op
+BenchmarkServeFiles/static-miss-10            	   66354	     17992 ns/op	    6790 B/op	      34 allocs/op
+BenchmarkServeFiles/static-miss-10            	   65391	     18231 ns/op	    6790 B/op	      34 allocs/op
+PASS
+ok  	github.com/shreeve/janus	36.249s

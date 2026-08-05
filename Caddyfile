@@ -120,7 +120,9 @@
 				alice larry
 			}
 		}
-		files # 7) site-scoped default: on; hot registrations carry roots and shell
+		files { # 7) site-scoped default: on; hot registrations carry roots and shell
+			precompressed # transparent .br, .zst, .gz sidecars in Caddy preference order
+		}
 		browse { # 9) navigable roots; embedded theme + bounded fixture renderers
 			timeout 10s
 			max_output 8MB
@@ -211,6 +213,20 @@ filesoff.ripdev.io {
 		auth off
 		files off
 		browse off
+	}
+}
+
+# Files: Caddy's dynamic encode wrapper is deliberately present too. A
+# selected precompressed representation already carries Content-Encoding,
+# so the wrapper must never compress it a second time.
+filesencode.ripdev.io {
+	import ripdev_tls
+	encode {
+		gzip
+		minimum_length 1
+	}
+	janus {
+		auth off
 	}
 }
 

@@ -152,7 +152,11 @@
 		# the SPA shell. Patterned registrations additionally supply
 		# `{site}.suffix`, aliases, and the direct-child directory gate.
 		# Janus strips client Rip-Site and injects the resolved site label.
-		files
+		# Precompressed transparently serves same-root .br, .zst, or .gz
+		# sidecars when the canonical file exists and the client accepts one.
+		files {
+			precompressed
+		}
 
 		# 9) browse — site-scoped admission with process-wide theme and
 		# renderer definitions. The embedded theme is used here. Renderer

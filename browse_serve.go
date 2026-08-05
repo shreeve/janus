@@ -141,6 +141,10 @@ func hotBrowseRoots(roots []FilesRoot, site string) []activeBrowseRoot {
 }
 
 func (h *Handler) serveBrowseRoots(w http.ResponseWriter, r *http.Request, requestPath string, roots []activeBrowseRoot, shell string, allowShell bool) bool {
+	return h.serveBrowseRootsPrecompressed(w, r, requestPath, roots, shell, allowShell, nil)
+}
+
+func (h *Handler) serveBrowseRootsPrecompressed(w http.ResponseWriter, r *http.Request, requestPath string, roots []activeBrowseRoot, shell string, allowShell bool, precompressed []string) bool {
 	relative := strings.TrimPrefix(requestPath, "/")
 	if relative == "" {
 		relative = "."
@@ -168,7 +172,7 @@ func (h *Handler) serveBrowseRoots(w http.ResponseWriter, r *http.Request, reque
 					return true
 				}
 			}
-			serveOpenedFile(w, r, file, info, requestPath, configured.cache)
+			serveOpenedFileFromRoot(w, r, root, file, info, relative, requestPath, configured.cache, precompressed)
 			file.Close()
 			root.Close()
 			return true
@@ -205,7 +209,7 @@ func (h *Handler) serveBrowseRoots(w http.ResponseWriter, r *http.Request, reque
 				root.Close()
 				return true
 			}
-			serveOpenedFile(w, r, indexFile, indexInfo, indexRelative, configured.cache)
+			serveOpenedFileFromRoot(w, r, root, indexFile, indexInfo, indexRelative, indexRelative, configured.cache, precompressed)
 			indexFile.Close()
 			root.Close()
 			return true
@@ -215,7 +219,7 @@ func (h *Handler) serveBrowseRoots(w http.ResponseWriter, r *http.Request, reque
 		return true
 	}
 	if allowShell && shell != "" && acceptsHTML(r.Header.Get("Accept")) {
-		return serveAbsoluteFile(w, r, shell)
+		return serveAbsoluteFile(w, r, shell, precompressed)
 	}
 	return false
 }

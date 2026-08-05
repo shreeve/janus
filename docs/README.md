@@ -17,6 +17,7 @@ index says which is which.
 | [`20260722-034619-capability-mdns.md`](20260722-034619-capability-mdns.md) | Capability 5: mdns (LAN presence — `janus.local`, per-app `.local` names, the status front door) |
 | [`20260728-160734-capability-auth.md`](20260728-160734-capability-auth.md) | Capability 6: auth (URL-prefix gates for auth-less apps) |
 | [`20260730-202700-capability-files.md`](20260730-202700-capability-files.md) | Capability 7: files (registered static roots, SPA shell, and directory-gated site hosts) |
+| [`20260805-020944-capability-files-precompressed.md`](20260805-020944-capability-files-precompressed.md) | Capability 7 extension: transparent precompressed representations from same-root sidecars |
 | [`20260801-020600-capability-sendfile.md`](20260801-020600-capability-sendfile.md) | Capability 8: sendfile (always-on final upstream response transformation) |
 | [`20260801-042700-capability-browse.md`](20260801-042700-capability-browse.md) | Capability 9: browse (navigable hot and cold roots with themes and bounded renderers) |
 | [`20260801-081600-capability-access-log.md`](20260801-081600-capability-access-log.md) | Capability 10: access log (durable JSON encoder plus bounded app-scoped live NDJSON) |
@@ -32,6 +33,7 @@ index says which is which.
 | [`20260801-030843-bench-raw-sendfile.txt`](20260801-030843-bench-raw-sendfile.txt) | Five-run Capability 8 file-delivery comparison |
 | [`20260801-054042-bench-raw-browse.txt`](20260801-054042-bench-raw-browse.txt) | Five-run Capability 9 files, listings, assets, renderers, and theme-provisioning matrix |
 | [`20260801-102358-bench-raw-access-log.txt`](20260801-102358-bench-raw-access-log.txt) | Five-run Capability 10 encoder, subscriber, and honest file/sendfile/gzip/zstd/WebSocket path matrix |
+| [`20260805-022544-files-precompressed-measurement.md`](20260805-022544-files-precompressed-measurement.md) | Capability 7 precompressed-sidecar hit and fallback cost, with five-run raw provenance |
 
 ## Tutorials (runnable, living)
 

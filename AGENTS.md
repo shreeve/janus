@@ -85,7 +85,7 @@ second).
 | 4 | **hub** | Edge-terminated WebSocket fan-out with the Bam directive grammar; explicit bridge or direct transport, plus control-plane publish (cascades: yes). |
 | 5 | **mdns** | LAN presence: `janus.local` + exact-host/site-alias `.local` names; the redacted, conflict-safe App launch dashboard and canonical hand-off (cascades: no — process-wide). |
 | 6 | **auth** | URL-prefix gates for auth-less apps: shared `users`, per-gate allow lists, host-wide `__Host-janus` session, `Remote-User` strip-and-inject (cascades: yes). |
-| 7 | **files** | Registered ordered roots with fixed cache policies, terminal non-API routing, SPA shell, and directory-gated `{site}` admission with trusted `Rip-Site` (cascades: yes). |
+| 7 | **files** | Registered ordered roots with fixed cache policies, transparent same-root precompressed sidecars, terminal non-API routing, SPA shell, and directory-gated `{site}` admission with trusted `Rip-Site` (cascades: yes). |
 | 8 | **sendfile** | Always-on final upstream `X-Sendfile` transformation: application authorization, Janus validators/ranges/cache recording/streaming (cascades: no; configuration: none). |
 | 9 | **browse** | Navigable hot and cold roots, embedded/custom themes, bounded extension renderers, strict leases, cold-host reservations, and redacted status (cascades: yes). |
 | 10 | **access log** | Durable JSON-compatible Caddy encoder plus bounded app-scoped live NDJSON observation (cascades: no; configured by each site's `log`). |

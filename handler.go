@@ -128,6 +128,13 @@ func (h *Handler) filesEnabled() bool {
 	return cascadeBool(h.Files, global, false)
 }
 
+func (h *Handler) filesPrecompressed() []string {
+	if h.app == nil || !h.filesEnabled() {
+		return nil
+	}
+	return h.app.FilesPrecompressed
+}
+
 func (h *Handler) provisionBrowse() error {
 	var global *BrowseSettings
 	if h.app != nil {
@@ -322,7 +329,7 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if h.Files != nil {
 				return d.Err("duplicate files directive in the same block")
 			}
-			files, err := parseFilesDirective(d)
+			files, _, err := parseFilesDirective(d, false)
 			if err != nil {
 				return err
 			}
