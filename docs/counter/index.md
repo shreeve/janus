@@ -1,6 +1,6 @@
 # A realtime counter: Janus + Rip Server, end to end
 
-A guided tour of Janus v1.6.0 in one page and one `app.rip`. You will build
+A guided tour of Janus v1.6.1 in one page and one `app.rip`. You will build
 a normal web app served over HTTPS that also has WSS support, where the
 browser's secure WebSocket frames are proxied **by Janus as plain HTTP** to
 the Rip server — the Janus↔Rip WS/HTTP bridge is the star. One page, one
@@ -89,7 +89,7 @@ Three named flows you will see over and over:
 2. **Interaction (WSS frame → text bridge HTTP POST → response directives →
    WSS fan-out).** A click sends `{"increment": {}}` on the socket. Janus
    validates and executes it at the edge, then POSTs the frame verbatim to
-   the tenant's registered `bridge_path` as a plain HTTP request over the
+   the tenant's registered `bridge` as a plain HTTP request over the
    same data plane. The worker's answer body carries directives, which
    Janus executes and fans out over WSS. This bridge POST is the WSS→HTTP
    proxying moment the demo exists to show.
@@ -124,7 +124,7 @@ cd ~/src/janus
 export PATH="$(go env GOPATH)/bin:$PATH"
 mkdir -p bin
 xcaddy build --with github.com/shreeve/janus=. --output ./bin/caddy
-# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.6.0 --output ./caddy)
+# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.6.1 --output ./caddy)
 ```
 
 **The demo Caddyfile.** It ships next to this page as
@@ -195,15 +195,15 @@ memory for demo clarity. The production path is to externalize that state
 least-conn selection shine unchanged.
 
 **Register the bridge path.** The manager registers only `name` and
-`hosts` — it does not know about `bridge_path` (verified in the rip
+`hosts` — it does not know about `bridge` (verified in the rip
 checkout's `packages/server/manager.rip`, `registerApp`). Without a
-registered `bridge_path`, every hub handshake answers 503 by contract.
+registered `bridge`, every hub handshake answers 503 by contract.
 Wire it once, by hand, against the app id the manager just minted:
 
 ```bash
 APP_ID=$(curl -s http://127.0.0.1:7600/1.0/apps | jq -r '.[] | select(.name=="demo") | .id')
 curl -s -X PATCH -H 'Content-Type: application/json' \
-  --data '{"bridge_path":"/rt/bridge"}' \
+  --data '{"bridge":"/rt/bridge"}' \
   "http://127.0.0.1:7600/1.0/apps/$APP_ID"
 ```
 
@@ -211,7 +211,7 @@ curl -s -X PATCH -H 'Content-Type: application/json' \
 
 ```bash
 curl -s https://demo.ripdev.io/ping           # → pong, answered at the edge: site admission proven, worker never touched — the primordial capability
-curl -s http://127.0.0.1:7600/1.0/apps        # the demo app: id, hosts, upstreams (the manager's lifecycle, visible), "bridge_path":"/rt/bridge"
+curl -s http://127.0.0.1:7600/1.0/apps        # the demo app: id, hosts, upstreams (the manager's lifecycle, visible), "bridge":"/rt/bridge"
 curl -s https://demo.ripdev.io/               # the HTML page (first hit may ride the initial boot)
 curl -s http://127.0.0.1:7600/1.0/hub         # hub counters, all zeros before the first socket
 curl -s http://127.0.0.1:7600/1.0/cache       # cache counters
@@ -654,11 +654,11 @@ per-app breakdown under `"apps"`, keyed by app id):
 
 **Common failures:**
 
-- **WS handshake answers 503 + `Retry-After`** — no `bridge_path`
+- **WS handshake answers 503 + `Retry-After`** — no `bridge`
   registered (hub-enabled site, hub-unready tenant, loud by contract).
   Re-run the PATCH from section 3. Note: if Janus restarts, the manager
   re-registers under a **new app id** with only `name`/`hosts` — the
-  `bridge_path` is gone until you PATCH the new id.
+  `bridge` is gone until you PATCH the new id.
 - **WS handshake answers 403** — origin policy. Served page and hub share
   `demo.ripdev.io` so `origin same` passes for browsers; a non-browser
   client (curl, wscat) sends no `Origin` header and fails `same` — that is
@@ -680,7 +680,7 @@ per-app breakdown under `"apps"`, keyed by app id):
 - **Snapshot answers 404** — stale app id (Janus restarted; the manager
   re-registered and minted a new one). The `snapshot` helper re-resolves
   by name on 404; if presence stops updating, check
-  `GET /1.0/apps` and re-PATCH `bridge_path` under the new id.
+  `GET /1.0/apps` and re-PATCH `bridge` under the new id.
 - **Kick reason doesn't render** — the `{"*":"admin kick"}` application
   frame arrives **before** the close; handle it in `onmessage` (the
   `msg['*']` branch), not in `onclose` — the WebSocket close code is 1000
@@ -722,8 +722,8 @@ Choices this demo makes, and why — adjust with eyes open:
    the 3 → 5 → 7 finale, because a hot reload scraps worker module state.
    `tmp/` is watcher-ignored and hash-ignored (verified in `manager.rip`),
    so the writes are reload-safe.
-6. **`bridge_path` is wired by an operator PATCH** after launch — the
-   `@rip-lang/server` manager does not register or manage `bridge_path`
+6. **`bridge` is wired by an operator PATCH** after launch — the
+   `@rip-lang/server` manager does not register or manage `bridge`
    (verified: `registerApp` sends only `name` and `hosts`). Re-PATCH under
    the new id if the manager ever re-registers.
 7. **The arithmetic is deliberate**: four increments (1, 2, 3, 4), one

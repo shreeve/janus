@@ -65,10 +65,10 @@ type AppRecord struct {
 	Files     *FilesPolicy `json:"files,omitempty"`
 	Lease     string       `json:"lease"`
 
-	// BridgePath is the tenant's hub bridge endpoint (optional; empty =
+	// Bridge is the tenant's hub bridge endpoint (optional; empty =
 	// hub handshakes answer 503). Cold config never carries it: which URL
 	// the tenant serves is tenant knowledge, exactly like socket paths.
-	BridgePath string `json:"bridge_path,omitempty"`
+	Bridge string `json:"bridge,omitempty"`
 
 	// heartbeatAt is the app's heartbeat clock. Registration stamps it
 	// (heartbeats begin immediately after registration, so a slow cold
@@ -199,25 +199,34 @@ func validateHostname(h string) error {
 	return nil
 }
 
-// validateBridgePath checks the hub bridge endpoint: a /-prefixed path,
-// ≤256 bytes, no whitespace or control characters, no ? or # (it is a
-// path, not a URL).
-func validateBridgePath(p string) error {
-	if !strings.HasPrefix(p, "/") {
-		return errBadRequest("bridge_path %q must start with /", p)
+// normalizeBridge collapses leading/trailing slashes to exactly one
+// leading slash: "hub", "/hub", "hub/", "///hub///" → "/hub".
+func normalizeBridge(p string) (string, error) {
+	for strings.HasPrefix(p, "/") {
+		p = p[1:]
 	}
+	for strings.HasSuffix(p, "/") {
+		p = p[:len(p)-1]
+	}
+	if p == "" {
+		return "", errBadRequest("bridge is empty")
+	}
+	p = "/" + p
 	if len(p) > 256 {
-		return errBadRequest("bridge_path %q is too long (max 256 bytes)", p)
+		return "", errBadRequest("bridge %q is too long (max 256 bytes)", p)
+	}
+	if strings.Contains(p, "//") {
+		return "", errBadRequest("bridge %q must not contain empty path segments", p)
 	}
 	for _, r := range p {
 		if r == '?' || r == '#' {
-			return errBadRequest("bridge_path %q must not contain %q (it is a path, not a URL)", p, string(r))
+			return "", errBadRequest("bridge %q must not contain %q (it is a path, not a URL)", p, string(r))
 		}
 		if r <= ' ' || r == 0x7f {
-			return errBadRequest("bridge_path %q must not contain whitespace or control characters", p)
+			return "", errBadRequest("bridge %q must not contain whitespace or control characters", p)
 		}
 	}
-	return nil
+	return p, nil
 }
 
 func validateUpstreams(ups []Upstream) error {
@@ -349,19 +358,19 @@ func (r *appRegistry) purgeApp(id string) {
 	}
 }
 
-func (r *appRegistry) create(name string, hosts []string, bridgePath string) (AppRecord, error) {
-	return r.createWithLease(name, hosts, nil, nil, bridgePath, nil, "heartbeat")
+func (r *appRegistry) create(name string, hosts []string, bridgeVal string) (AppRecord, error) {
+	return r.createWithLease(name, hosts, nil, nil, bridgeVal, nil, "heartbeat")
 }
 
-func (r *appRegistry) createWithPolicy(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgePath string) (AppRecord, error) {
-	return r.createWithLease(name, hosts, site, files, bridgePath, nil, "heartbeat")
+func (r *appRegistry) createWithPolicy(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgeVal string) (AppRecord, error) {
+	return r.createWithLease(name, hosts, site, files, bridgeVal, nil, "heartbeat")
 }
 
-func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgePath string, upstreams []Upstream) (AppRecord, error) {
-	return r.createWithLease(name, hosts, site, files, bridgePath, upstreams, "heartbeat")
+func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgeVal string, upstreams []Upstream) (AppRecord, error) {
+	return r.createWithLease(name, hosts, site, files, bridgeVal, upstreams, "heartbeat")
 }
 
-func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgePath string, upstreams []Upstream, lease string) (AppRecord, error) {
+func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgeVal string, upstreams []Upstream, lease string) (AppRecord, error) {
 	if err := validateAppName(name); err != nil {
 		return AppRecord{}, err
 	}
@@ -382,8 +391,9 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 	if err != nil {
 		return AppRecord{}, err
 	}
-	if bridgePath != "" {
-		if err := validateBridgePath(bridgePath); err != nil {
+	if bridgeVal != "" {
+		bridgeVal, err = normalizeBridge(bridgeVal)
+		if err != nil {
 			return AppRecord{}, err
 		}
 	}
@@ -457,7 +467,7 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 	// Registration counts as the first heartbeat.
 	rec := &AppRecord{
 		ID: id, Name: name, Hosts: hosts, Upstreams: append([]Upstream{}, upstreams...),
-		Site: site, Files: files, BridgePath: bridgePath, Lease: lease,
+		Site: site, Files: files, Bridge: bridgeVal, Lease: lease,
 		gen: new(atomic.Uint64), siteSuffix: suffix,
 	}
 	if r.access != nil {
@@ -661,21 +671,23 @@ func (r *appRegistry) get(id string) (AppRecord, error) {
 	return rec.clone(), nil
 }
 
-// patch updates name, hosts, and/or bridge_path; nil means "leave
-// unchanged" (bridgePathSet with an empty value clears the path).
-func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgePath *string) (AppRecord, error) {
-	if name == nil && hosts == nil && bridgePath == nil {
-		return AppRecord{}, errBadRequest("nothing to update (want name, hosts, and/or bridge_path)")
+// patch updates name, hosts, and/or bridge; nil means "leave
+// unchanged" (bridgeValSet with an empty value clears the path).
+func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgeVal *string) (AppRecord, error) {
+	if name == nil && hosts == nil && bridgeVal == nil {
+		return AppRecord{}, errBadRequest("nothing to update (want name, hosts, and/or bridge)")
 	}
 	if name != nil {
 		if err := validateAppName(*name); err != nil {
 			return AppRecord{}, err
 		}
 	}
-	if bridgePath != nil && *bridgePath != "" {
-		if err := validateBridgePath(*bridgePath); err != nil {
+	if bridgeVal != nil && *bridgeVal != "" {
+		normalized, err := normalizeBridge(*bridgeVal)
+		if err != nil {
 			return AppRecord{}, err
 		}
+		*bridgeVal = normalized
 	}
 	var newHosts []string
 	if hosts != nil {
@@ -731,10 +743,10 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgePath
 	if name != nil {
 		rec.Name = *name
 	}
-	if bridgePath != nil {
-		rec.BridgePath = *bridgePath
+	if bridgeVal != nil {
+		rec.Bridge = *bridgeVal
 	}
-	routingChanged := hosts != nil || bridgePath != nil
+	routingChanged := hosts != nil || bridgeVal != nil
 	if routingChanged {
 		rec.gen.Add(1)
 	}
@@ -968,7 +980,7 @@ type appCreateRequest struct {
 	Site       json.RawMessage `json:"site"`
 	Files      json.RawMessage `json:"files"`
 	Upstreams  json.RawMessage `json:"upstreams"`
-	BridgePath string          `json:"bridge_path"`
+	Bridge string          `json:"bridge"`
 	Lease      json.RawMessage `json:"lease"`
 }
 
@@ -976,14 +988,14 @@ type appPatchRequest struct {
 	Name  *string   `json:"name"`
 	Hosts *[]string `json:"hosts"`
 
-	// BridgePath is tri-state: absent = unchanged, null = clear, string =
+	// Bridge is tri-state: absent = unchanged, null = clear, string =
 	// set (validated). json.RawMessage distinguishes absent from null.
-	BridgePath json.RawMessage `json:"bridge_path"`
+	Bridge json.RawMessage `json:"bridge"`
 }
 
-// bridgePathPatch decodes the tri-state bridge_path field: nil pointer =
+// bridgeValPatch decodes the tri-state bridge field: nil pointer =
 // leave unchanged; empty string = clear; value = set.
-func bridgePathPatch(raw json.RawMessage) (*string, error) {
+func bridgeValPatch(raw json.RawMessage) (*string, error) {
 	if raw == nil {
 		return nil, nil
 	}
@@ -993,7 +1005,7 @@ func bridgePathPatch(raw json.RawMessage) (*string, error) {
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return nil, errBadRequest("bridge_path must be a string or null")
+		return nil, errBadRequest("bridge must be a string or null")
 	}
 	return &s, nil
 }
@@ -1084,7 +1096,7 @@ func (a *App) handleAppsCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rec, err := a.appsRegistry().createWithLease(
-		req.Name, hosts, site, files, req.BridgePath, upstreams, lease,
+		req.Name, hosts, site, files, req.Bridge, upstreams, lease,
 	)
 	if err != nil {
 		writeAPIError(w, err)
@@ -1124,7 +1136,7 @@ func (a *App) handleAppsPatch(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	bp, err := bridgePathPatch(req.BridgePath)
+	bp, err := bridgeValPatch(req.Bridge)
 	if err != nil {
 		writeAPIError(w, err)
 		return

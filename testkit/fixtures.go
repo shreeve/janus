@@ -302,7 +302,7 @@ func pyVal(s string, ok bool) string {
 }
 
 // cmdHubTenant: the recording, scriptable bridge tenant. Serves POST
-// {bridge_path} (records as JSONL + answers from the playbook file),
+// {bridge} (records as JSONL + answers from the playbook file),
 // answers any other request with plain:<path>, and heartbeats every app
 // id given (500ms; the suite's TTL is 2s).
 func cmdHubTenant(args []string) {

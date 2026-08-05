@@ -80,7 +80,7 @@ func (f *bridgeFixture) post(i int) bridgePost {
 }
 
 // newBridgeHarness stands up a janusState with one registered app whose
-// bridge_path points at the fixture over a unix socket.
+// bridge points at the fixture over a unix socket.
 func newBridgeHarness(t *testing.T, f *bridgeFixture) (*janusState, AppRecord) {
 	t.Helper()
 	reg := newAppRegistry()
@@ -177,14 +177,14 @@ func TestHubBridgePostFailureModes(t *testing.T) {
 		t.Fatalf("gone host: %+v", res)
 	}
 
-	// bridge_path cleared mid-life.
+	// bridge cleared mid-life.
 	empty := ""
 	if _, err := st.registry.patch(rec.ID, nil, nil, &empty); err != nil {
 		t.Fatal(err)
 	}
 	res = hubBridgePost(st, "hubtest.example.com", rec.ID, "c", "text", "", http.Header{}, []byte(`{}`))
-	if res.ok || !strings.Contains(res.errMsg, "bridge_path") {
-		t.Fatalf("cleared bridge_path: %+v", res)
+	if res.ok || !strings.Contains(res.errMsg, "bridge") {
+		t.Fatalf("cleared bridge: %+v", res)
 	}
 }
 

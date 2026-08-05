@@ -260,74 +260,87 @@ func TestHubMaxConnsFloor(t *testing.T) {
 	}
 }
 
-// --- registry: bridge_path ------------------------------------------------------------
+// --- registry: bridge ------------------------------------------------------------
 
-func TestBridgePathValidation(t *testing.T) {
+func TestBridgeValidation(t *testing.T) {
 	r := newAppRegistry()
 	bad := []string{
-		"rt/bridge",                    // no leading /
+		"/",                            // slash only
+		"///",                          // slashes only
 		"/rt bridge",                   // whitespace
 		"/rt?x=1",                      // query
 		"/rt#frag",                     // fragment
 		"/rt\tbridge",                  // control
-		"/" + strings.Repeat("x", 256), // too long
+		"/" + strings.Repeat("x", 256), // too long after normalize
 	}
 	for _, p := range bad {
 		if _, err := r.create("shop", []string{"shop.example.com"}, p); err == nil {
-			t.Errorf("create accepted bridge_path %q", p)
+			t.Errorf("create accepted bridge %q", p)
 		}
 	}
-	rec, err := r.create("shop", []string{"shop.example.com"}, "/rt/bridge")
+	for _, in := range []string{"rt/bridge", "/rt/bridge", "rt/bridge/", "///rt/bridge///"} {
+		r = newAppRegistry()
+		rec, err := r.create("shop", []string{"shop.example.com"}, in)
+		if err != nil {
+			t.Fatalf("create %q: %v", in, err)
+		}
+		if rec.Bridge != "/rt/bridge" {
+			t.Fatalf("bridge %q stored as %q", in, rec.Bridge)
+		}
+	}
+	r = newAppRegistry()
+	rec, err := r.create("shop", []string{"shop.example.com"}, "hub")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.BridgePath != "/rt/bridge" {
-		t.Fatalf("bridge_path not stored: %+v", rec)
+	if rec.Bridge != "/hub" {
+		t.Fatalf("bridge not stored: %+v", rec)
 	}
 
 	// PATCH set, change, clear.
-	newPath := "/hooks/ws"
+	newPath := "hooks/ws"
 	rec, err = r.patch(rec.ID, nil, nil, &newPath)
-	if err != nil || rec.BridgePath != "/hooks/ws" {
+	if err != nil || rec.Bridge != "/hooks/ws" {
 		t.Fatalf("patch set: %v %+v", err, rec)
 	}
 	empty := ""
 	rec, err = r.patch(rec.ID, nil, nil, &empty)
-	if err != nil || rec.BridgePath != "" {
+	if err != nil || rec.Bridge != "" {
 		t.Fatalf("patch clear: %v %+v", err, rec)
 	}
-	badPath := "no-slash"
+	badPath := "/rt?x"
 	if _, err := r.patch(rec.ID, nil, nil, &badPath); err == nil {
-		t.Fatal("patch accepted an illegal bridge_path")
+		t.Fatal("patch accepted an illegal bridge")
 	}
 
-	// GET surfaces it.
-	if _, err := r.patch(rec.ID, nil, nil, &newPath); err != nil {
+	// GET surfaces the normalized path.
+	set := "/hooks/ws/"
+	if _, err := r.patch(rec.ID, nil, nil, &set); err != nil {
 		t.Fatal(err)
 	}
 	got, err := r.get(rec.ID)
-	if err != nil || got.BridgePath != "/hooks/ws" {
+	if err != nil || got.Bridge != "/hooks/ws" {
 		t.Fatalf("get: %v %+v", err, got)
 	}
 }
 
-func TestBridgePathPatchTriState(t *testing.T) {
+func TestBridgePatchTriState(t *testing.T) {
 	// absent → nil (unchanged)
-	if p, err := bridgePathPatch(nil); err != nil || p != nil {
+	if p, err := bridgeValPatch(nil); err != nil || p != nil {
 		t.Fatalf("absent: %v %v", p, err)
 	}
 	// null → clear
-	p, err := bridgePathPatch([]byte("null"))
+	p, err := bridgeValPatch([]byte("null"))
 	if err != nil || p == nil || *p != "" {
 		t.Fatalf("null: %v %v", p, err)
 	}
 	// string → set
-	p, err = bridgePathPatch([]byte(`"/rt"`))
+	p, err = bridgeValPatch([]byte(`"/rt"`))
 	if err != nil || p == nil || *p != "/rt" {
 		t.Fatalf("string: %v %v", p, err)
 	}
 	// wrong type → 400
-	if _, err := bridgePathPatch([]byte("42")); err == nil {
+	if _, err := bridgeValPatch([]byte("42")); err == nil {
 		t.Fatal("number must reject")
 	}
 }

@@ -17,7 +17,7 @@ import (
 // The bridge contract (docs/20260720-162350-hub-design.md "The bridge
 // contract").
 //
-// Every socket event POSTs to the tenant's hot-registered bridge_path with
+// Every socket event POSTs to the tenant's hot-registered bridge with
 // Sec-WebSocket-Frame: open|text|close, riding the existing data plane
 // (upstream selection, passive health, marked-503 retry, doorbell — with a
 // separate, lower-priority holder budget). Open is synchronous admission;
@@ -58,7 +58,7 @@ type hubBridgeResult struct {
 }
 
 // hubBridgePost sends one synthetic data-plane POST to the app's
-// registered bridge_path and captures the response. The request is fully
+// registered bridge and captures the response. The request is fully
 // buffered and replayable across marked 503s; the doorbell hold uses the
 // bridge holder class.
 func hubBridgePost(st *janusState, host, appID, connID, kind, remoteAddr string, snapshot http.Header, body []byte) hubBridgeResult {
@@ -66,15 +66,15 @@ func hubBridgePost(st *janusState, host, appID, connID, kind, remoteAddr string,
 	if !ok || rec.ID != appID {
 		return hubBridgeResult{errMsg: fmt.Sprintf("host %q no longer resolves to app %q", host, appID)}
 	}
-	if rec.BridgePath == "" {
-		return hubBridgeResult{errMsg: "app has no registered bridge_path"}
+	if rec.Bridge == "" {
+		return hubBridgeResult{errMsg: "app has no registered bridge"}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), hubBridgeTimeout)
 	defer cancel()
 	ctx = withRingClass(ctx, ringClassBridge)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+host+rec.BridgePath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+host+rec.Bridge, bytes.NewReader(body))
 	if err != nil {
 		return hubBridgeResult{errMsg: err.Error()}
 	}

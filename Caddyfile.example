@@ -9,10 +9,10 @@
 # Cold vs hot, in one breath: this file admits CAPABILITIES — what a host
 # may do (ping, cache, hub, auth, files) and where /1.0 listens. The hot /1.0 API wires
 # TENANTS — which hosts map to which worker sockets, heartbeats, the hub
-# bridge_path, and publish. Nothing here names an app or a socket; a
+# bridge, and publish. Nothing here names an app or a socket; a
 # tenant registers itself against the control plane:
 #
-#   POST /1.0/apps                  {"name":"shop","hosts":["www.example.com"],"bridge_path":"/rt/bridge"}
+#   POST /1.0/apps                  {"name":"shop","hosts":["www.example.com"],"bridge":"/rt/bridge"}
 #   PUT  /1.0/apps/{id}/upstreams   {"upstreams":[{"unix":"run/shop-1.sock"}]}
 #   POST /1.0/apps/{id}/heartbeat
 #   POST /1.0/apps/{id}/hub/publish {"@":["/lobby"],"note":{"text":"hi"}}
@@ -91,11 +91,11 @@
 		# ping and cache; every knob here is per-site admission policy
 		# (no process-wide-only keys). Sockets terminate at Janus and
 		# survive app reloads; the tenant observes frames through its
-		# hot-registered bridge_path and steers via
+		# hot-registered bridge and steers via
 		# POST /1.0/apps/{id}/hub/publish — cold admits the capability,
 		# hot wires the tenant. Counters: GET /1.0/hub.
 		hub {
-			mode bridge # bridge requires bridge_path/upstreams; direct performs no worker bridge while retaining origin/auth/caps
+			mode bridge # bridge requires bridge/upstreams; direct performs no worker bridge while retaining origin/auth/caps
 			path /hub # WS endpoint; the hub claims Upgrade requests here only — plain HTTP on the same path flows to the worker
 			max_conns 4096 # per app, not per site — see the floor caveat at ws-small/ws-large below
 			max_frame 64kb # largest client frame; oversize closes 1009. Raising it raises the per-connection memory budget
@@ -282,7 +282,7 @@ chat.example.com {
 }
 
 # Direct Hub: edge-only connections and fan-out. Empty upstreams and no
-# bridge_path are valid; control-plane publish remains available.
+# bridge are valid; control-plane publish remains available.
 live.example.com {
 	import janus_access
 	janus {

@@ -1064,7 +1064,7 @@ func TestMdnsSnapshotRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"SENTINEL-xyz", "SECRET-bridge", "bridge_path", ".sock"} {
+	for _, secret := range []string{"SENTINEL-xyz", "SECRET-bridge", "bridge", ".sock"} {
 		if strings.Contains(string(body), secret) {
 			t.Errorf("status snapshot leaks %q: %s", secret, body)
 		}
