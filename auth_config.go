@@ -1,8 +1,8 @@
 package janus
 
 import (
-	"encoding/base64"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -50,20 +50,20 @@ const (
 	authVerifyQueueMax    = 16
 )
 
-// The g1 credential format: argon2id with parameters fixed as module
-// constants under the version tag. Stored form is "g1:" +
-// base64.RawStdEncoding(salt‖digest) — standard alphabet, no padding,
-// exactly 64 encoded characters for the 48 decoded bytes (16-byte salt,
-// 32-byte key). There is nothing to parse but base64 and a length.
+// Password credential format (shared with Zift passhash): argon2id with
+// parameters fixed as module constants under a version letter. Version
+// "a" is `a` + 31 base62 chars (alphabet [0-9A-Za-z] only). Always 32
+// characters. Raw payload is 23 bytes (8-byte salt, 15-byte key).
 const (
-	g1Prefix  = "g1:"
-	g1Memory  = 64 * 1024 // KiB → 64 MiB
-	g1Time    = 2
-	g1Threads = 1
-	g1SaltLen = 16
-	g1KeyLen  = 32
-	g1RawLen  = g1SaltLen + g1KeyLen // 48
-	g1EncLen  = 64                   // RawStdEncoding of 48 bytes
+	g1Prefix   = "a"
+	g1Memory   = 64 * 1024 // KiB → 64 MiB
+	g1Time     = 2
+	g1Threads  = 1
+	g1SaltLen  = 8
+	g1KeyLen   = 15
+	g1RawLen   = g1SaltLen + g1KeyLen // 23
+	g1EncLen   = 31                   // base62 digits for 23 bytes
+	g1Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
 
 // AuthUser is one cold-configured credential: a lowercased, header-safe
@@ -130,8 +130,8 @@ type authSite struct {
 //	auth on
 //	auth off
 //	auth {
-//	  users { alice g1:… }
-//	  user bob g1:…
+//	  users { alice a… }
+//	  user bob a…
 //	  ttl 8h
 //	  gate /one/ { alice larry }
 //	}
@@ -170,7 +170,7 @@ func parseAuthDirective(d *caddyfile.Dispenser) (*AuthSettings, error) {
 		case "user":
 			args := d.RemainingArgs()
 			if len(args) != 2 {
-				return nil, d.Err("auth user: want exactly two arguments (user <name> g1:<credential>)")
+				return nil, d.Err("auth user: want exactly two arguments (user <name> <passhash>)")
 			}
 			if err := addAuthUser(as, users, args[0], args[1]); err != nil {
 				return nil, d.Errf("auth user: %v", err)
@@ -184,20 +184,20 @@ func parseAuthDirective(d *caddyfile.Dispenser) (*AuthSettings, error) {
 			}
 			seen["users"] = true
 			if len(d.RemainingArgs()) != 0 {
-				return nil, d.Err("auth users: want a block of `<name> g1:<credential>` lines, not arguments")
+				return nil, d.Err("auth users: want a block of `<name> <passhash>` lines, not arguments")
 			}
 			userNesting := d.Nesting()
 			if !d.NextBlock(userNesting) {
 				if d.Val() == "}" {
 					return nil, d.Err("auth users: empty users block")
 				}
-				return nil, d.Err("auth users: want a block of `<name> g1:<credential>` lines")
+				return nil, d.Err("auth users: want a block of `<name> <passhash>` lines")
 			}
 			for {
 				nameTok := d.Val()
 				args := d.RemainingArgs()
 				if len(args) != 1 {
-					return nil, d.Err("auth users: want `<name> g1:<credential>` per line")
+					return nil, d.Err("auth users: want `<name> <passhash>` per line")
 				}
 				if err := addAuthUser(as, users, nameTok, args[0]); err != nil {
 					return nil, d.Errf("auth users: %v", err)
@@ -446,33 +446,71 @@ func validateAuthUsername(raw string) (string, error) {
 }
 
 // validateG1 checks a stored credential without decoding it into use:
-// the g1: tag, the raw-standard-base64 alphabet (no padding, no url
-// alphabet), and the exact decoded length. Malformed blobs reject at
-// parse/provision, never at first login.
+// the version letter, base62 alphabet, and exact length. Malformed
+// blobs reject at parse/provision, never at first login.
 func validateG1(cred string) error {
 	_, err := decodeG1(cred)
 	return err
 }
 
-// decodeG1 decodes a g1 blob into its 48 raw bytes (salt‖digest) with
-// precise rejections for every malformed shape.
-func decodeG1(cred string) ([]byte, error) {
-	rest, ok := strings.CutPrefix(cred, g1Prefix)
-	if !ok {
-		if i := strings.IndexByte(cred, ':'); i > 0 {
-			return nil, fmt.Errorf("credential has unknown version tag %q (want g1:)", cred[:i+1])
-		}
-		return nil, fmt.Errorf("credential is missing the g1: prefix")
-	}
-	if strings.ContainsAny(rest, "=-_") {
-		return nil, fmt.Errorf("credential is not a g1 blob (g1 uses standard base64 with no padding: no '=', '-', or '_')")
-	}
-	raw, err := base64.RawStdEncoding.DecodeString(rest)
-	if err != nil {
-		return nil, fmt.Errorf("credential is not a g1 blob (invalid base64: %v)", err)
-	}
+func g1Encode(raw []byte) string {
 	if len(raw) != g1RawLen {
-		return nil, fmt.Errorf("credential is not a g1 blob (decoded %d bytes, want %d)", len(raw), g1RawLen)
+		panic("g1Encode: wrong raw length")
+	}
+	n := new(big.Int).SetBytes(raw)
+	base := big.NewInt(62)
+	chars := make([]byte, g1EncLen)
+	for i := g1EncLen - 1; i >= 0; i-- {
+		var r big.Int
+		n.DivMod(n, base, &r)
+		chars[i] = g1Alphabet[r.Int64()]
+	}
+	return string(chars)
+}
+
+func g1DecodePayload(rest string) ([]byte, error) {
+	if len(rest) != g1EncLen {
+		return nil, fmt.Errorf("got %d chars, want %d", len(rest), g1EncLen)
+	}
+	n := new(big.Int)
+	base := big.NewInt(62)
+	for i := 0; i < len(rest); i++ {
+		v := strings.IndexByte(g1Alphabet, rest[i])
+		if v < 0 {
+			return nil, fmt.Errorf("alphabet is [0-9A-Za-z]")
+		}
+		n.Mul(n, base)
+		n.Add(n, big.NewInt(int64(v)))
+	}
+	raw := n.Bytes()
+	if len(raw) > g1RawLen {
+		return nil, fmt.Errorf("value out of range")
+	}
+	out := make([]byte, g1RawLen)
+	copy(out[g1RawLen-len(raw):], raw)
+	return out, nil
+}
+
+// decodeG1 decodes a version-a blob into its 23 raw bytes (salt‖digest).
+func decodeG1(cred string) ([]byte, error) {
+	wantLen := len(g1Prefix) + g1EncLen
+	if len(cred) == 0 {
+		return nil, fmt.Errorf("credential is missing the a prefix")
+	}
+	if len(cred) != wantLen {
+		// Legacy `g1…` or future letter versions (`b`…). Digits/other
+		// lengths are plain wrong-size, not a new version.
+		if strings.HasPrefix(cred, "g1") || (cred[0] >= 'b' && cred[0] <= 'z') {
+			return nil, fmt.Errorf("credential has unknown version tag (want a)")
+		}
+		return nil, fmt.Errorf("credential is not a valid passhash (got %d chars, want %d)", len(cred), wantLen)
+	}
+	if !strings.HasPrefix(cred, g1Prefix) {
+		return nil, fmt.Errorf("credential has unknown version tag (want a)")
+	}
+	raw, err := g1DecodePayload(cred[len(g1Prefix):])
+	if err != nil {
+		return nil, fmt.Errorf("credential is not a valid passhash (%v)", err)
 	}
 	return raw, nil
 }

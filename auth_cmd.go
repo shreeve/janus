@@ -17,20 +17,21 @@ import (
 // is not a credential store): on a terminal it is prompted without echo
 // and confirmed; with stdin redirected, exactly one line is read — so
 // `printf 'pw\n' | caddy janus-auth-hash` works in scripts and test
-// fixtures. Output is the one g1:… line the operator pastes after
-// `user <name>`; the command runs the same constants the verifier runs.
+// fixtures. Output is the one a… passhash line the operator pastes
+// after `user <name>`; the command runs the same constants the verifier
+// runs.
 
 func init() {
 	caddycmd.RegisterCommand(caddycmd.Command{
 		Name:  "janus-auth-hash",
 		Usage: "",
-		Short: "Mints a Janus auth credential (g1 blob) from a password",
+		Short: "Mints a Janus auth passhash from a password",
 		Long: `
 Mints a credential for the janus auth capability: argon2id under the
-fixed g1 constants (m=64MiB, t=2, p=1; 16-byte salt, 32-byte key),
-printed as one g1:<base64> line for a Caddyfile users entry:
+fixed constants (m=64MiB, t=2, p=1; 8-byte salt, 15-byte key), printed
+as one a<base62> line (32 chars) for a Caddyfile users entry:
 
-	users { alice g1:… }
+	users { alice a… }
 
 On a terminal the password is prompted without echo and confirmed.
 With stdin redirected, exactly one line is read as the password:

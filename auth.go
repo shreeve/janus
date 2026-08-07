@@ -75,7 +75,7 @@ func g1Mint(password string) (string, error) {
 	}
 	digest := g1KDF([]byte(password), salt)
 	raw := append(salt, digest...)
-	return g1Prefix + base64.RawStdEncoding.EncodeToString(raw), nil
+	return g1Prefix + g1Encode(raw), nil
 }
 
 // g1Verify checks a password against a stored blob (already validated at

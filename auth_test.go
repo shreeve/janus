@@ -300,8 +300,8 @@ func TestAuthParseHardErrors(t *testing.T) {
 		jblock("auth {\n user " + strings.Repeat("a", 65) + " " + blob + "\n}"),
 		jblock("auth {\n user alice plaintext\n}"),
 		jblock("auth {\n user alice g2:" + strings.Repeat("A", 64) + "\n}"),
-		jblock("auth {\n user alice g1:not-base64!!\n}"),
-		jblock("auth {\n user alice g1:" + strings.Repeat("A", 44) + "\n}"),
+		jblock("auth {\n user alice g1not-base64!!\n}"),
+		jblock("auth {\n user alice g1" + strings.Repeat("A", 44) + "\n}"),
 		jblock("auth {\n user alice " + padded + "\n}"),
 		jblock("auth {\n ttl\n}"),
 		jblock("auth {\n ttl 0\n}"),
@@ -335,7 +335,7 @@ func TestAuthParseHardErrors(t *testing.T) {
 func TestG1MintVerifyRoundTrip(t *testing.T) {
 	blob := testCred(t, "open-sesame")
 	if !strings.HasPrefix(blob, g1Prefix) {
-		t.Fatalf("minted blob %q lacks the g1: prefix", blob)
+		t.Fatalf("minted blob %q lacks the a prefix", blob)
 	}
 	if got := len(blob) - len(g1Prefix); got != g1EncLen {
 		t.Fatalf("minted blob encodes %d chars, want %d", got, g1EncLen)
@@ -358,14 +358,14 @@ func TestG1Rejections(t *testing.T) {
 		blob string
 		want string
 	}{
-		{"missing prefix", good, "missing the g1: prefix"},
-		{"unknown tag", "g2:" + good, "unknown version tag"},
-		{"padding", g1Prefix + good + "==", "no padding"},
-		{"url alphabet", g1Prefix + strings.Repeat("-", g1EncLen), "no padding"},
-		{"bad base64", g1Prefix + "!!!!", "invalid base64"},
-		{"short", g1Prefix + good[:44], "decoded 33 bytes, want 48"},
-		{"long", g1Prefix + good + "AAAA", "decoded 51 bytes, want 48"},
-		{"empty", g1Prefix, "decoded 0 bytes, want 48"},
+		{"missing prefix", good, "got 31 chars, want 32"},
+		{"legacy g1", "g1" + good, "unknown version tag"},
+		{"future b", "b" + good, "unknown version tag"},
+		{"dash", g1Prefix + strings.Repeat("A", g1EncLen-1) + "-", "alphabet is"},
+		{"tilde", g1Prefix + strings.Repeat("A", g1EncLen-1) + "~", "alphabet is"},
+		{"short", g1Prefix + good[:20], "got 21 chars, want 32"},
+		{"long", g1Prefix + good + "AAAA", "got 36 chars, want 32"},
+		{"empty", g1Prefix, "got 1 chars, want 32"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
