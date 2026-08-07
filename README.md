@@ -222,7 +222,7 @@ curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `caddy janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: a config reload keeps them, a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
 
 ```bash
-./bin/caddy janus-auth-hash                 # mint a g1 credential (password prompted, never argv)
+./bin/caddy janus-auth-hash                 # mint a version-a passhash (password prompted, never argv)
 curl -s http://127.0.0.1:7600/1.0/auth      # wall counters + session count
 curl -s http://127.0.0.1:7600/1.0/auth/sessions
 ```
@@ -263,7 +263,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.6.1 \
+  --with github.com/shreeve/janus@v1.6.2 \
   --output ./caddy
 ```
 
@@ -286,7 +286,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
       "cache": { "enabled": true, "ttl": "1s" },
       "hub": { "enabled": true, "path": "/hub", "max_conns": 4096 },
       "mdns": { "name": "janus.local" },
-      "auth": { "enabled": true, "replace": true, "users": [{ "name": "alice", "credential": "g1:…" }], "gates": [{ "prefix": "/", "allow": ["alice"] }], "ttl": "8h" },
+      "auth": { "enabled": true, "replace": true, "users": [{ "name": "alice", "credential": "a…" }], "gates": [{ "prefix": "/", "allow": ["alice"] }], "ttl": "8h" },
       "heartbeat_ttl": "15s"
     },
     "http": {
@@ -334,7 +334,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `mdns.html` | Embedded status page (self-contained; zero external resources) |
 | `control_mdns.go` | mDNS control surface (`GET /1.0/mdns`) |
 | `auth.go` | Auth wall: gates, pooled sessions, throttle ladder, CSRF, login doors |
-| `auth_config.go` | `auth` directive: users, gates, parse, cascade, g1 codec, site table |
+| `auth_config.go` | `auth` directive: users, gates, parse, cascade, passhash codec, site table |
 | `auth_cmd.go` | `caddy janus-auth-hash` credential minter |
 | `auth.html` | Embedded login/status page (self-contained; zero external resources) |
 | `control_auth.go` | Auth control surface (`GET /1.0/auth`, session list + revocation) |

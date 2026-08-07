@@ -108,9 +108,9 @@
 		}
 		auth { # 6) site-scoped default: on — fixture credentials (committed on purpose, like certs/)
 			users {
-				alice g1:k5KZV0T/LsQSaqny8ZZa0hPn/FRGIDueMSt91JUSJzVp2TcbSNt3Hdo0RuBCMWV1 # password: sesame-alice
-				bob   g1:ZO7UHjS4TZm9A5t3q5aF0EUZe7Dhwb71Am4LoPynBy/qFMnG76oOwkvHN5EO2EW6 # password: sesame-bob
-				larry g1:yJ73rWf/yhZnFuAheo60WYM8iZ95WF6+8/ikWwOg/creoTvYMcFl3fpRcADtJDsh # password: sesame-larry
+				alice aZoyWD0mfNZH7GZCh3DH9Te1FwAxA0yc # password: sesame-alice
+				bob   aI9eoj7z2M0oTFWY3ai7uQzblQR2spHF # password: sesame-bob
+				larry aTsNAccM4EGpfEd4HaZMzNc4KJ63yeD1 # password: sesame-larry
 			}
 			ttl 8h # host-wide sliding idle (default)
 			gate / { # whole site; login door /auth
@@ -323,7 +323,7 @@ authcarol.ripdev.io {
 	janus {
 		auth {
 			users {
-				carol g1:vubzMm3lFe41hKvKvZnXgOaBiA+QDUvsYr7PDmLf65WLF+J+EEnhAuzdAmPjGXXY # password: sesame-carol
+				carol a2infRCHPI6UisLSzkAdpHl3QMwRUeCF # password: sesame-carol
 			}
 			ttl 30m
 			gate / {

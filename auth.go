@@ -51,42 +51,42 @@ type authPageData struct {
 	Error string
 }
 
-// --- the g1 codec ---------------------------------------------------------------
+// --- the passhash codec (version a; shared with Zift) -------------------------
 //
-// Exactly one definition of g1 in the codebase: the janus-auth-hash
-// command mints with the same constants the verifier runs.
+// Exactly one definition in the codebase: janus-auth-hash mints with the
+// same constants the verifier runs. Wire form is `a` + 31 base62 chars.
 
-// g1KDF runs the fixed-parameter argon2id derivation. Every execution is
+// passKDF runs the fixed-parameter argon2id derivation. Every execution is
 // counted (the throttle-before-KDF and timing-equalization pins read the
 // counter).
-func g1KDF(password, salt []byte) []byte {
+func passKDF(password, salt []byte) []byte {
 	authKDFRuns.Add(1)
-	return argon2.IDKey(password, salt, g1Time, g1Memory, g1Threads, g1KeyLen)
+	return argon2.IDKey(password, salt, passTime, passMemory, passThreads, passKeyLen)
 }
 
 // authKDFRuns counts argon2 executions process-wide.
 var authKDFRuns atomic.Int64
 
-// g1Mint derives a fresh credential blob from a password.
-func g1Mint(password string) (string, error) {
-	salt := make([]byte, g1SaltLen)
+// passMint derives a fresh version-a passhash from a password.
+func passMint(password string) (string, error) {
+	salt := make([]byte, passSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("minting salt: %w", err)
 	}
-	digest := g1KDF([]byte(password), salt)
+	digest := passKDF([]byte(password), salt)
 	raw := append(salt, digest...)
-	return g1Prefix + g1Encode(raw), nil
+	return passPrefix + passEncode(raw), nil
 }
 
-// g1Verify checks a password against a stored blob (already validated at
-// parse/provision) in constant time over the digest compare.
-func g1Verify(password, blob string) bool {
-	raw, err := decodeG1(blob)
+// passVerify checks a password against a stored passhash (already validated
+// at parse/provision) in constant time over the digest compare.
+func passVerify(password, blob string) bool {
+	raw, err := decodePasshash(blob)
 	if err != nil {
 		return false // unreachable for provisioned credentials
 	}
-	digest := g1KDF([]byte(password), raw[:g1SaltLen])
-	return subtle.ConstantTimeCompare(digest, raw[g1SaltLen:]) == 1
+	digest := passKDF([]byte(password), raw[:passSaltLen])
+	return subtle.ConstantTimeCompare(digest, raw[passSaltLen:]) == 1
 }
 
 // --- the pooled store ------------------------------------------------------------
@@ -574,14 +574,14 @@ func (st *authStore) releaseVerify() {
 // list.
 func (st *authStore) verifyCredential(password, blob string, known bool) bool {
 	if known {
-		return g1Verify(password, blob)
+		return passVerify(password, blob)
 	}
 	st.dummyOnce.Do(func() {
-		st.dummySalt = make([]byte, g1SaltLen)
+		st.dummySalt = make([]byte, passSaltLen)
 		_, _ = rand.Read(st.dummySalt)
-		st.dummyHash = g1KDF([]byte("janus-auth-dummy"), st.dummySalt)
+		st.dummyHash = passKDF([]byte("janus-auth-dummy"), st.dummySalt)
 	})
-	digest := g1KDF([]byte(password), st.dummySalt)
+	digest := passKDF([]byte(password), st.dummySalt)
 	subtle.ConstantTimeCompare(digest, st.dummyHash)
 	return false
 }

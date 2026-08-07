@@ -50,7 +50,7 @@ func cmdJanusAuthHash(fl caddycmd.Flags) (int, error) {
 	if password == "" {
 		return 1, errors.New("password must not be empty")
 	}
-	blob, err := g1Mint(password)
+	blob, err := passMint(password)
 	if err != nil {
 		return 1, err
 	}

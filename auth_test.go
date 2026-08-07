@@ -22,7 +22,7 @@ import (
 
 var (
 	authTestCredsOnce sync.Once
-	authTestCreds     map[string]string // password → g1 blob
+	authTestCreds     map[string]string // password → passhash blob
 )
 
 func testCred(t *testing.T, password string) string {
@@ -30,7 +30,7 @@ func testCred(t *testing.T, password string) string {
 	authTestCredsOnce.Do(func() {
 		authTestCreds = map[string]string{}
 		for _, pw := range []string{"open-sesame", "carol-pass", "larry-pass"} {
-			blob, err := g1Mint(pw)
+			blob, err := passMint(pw)
 			if err != nil {
 				panic(err)
 			}
@@ -299,9 +299,9 @@ func TestAuthParseHardErrors(t *testing.T) {
 		jblock("auth {\n user al:ice " + blob + "\n}"),
 		jblock("auth {\n user " + strings.Repeat("a", 65) + " " + blob + "\n}"),
 		jblock("auth {\n user alice plaintext\n}"),
-		jblock("auth {\n user alice g2:" + strings.Repeat("A", 64) + "\n}"),
-		jblock("auth {\n user alice g1not-base64!!\n}"),
-		jblock("auth {\n user alice g1" + strings.Repeat("A", 44) + "\n}"),
+		jblock("auth {\n user alice x2:" + strings.Repeat("A", 64) + "\n}"),
+		jblock("auth {\n user alice anot-base62!!\n}"),
+		jblock("auth {\n user alice a" + strings.Repeat("A", 20) + "\n}"),
 		jblock("auth {\n user alice " + padded + "\n}"),
 		jblock("auth {\n ttl\n}"),
 		jblock("auth {\n ttl 0\n}"),
@@ -330,46 +330,46 @@ func TestAuthParseHardErrors(t *testing.T) {
 	}
 }
 
-// --- the g1 codec -------------------------------------------------------------------
+// --- passhash codec -----------------------------------------------------------------
 
-func TestG1MintVerifyRoundTrip(t *testing.T) {
+func TestPasshashMintVerifyRoundTrip(t *testing.T) {
 	blob := testCred(t, "open-sesame")
-	if !strings.HasPrefix(blob, g1Prefix) {
+	if !strings.HasPrefix(blob, passPrefix) {
 		t.Fatalf("minted blob %q lacks the a prefix", blob)
 	}
-	if got := len(blob) - len(g1Prefix); got != g1EncLen {
-		t.Fatalf("minted blob encodes %d chars, want %d", got, g1EncLen)
+	if got := len(blob) - len(passPrefix); got != passEncLen {
+		t.Fatalf("minted blob encodes %d chars, want %d", got, passEncLen)
 	}
-	if err := validateG1(blob); err != nil {
+	if err := validatePasshash(blob); err != nil {
 		t.Fatalf("minted blob rejected: %v", err)
 	}
-	if !g1Verify("open-sesame", blob) {
+	if !passVerify("open-sesame", blob) {
 		t.Fatal("correct password rejected")
 	}
-	if g1Verify("wrong", blob) {
+	if passVerify("wrong", blob) {
 		t.Fatal("wrong password accepted")
 	}
 }
 
-func TestG1Rejections(t *testing.T) {
-	good := strings.TrimPrefix(testCred(t, "open-sesame"), g1Prefix)
+func TestPasshashRejections(t *testing.T) {
+	good := strings.TrimPrefix(testCred(t, "open-sesame"), passPrefix)
 	cases := []struct {
 		name string
 		blob string
 		want string
 	}{
 		{"missing prefix", good, "got 31 chars, want 32"},
-		{"legacy g1", "g1" + good, "unknown version tag"},
+		{"unknown letter short", "zAAAA", "unknown version tag"},
 		{"future b", "b" + good, "unknown version tag"},
-		{"dash", g1Prefix + strings.Repeat("A", g1EncLen-1) + "-", "alphabet is"},
-		{"tilde", g1Prefix + strings.Repeat("A", g1EncLen-1) + "~", "alphabet is"},
-		{"short", g1Prefix + good[:20], "got 21 chars, want 32"},
-		{"long", g1Prefix + good + "AAAA", "got 36 chars, want 32"},
-		{"empty", g1Prefix, "got 1 chars, want 32"},
+		{"dash", passPrefix + strings.Repeat("A", passEncLen-1) + "-", "alphabet is"},
+		{"tilde", passPrefix + strings.Repeat("A", passEncLen-1) + "~", "alphabet is"},
+		{"short", passPrefix + good[:20], "got 21 chars, want 32"},
+		{"long", passPrefix + good + "AAAA", "got 36 chars, want 32"},
+		{"empty", passPrefix, "got 1 chars, want 32"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateG1(tc.blob)
+			err := validatePasshash(tc.blob)
 			if err == nil {
 				t.Fatalf("accepted %q", tc.blob)
 			}

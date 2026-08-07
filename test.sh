@@ -3458,11 +3458,11 @@ case_auth_reload_revokes_removed_user() {
 	r0="$(auth_stat reload_revoked)"
 	# Reload with bob's users-table line deleted: his session dies at Start.
 	local stripped="$ROOT/.test-auth-stripped-caddyfile"
-	sed '/[[:space:]]bob[[:space:]]*g1:/d' "$ROOT/Caddyfile" >"$stripped"
+	sed '/[[:space:]]bob[[:space:]]*a[0-9A-Za-z]\{31\}/d' "$ROOT/Caddyfile" >"$stripped"
 	# gate / still lists bob — drop bob from the allow list too.
 	sed -i.bak 's/alice bob/alice/' "$stripped"
 	rm -f "$stripped.bak"
-	if grep -qE '[[:space:]]bob[[:space:]]*g1:' "$stripped"; then
+	if grep -qE '[[:space:]]bob[[:space:]]*a[0-9A-Za-z]{31}' "$stripped"; then
 		echo "failed to strip bob from the reload config" >&2
 		return 1
 	fi
@@ -3532,11 +3532,11 @@ case_auth_hot_revoke() {
 
 case_auth_minter_and_dead_wall() {
 	# The minter reads stdin when piped (no argv, no echo) and prints one
-	# g1 line under the fixed constants.
+	# version-a passhash under the fixed constants.
 	local blob
 	blob="$(printf 'mint-pass\n' | "$CADDY_BIN" janus-auth-hash)"
-	if [[ ! "$blob" =~ ^g1:[A-Za-z0-9+/]{64}$ ]]; then
-		printf 'minted blob %q is not an unpadded 64-char g1 line' "$blob" >&2
+	if [[ ! "$blob" =~ ^a[0-9A-Za-z]{31}$ ]]; then
+		printf 'minted blob %q is not a 32-char version-a passhash' "$blob" >&2
 		return 1
 	fi
 	# A second, sockets-apart caddy proves the blob verifies end-to-end —
@@ -3659,7 +3659,7 @@ EOF
 	fi
 	# Users without gates also refuse (needs a site handler to provision).
 	local blob
-	blob="g1:k5KZV0T/LsQSaqny8ZZa0hPn/FRGIDueMSt91JUSJzVp2TcbSNt3Hdo0RuBCMWV1"
+	blob="aZoyWD0mfNZH7GZCh3DH9Te1FwAxA0yc"
 	cat >"$dir/Caddyfile" <<EOF
 {
 	admin off
@@ -3690,7 +3690,7 @@ EOF
 
 case_auth_parse_rejections() {
 	local bad dir blob
-	blob="g1:k5KZV0T/LsQSaqny8ZZa0hPn/FRGIDueMSt91JUSJzVp2TcbSNt3Hdo0RuBCMWV1"
+	blob="aZoyWD0mfNZH7GZCh3DH9Te1FwAxA0yc"
 	dir="$(mktemp -d /tmp/janus-auth-parse.XXXXXX)"
 	local -a cases=(
 		'auth maybe'
@@ -3712,8 +3712,8 @@ case_auth_parse_rejections() {
 		}"
 		"auth { user al:ice $blob }"
 		'auth { user alice plaintext }'
-		'auth { user alice g2:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA }'
-		'auth { user alice g1:short }'
+		'auth { user alice x2:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA }'
+		'auth { user alice ashort }'
 		"auth { user alice $blob== }"
 		'auth { ttl }'
 		'auth { ttl 0 }'

@@ -139,7 +139,7 @@
 		# need an explicit `auth off` unless you mean to gate them.
 		auth {
 			users {
-				alice g1:fLqSrE0lzzk48NrZ4KlRU/GJmVQuJTteCYqHgZuYNXcXmJ2h8Mc9cZ35xLIXhZMA # caddy janus-auth-hash → paste
+				alice adoBxXzvgqIE6iavsfd02vuzcJSC7sVh # caddy janus-auth-hash → paste (version a passhash)
 			}
 			ttl 8h # host-wide sliding idle; default 8h
 			gate / { # whole site; door /auth
@@ -237,7 +237,7 @@ notes.example.com {
 	janus {
 		auth {
 			users {
-				carol g1:W4bIofWe/+90BoGMrOOJ0rO9+hgfM58AACwlmoiVSpI+wqjVZD0q+gD4oc4ZRwHR
+				carol aFaQ0mTJP3Xe7IBvtqP1lshDzU4DJsMZ # version a passhash
 			}
 			ttl 30m
 			gate / {

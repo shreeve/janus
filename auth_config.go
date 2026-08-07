@@ -55,19 +55,19 @@ const (
 // "a" is `a` + 31 base62 chars (alphabet [0-9A-Za-z] only). Always 32
 // characters. Raw payload is 23 bytes (8-byte salt, 15-byte key).
 const (
-	g1Prefix   = "a"
-	g1Memory   = 64 * 1024 // KiB → 64 MiB
-	g1Time     = 2
-	g1Threads  = 1
-	g1SaltLen  = 8
-	g1KeyLen   = 15
-	g1RawLen   = g1SaltLen + g1KeyLen // 23
-	g1EncLen   = 31                   // base62 digits for 23 bytes
-	g1Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	passPrefix   = "a"
+	passMemory   = 64 * 1024 // KiB → 64 MiB
+	passTime     = 2
+	passThreads  = 1
+	passSaltLen  = 8
+	passKeyLen   = 15
+	passRawLen   = passSaltLen + passKeyLen // 23
+	passEncLen   = 31                   // base62 digits for 23 bytes
+	passAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
 
 // AuthUser is one cold-configured credential: a lowercased, header-safe
-// username and its g1 blob.
+// username and its passhash blob.
 type AuthUser struct {
 	Name       string `json:"name"`
 	Credential string `json:"credential"`
@@ -114,7 +114,7 @@ type authGate struct {
 
 // authSite is one site's effective auth configuration after cascade.
 type authSite struct {
-	users map[string]string // lowercased name → g1 blob
+	users map[string]string // lowercased name → passhash blob
 	gates []authGate        // longest-prefix-first for matching
 	ttl   time.Duration
 	store *authStore
@@ -305,7 +305,7 @@ func addAuthUser(as *AuthSettings, seen map[string]bool, rawName, cred string) e
 	if seen[name] {
 		return fmt.Errorf("duplicate username %q in one block", name)
 	}
-	if err := validateG1(cred); err != nil {
+	if err := validatePasshash(cred); err != nil {
 		return fmt.Errorf("user %s: %w", name, err)
 	}
 	seen[name] = true
@@ -445,37 +445,37 @@ func validateAuthUsername(raw string) (string, error) {
 	return name, nil
 }
 
-// validateG1 checks a stored credential without decoding it into use:
+// validatePasshash checks a stored credential without decoding it into use:
 // the version letter, base62 alphabet, and exact length. Malformed
 // blobs reject at parse/provision, never at first login.
-func validateG1(cred string) error {
-	_, err := decodeG1(cred)
+func validatePasshash(cred string) error {
+	_, err := decodePasshash(cred)
 	return err
 }
 
-func g1Encode(raw []byte) string {
-	if len(raw) != g1RawLen {
-		panic("g1Encode: wrong raw length")
+func passEncode(raw []byte) string {
+	if len(raw) != passRawLen {
+		panic("passEncode: wrong raw length")
 	}
 	n := new(big.Int).SetBytes(raw)
 	base := big.NewInt(62)
-	chars := make([]byte, g1EncLen)
-	for i := g1EncLen - 1; i >= 0; i-- {
+	chars := make([]byte, passEncLen)
+	for i := passEncLen - 1; i >= 0; i-- {
 		var r big.Int
 		n.DivMod(n, base, &r)
-		chars[i] = g1Alphabet[r.Int64()]
+		chars[i] = passAlphabet[r.Int64()]
 	}
 	return string(chars)
 }
 
-func g1DecodePayload(rest string) ([]byte, error) {
-	if len(rest) != g1EncLen {
-		return nil, fmt.Errorf("got %d chars, want %d", len(rest), g1EncLen)
+func passDecodePayload(rest string) ([]byte, error) {
+	if len(rest) != passEncLen {
+		return nil, fmt.Errorf("got %d chars, want %d", len(rest), passEncLen)
 	}
 	n := new(big.Int)
 	base := big.NewInt(62)
 	for i := 0; i < len(rest); i++ {
-		v := strings.IndexByte(g1Alphabet, rest[i])
+		v := strings.IndexByte(passAlphabet, rest[i])
 		if v < 0 {
 			return nil, fmt.Errorf("alphabet is [0-9A-Za-z]")
 		}
@@ -483,32 +483,32 @@ func g1DecodePayload(rest string) ([]byte, error) {
 		n.Add(n, big.NewInt(int64(v)))
 	}
 	raw := n.Bytes()
-	if len(raw) > g1RawLen {
+	if len(raw) > passRawLen {
 		return nil, fmt.Errorf("value out of range")
 	}
-	out := make([]byte, g1RawLen)
-	copy(out[g1RawLen-len(raw):], raw)
+	out := make([]byte, passRawLen)
+	copy(out[passRawLen-len(raw):], raw)
 	return out, nil
 }
 
-// decodeG1 decodes a version-a blob into its 23 raw bytes (salt‖digest).
-func decodeG1(cred string) ([]byte, error) {
-	wantLen := len(g1Prefix) + g1EncLen
+// decodePasshash decodes a version-a blob into its 23 raw bytes (salt‖digest).
+func decodePasshash(cred string) ([]byte, error) {
+	wantLen := len(passPrefix) + passEncLen
 	if len(cred) == 0 {
 		return nil, fmt.Errorf("credential is missing the a prefix")
 	}
 	if len(cred) != wantLen {
-		// Legacy `g1…` or future letter versions (`b`…). Digits/other
-		// lengths are plain wrong-size, not a new version.
-		if strings.HasPrefix(cred, "g1") || (cred[0] >= 'b' && cred[0] <= 'z') {
+		// Future letter versions (`b`…). Digits/other lengths are
+		// plain wrong-size, not a new version.
+		if cred[0] >= 'b' && cred[0] <= 'z' {
 			return nil, fmt.Errorf("credential has unknown version tag (want a)")
 		}
 		return nil, fmt.Errorf("credential is not a valid passhash (got %d chars, want %d)", len(cred), wantLen)
 	}
-	if !strings.HasPrefix(cred, g1Prefix) {
+	if !strings.HasPrefix(cred, passPrefix) {
 		return nil, fmt.Errorf("credential has unknown version tag (want a)")
 	}
-	raw, err := g1DecodePayload(cred[len(g1Prefix):])
+	raw, err := passDecodePayload(cred[len(passPrefix):])
 	if err != nil {
 		return nil, fmt.Errorf("credential is not a valid passhash (%v)", err)
 	}
@@ -533,7 +533,7 @@ func validateAuthSettings(as *AuthSettings) error {
 		}
 		names[name] = true
 		as.Users[i].Name = name
-		if err := validateG1(as.Users[i].Credential); err != nil {
+		if err := validatePasshash(as.Users[i].Credential); err != nil {
 			return fmt.Errorf("user %s: %w", name, err)
 		}
 	}
