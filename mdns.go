@@ -855,7 +855,22 @@ func mdnsServerListensOnPort(srv *caddyhttp.Server, port int) bool {
 			return true
 		}
 	}
+	// Inherited FDs (macOS launchd socket activation) appear as "fd/N"
+	// with no TCP port in the listen string. A non-TLS server bound that
+	// way is still the HTTP-port server — shared mDNS coverage must see
+	// it, or launchd-activated edges (Rip Sites local posture) never start.
+	if len(srv.TLSConnPolicies) == 0 {
+		for _, l := range srv.Listen {
+			if mdnsListenIsFD(l) {
+				return true
+			}
+		}
+	}
 	return false
+}
+
+func mdnsListenIsFD(addr string) bool {
+	return strings.HasPrefix(addr, "fd/") || strings.HasPrefix(addr, "fdgram/")
 }
 
 // enableSharedFrontDoor wires the shared-mode decider: the HTTP port the
