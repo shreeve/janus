@@ -14,7 +14,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-CADDY_BIN="${CADDY_BIN:-$ROOT/bin/caddy}"
+CADDY_BIN="${CADDY_BIN:-$ROOT/bin/caddy-janus}"
 CADDY_LOG="${CADDY_LOG:-$ROOT/.test-caddy.log}"
 CADDY_PID=""
 

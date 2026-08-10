@@ -156,7 +156,7 @@ go mod tidy
 mkdir -p bin
 xcaddy build \
   --with github.com/shreeve/janus=. \
-  --output ./bin/caddy
+  --output ./bin/caddy-janus
 
 go test ./...
 ./test.sh   # capability-ordered acceptance groups, ending with access
@@ -167,7 +167,7 @@ go test ./...
 Trusted wildcard cert in [`certs/`](certs/); DNS → `127.0.0.1`; SNI picks the site. No control plane required.
 
 ```bash
-./bin/caddy run
+./bin/caddy-janus run
 ```
 
 ```bash
@@ -177,7 +177,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://off.ripdev.io/ping
 # → 404
 ```
 
-On some systems binding :443 needs elevated privileges (`sudo ./bin/caddy run …`). On current macOS it often works without sudo.
+On some systems binding :443 needs elevated privileges (`sudo ./bin/caddy-janus run …`). On current macOS it often works without sudo.
 
 ### 2. control (`/1.0`)
 
@@ -222,7 +222,7 @@ curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `caddy janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: a config reload keeps them, a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
 
 ```bash
-./bin/caddy janus-auth-hash                 # mint a version-a passhash (password prompted, never argv)
+./bin/caddy-janus janus-auth-hash                 # mint a version-a passhash (password prompted, never argv)
 curl -s http://127.0.0.1:7600/1.0/auth      # wall counters + session count
 curl -s http://127.0.0.1:7600/1.0/auth/sessions
 ```
@@ -247,8 +247,8 @@ xcaddy run
 # Produce a binary (see ping-only proof above)
 xcaddy build \
   --with github.com/shreeve/janus=. \
-  --output ./bin/caddy
-./bin/caddy run
+  --output ./bin/caddy-janus
+./bin/caddy-janus run
 ```
 
 From anywhere, against a published module version:
@@ -270,8 +270,34 @@ xcaddy build v2.11.4 \
 Confirm the module is linked:
 
 ```bash
-./bin/caddy list-modules | grep janus
+./bin/caddy-janus list-modules | grep janus
 ```
+
+### Prebuilt binaries
+
+Every release publishes static single-file binaries as GitHub release
+assets, named `caddy-janus-<tag>-<GOOS>-<GOARCH>`:
+
+```bash
+curl -fsSLo caddy-janus \
+  https://github.com/shreeve/janus/releases/download/v1.6.4/caddy-janus-v1.6.4-darwin-arm64
+chmod +x caddy-janus
+./caddy-janus version
+```
+
+Platforms: `darwin-arm64`, `linux-amd64`, `linux-arm64`, and
+`windows-amd64` (with `.exe`).
+
+[`release.sh`](release.sh) drives both build modes:
+
+```bash
+./release.sh           # dev: build the working tree -> bin/caddy-janus
+./release.sh v1.6.4    # cross-compile the pushed tag and publish release assets
+```
+
+Release builds compile from the tag (never the working tree), so
+`build-info` on a downloaded binary reports the exact Janus module
+version and checksum.
 
 ## JSON config
 

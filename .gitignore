@@ -1,4 +1,5 @@
 /bin/
+/dist/
 /run/
 /buildenv_*/
 *.log
