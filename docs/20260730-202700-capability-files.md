@@ -88,9 +88,13 @@ The registry owns each pattern suffix exactly as it owns an exact host.
 An exact host under an owned suffix conflicts, and a suffix claim
 conflicts with every exact host having one or more whole labels before
 that suffix. String suffixes without a label boundary do not conflict.
-Aliases participate in exact-host conflict checks; an alias beneath its
-own pattern is redundant and rejects. Claims are first-wins and are
-released by DELETE or heartbeat reap.
+Aliases participate in exact-host conflict checks. Beneath its own
+pattern, an alias earns its keep only by REMAPPING: a self-alias whose
+host resolves to the same site label the pattern would extract
+(`ola.example.com` → `ola` under `{site}.example.com`) is redundant and
+rejects, while a remapping alias (`local.example.com` → `ola`) is
+legal. Claims are first-wins and are released by DELETE or heartbeat
+reap.
 
 `site.dir`, every `files.roots[].path`, and `files.shell` are clean Unix
 absolute paths: no NUL, backslash, repeated separator, `.`/`..` segment,
