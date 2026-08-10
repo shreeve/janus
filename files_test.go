@@ -252,7 +252,7 @@ func TestSitePolicyHardErrors(t *testing.T) {
 		{Host: "{site}.{site}.example.com", Dir: dir},
 		{Host: "{site}.bad_host", Dir: dir},
 		{Host: "{site}.example.com", Dir: "relative"},
-		{Host: "{site}.example.com", Dir: dir, Aliases: map[string]string{"a.example.com": "ola"}},
+		{Host: "{site}.example.com", Dir: dir, Aliases: map[string]string{"ola.example.com": "ola"}},
 		{Host: "{site}.example.com", Dir: dir, Aliases: map[string]string{"alias.test": "common"}},
 		{Host: "{site}.example.com", Dir: dir, Aliases: map[string]string{"alias.test": "Bad"}},
 	}
@@ -260,6 +260,21 @@ func TestSitePolicyHardErrors(t *testing.T) {
 		if _, _, err := normalizeSitePolicy(site); err == nil {
 			t.Errorf("bad site %d accepted: %+v", i, site)
 		}
+	}
+}
+
+func TestSitePolicyRemapAliasBeneathPattern(t *testing.T) {
+	dir := t.TempDir()
+	site, suffix, err := normalizeSitePolicy(&SitePolicy{
+		Host: "{site}.Example.com",
+		Dir:  dir,
+		Aliases: map[string]string{"Local.example.com": "ola"},
+	})
+	if err != nil {
+		t.Fatalf("remap alias beneath pattern rejected: %v", err)
+	}
+	if suffix != "example.com" || site.Aliases["local.example.com"] != "ola" {
+		t.Fatalf("normalized: suffix=%q aliases=%v", suffix, site.Aliases)
 	}
 }
 

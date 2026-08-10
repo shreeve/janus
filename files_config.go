@@ -215,7 +215,12 @@ func normalizeSitePolicy(in *SitePolicy) (*SitePolicy, string, error) {
 		if net.ParseIP(host) != nil {
 			return nil, "", errBadRequest("site alias %q must be a DNS hostname, not an IP literal", host)
 		}
-		if strings.HasSuffix(host, "."+suffix) {
+		// Beneath the pattern, an alias earns its keep only by REMAPPING:
+		// {site} extraction would already resolve ola.<suffix> to "ola",
+		// so a self-alias is noise — but local.<suffix> -> "ola" changes
+		// the answer and is the supported spelling for a dev host that
+		// rides the wildcard certificate.
+		if strings.HasSuffix(host, "."+suffix) && strings.TrimSuffix(host, "."+suffix) == strings.ToLower(rawSite) {
 			return nil, "", errBadRequest("site alias %q is redundant beneath pattern %q", host, out.Host)
 		}
 		if err := validateSiteLabel(rawSite, fmt.Sprintf("site alias %q", host)); err != nil {
