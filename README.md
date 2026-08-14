@@ -263,7 +263,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.6.4 \
+  --with github.com/shreeve/janus@v1.6.5 \
   --output ./caddy
 ```
 
@@ -280,7 +280,7 @@ assets, named `caddy-janus-<tag>-<GOOS>-<GOARCH>`:
 
 ```bash
 curl -fsSLo caddy-janus \
-  https://github.com/shreeve/janus/releases/download/v1.6.4/caddy-janus-v1.6.4-darwin-arm64
+  https://github.com/shreeve/janus/releases/download/v1.6.5/caddy-janus-v1.6.5-darwin-arm64
 chmod +x caddy-janus
 ./caddy-janus version
 ```
@@ -292,7 +292,7 @@ Platforms: `darwin-arm64`, `linux-amd64`, `linux-arm64`, and
 
 ```bash
 ./release.sh           # dev: build the working tree -> bin/caddy-janus
-./release.sh v1.6.4    # cross-compile the pushed tag and publish release assets
+./release.sh v1.6.5    # cross-compile the pushed tag and publish release assets
 ```
 
 Release builds compile from the tag (never the working tree), so

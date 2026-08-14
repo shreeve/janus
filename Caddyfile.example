@@ -247,6 +247,55 @@ notes.example.com {
 	}
 }
 
+# DuckDB UI — the worked example of what auth is for: an app with no
+# login story of its own, reachable only through Janus.
+#
+# The UI binds loopback inside an incus container and has no
+# authentication at all, so anything that reaches its port can run SQL.
+# One incus proxy device carries it out of the container's namespace and
+# lands it on a unix socket, which is the only kind of upstream Janus
+# dials — and is exactly the perimeter the auth capability requires:
+#
+#   incus config device add ct duckui proxy bind=host \
+#     listen=unix:/run/janus/duckui.sock connect=tcp:127.0.0.1:4213
+#
+# Then register it, because the wall runs before host resolution and an
+# unregistered host is a 404 whether or not the caller signed in:
+#
+#   curl -sX POST http://127.0.0.1:7600/1.0/apps \
+#     -d '{"name":"duckui","hosts":["duckui.example.com"]}'
+#   curl -sX PUT http://127.0.0.1:7600/1.0/apps/{id}/upstreams \
+#     -d '{"upstreams":[{"path":"/run/janus/duckui.sock"}]}'
+#
+# Everything else is off on purpose. cache: query answers are per-user
+# and must never be shared. hub: the UI speaks its own SSE, not Janus's
+# WebSocket. files/browse: nothing static is served from here.
+#
+# The UI also keeps its own cross-site check, and it has to be told the
+# name it now answers to, or every query 401s while the page still
+# loads. Set UI_PUBLIC_URL=https://duckui.example.com in the container.
+# Do NOT rewrite Origin in a proxy to satisfy it: overwriting the header
+# means the check can never fail, which removes the protection rather
+# than relocating it. Janus decides who; that check decides from where.
+duckui.example.com {
+	import janus_access
+	janus {
+		auth {
+			users {
+				dave a7kQxZ3mNvB8pR2sT5wY9cH4jL6nF0gK # caddy janus-auth-hash
+			}
+			ttl 2h # shorter than the 8h default: this door opens a database
+			gate / {
+				dave
+			}
+		}
+		cache off
+		hub off
+		files off
+		browse off
+	}
+}
+
 # Pages — per-key override. A site block overrides only the keys it
 # names: ttl becomes 5s here, while ttl_max, max_body, and the pool
 # knobs keep their global values. debug emits X-Janus-Cache

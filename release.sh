@@ -3,7 +3,7 @@
 # release.sh — build caddy+janus binaries
 #
 #   ./release.sh              dev build of the working tree -> bin/caddy-janus
-#   ./release.sh v1.6.4       cross-compile the tagged module for every
+#   ./release.sh v1.6.5       cross-compile the tagged module for every
 #                             platform -> dist/, then publish the binaries as
 #                             GitHub release assets on that tag
 #
