@@ -132,7 +132,7 @@
   <p class="host">{{.Host}}</p>
   <p class="who">Signed in as <strong>{{.User}}</strong></p>
   <p class="since">since {{.Since}}</p>
-  <form method="post" action="/auth">
+  <form method="post" action="{{.Door}}">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <button type="submit">Sign out</button>
   </form>
@@ -140,7 +140,7 @@
   <h1>Sign in</h1>
   <p class="host">{{.Host}}</p>
   {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
-  <form method="post" action="/auth" autocomplete="on">
+  <form method="post" action="{{.Door}}" autocomplete="on">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="to" value="{{.To}}">
     <label for="u">User</label>

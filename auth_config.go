@@ -419,6 +419,11 @@ func gatePathMatches(prefix, path string) bool {
 	if prefix == "/" {
 		return true
 	}
+	// Fold case for the match only (never for the path handed upstream):
+	// a case-insensitive backend would otherwise let /ONE/secret slip a
+	// gate written /one/. Matching more can only over-gate, never expose.
+	prefix = strings.ToLower(prefix)
+	path = strings.ToLower(path)
 	trimmed := strings.TrimSuffix(prefix, "/")
 	if path == trimmed || path == prefix {
 		return true

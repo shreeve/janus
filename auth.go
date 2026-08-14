@@ -48,6 +48,7 @@ type authPageData struct {
 	Since string
 	CSRF  string
 	To    string
+	Door  string
 	Error string
 }
 
@@ -887,6 +888,7 @@ func (h *Handler) serveAuthPage(w http.ResponseWriter, r *http.Request, g *authG
 	data := authPageData{
 		Host: normalizeHostHeader(r.Host),
 		CSRF: token,
+		Door: gateDoor(g.prefix),
 	}
 	if user, issuedAt, ok := h.authPageSession(r); ok {
 		data.User = user
@@ -1000,6 +1002,7 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 			Host:  normalizeHostHeader(r.Host),
 			CSRF:  r.PostForm.Get("csrf"),
 			To:    to,
+			Door:  gateDoor(g.prefix),
 			Error: "Invalid credentials",
 		})
 	}
@@ -1045,7 +1048,7 @@ func authSetCookie(w http.ResponseWriter, name, value string, maxAge int) {
 		Path:     "/",
 		Secure:   true,
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   maxAge,
 	})
 }
