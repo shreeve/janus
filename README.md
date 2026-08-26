@@ -263,7 +263,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.6.5 \
+  --with github.com/shreeve/janus@v1.6.7 \
   --output ./caddy
 ```
 
@@ -273,31 +273,37 @@ Confirm the module is linked:
 ./bin/caddy-janus list-modules | grep janus
 ```
 
-### Prebuilt binaries
+### Prebuilt releases
 
-Every release publishes static single-file binaries as GitHub release
-assets, named `caddy-janus-<tag>-<GOOS>-<GOARCH>`:
+The tagged release workflow publishes five self-contained archives:
+
+| Platform | Archive |
+| --- | --- |
+| macOS Apple Silicon | `janus-<tag>-osx-arm64.tar.gz` |
+| Linux x86-64 | `janus-<tag>-linux-amd64.tar.gz` |
+| Linux ARM64 | `janus-<tag>-linux-arm64.tar.gz` |
+| Windows x86-64 | `janus-<tag>-windows-amd64.zip` |
+| Windows ARM64 | `janus-<tag>-windows-arm64.zip` |
+
+Download the matching archive from the
+[releases page](https://github.com/shreeve/janus/releases), extract it,
+and run `caddy-janus` (`caddy-janus.exe` on Windows). Each archive also
+contains `Caddyfile.example`, the README, and the license. The release's
+`janus-<tag>-checksums.txt` verifies every archive.
+
+Release builds run on native GitHub runners and compile from the pushed tag,
+so `list-modules --versions` on a downloaded binary reports the exact Janus
+version. Pushing a `v*` tag runs the release workflow automatically.
+
+For a local development build:
 
 ```bash
-curl -fsSLo caddy-janus \
-  https://github.com/shreeve/janus/releases/download/v1.6.5/caddy-janus-v1.6.5-darwin-arm64
-chmod +x caddy-janus
-./caddy-janus version
+make janus              # working tree -> bin/caddy-janus
+make unit               # fast Go test suite
+make test               # build + unit + acceptance suite
+make install            # build + install -> /usr/local/bin/caddy-janus
+# make install BIN="$HOME/bin"
 ```
-
-Platforms: `darwin-arm64`, `linux-amd64`, `linux-arm64`, and
-`windows-amd64` (with `.exe`).
-
-[`release.sh`](release.sh) drives both build modes:
-
-```bash
-./release.sh           # dev: build the working tree -> bin/caddy-janus
-./release.sh v1.6.5    # cross-compile the pushed tag and publish release assets
-```
-
-Release builds compile from the tag (never the working tree), so
-`build-info` on a downloaded binary reports the exact Janus module
-version and checksum.
 
 ## JSON config
 

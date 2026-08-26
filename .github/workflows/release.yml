@@ -1,0 +1,124 @@
+# Release — push a v* tag and five self-contained Janus archives appear on the
+# GitHub Release: osx-arm64, linux-amd64, linux-arm64, windows-amd64, and
+# windows-arm64. Each archive contains the static Caddy+Janus binary, the
+# operator-facing Caddyfile, README, and license.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./...
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15,        plat: osx-arm64,     goos: darwin,  goarch: arm64 }
+          - { runner: ubuntu-24.04,     plat: linux-amd64,   goos: linux,   goarch: amd64 }
+          - { runner: ubuntu-24.04-arm, plat: linux-arm64,   goos: linux,   goarch: arm64 }
+          - { runner: windows-2025,     plat: windows-amd64, goos: windows, goarch: amd64 }
+          - { runner: windows-11-arm,   plat: windows-arm64, goos: windows, goarch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install xcaddy
+        shell: bash
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # Tagged builds resolve the pushed module tag directly, so Caddy's
+      # build-info records the exact Janus version and module checksum.
+      # workflow_dispatch builds the checked-out tree for pre-release testing.
+      - name: Build Caddy + Janus
+        shell: bash
+        run: |
+          caddy_version=$(awk '$1 == "github.com/caddyserver/caddy/v2" { print $2 }' go.mod)
+          module=github.com/shreeve/janus=.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            module="github.com/shreeve/janus@$GITHUB_REF_NAME"
+            export GOPRIVATE=github.com/shreeve/janus
+          fi
+          suffix=
+          [[ "${{ matrix.goos }}" == windows ]] && suffix=.exe
+          mkdir -p bin
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            xcaddy build "$caddy_version" --with "$module" \
+              --output "bin/caddy-janus$suffix"
+
+      - name: Package
+        shell: bash
+        run: |
+          TAG="$GITHUB_REF_NAME" PLAT=${{ matrix.plat }} scripts/package-release.sh
+
+      - name: Smoke-test packaged archive
+        shell: bash
+        run: |
+          name="janus-$GITHUB_REF_NAME-${{ matrix.plat }}"
+          mkdir -p "$RUNNER_TEMP/janus-smoke"
+          if [[ "${{ matrix.goos }}" == windows ]]; then
+            7z x "dist/$name.zip" -o"$RUNNER_TEMP/janus-smoke" -y >/dev/null
+            exe="$RUNNER_TEMP/janus-smoke/$name/caddy-janus.exe"
+          else
+            tar -C "$RUNNER_TEMP/janus-smoke" -xzf "dist/$name.tar.gz"
+            exe="$RUNNER_TEMP/janus-smoke/$name/caddy-janus"
+          fi
+          "$exe" version
+          "$exe" list-modules --versions | grep '^janus ' >/dev/null
+          "$exe" adapt \
+            --config "$RUNNER_TEMP/janus-smoke/$name/Caddyfile.example" \
+            --adapter caddyfile >/dev/null
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            "$exe" list-modules --versions | \
+              grep "^janus ${GITHUB_REF_NAME#v}$" >/dev/null
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: janus-${{ github.ref_name }}-${{ matrix.plat }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with: { merge-multiple: true }
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          caddy_version=$(awk '$1 == "github.com/caddyserver/caddy/v2" { print $2 }' go.mod)
+          sha256sum janus-*.tar.gz janus-*.zip > "janus-$GITHUB_REF_NAME-checksums.txt"
+          gh release create "$GITHUB_REF_NAME" \
+            janus-*.tar.gz janus-*.zip "janus-$GITHUB_REF_NAME-checksums.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Janus $GITHUB_REF_NAME" \
+            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes the Caddy+Janus binary, Caddyfile.example, README, and license."

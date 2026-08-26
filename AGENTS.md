@@ -133,12 +133,12 @@ SNI picks the site (`off.ripdev.io`, `on.ripdev.io`, …). No `curl -k`.
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
 
-go test ./...          # developer / unit
-./test.sh              # acceptance (foreground!) — builds testkit and caddy itself
+make unit              # developer / unit
+make test              # build + unit + acceptance (foreground!)
 
-xcaddy build --with github.com/shreeve/janus=. --output ./bin/caddy
-./bin/caddy validate   # Caddyfile.example: add --config … --adapter caddyfile
-./bin/caddy run
+make janus
+./bin/caddy-janus validate   # Caddyfile.example: add --config … --adapter caddyfile
+./bin/caddy-janus run
 ```
 
 Rebuild after Go changes; `bin/` is gitignored.
