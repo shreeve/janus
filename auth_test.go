@@ -353,12 +353,13 @@ func TestPasshashMintVerifyRoundTrip(t *testing.T) {
 
 func TestPasshashRejections(t *testing.T) {
 	good := strings.TrimPrefix(testCred(t, "open-sesame"), passPrefix)
+	missingPrefix := "A" + good[1:]
 	cases := []struct {
 		name string
 		blob string
 		want string
 	}{
-		{"missing prefix", good, "got 31 chars, want 32"},
+		{"missing prefix", missingPrefix, "got 31 chars, want 32"},
 		{"unknown letter short", "zAAAA", "unknown version tag"},
 		{"future b", "b" + good, "unknown version tag"},
 		{"dash", passPrefix + strings.Repeat("A", passEncLen-1) + "-", "alphabet is"},
