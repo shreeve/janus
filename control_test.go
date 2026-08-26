@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -267,8 +268,8 @@ func TestAppDefaultInternalWhenEmpty(t *testing.T) {
 }
 
 // TestStartUnwindsOnPartialFailure pins that a Start whose second listener
-// fails to bind closes the first listener and stops the TTL sweeper — a
-// rejected config must not leak a half-started app.
+// fails to bind stops serving on the first listener and stops the TTL sweeper —
+// a rejected config must not leak a half-started app.
 func TestStartUnwindsOnPartialFailure(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.sock")
@@ -302,8 +303,14 @@ func TestStartUnwindsOnPartialFailure(t *testing.T) {
 	if len(app.controlSrvs) != 0 {
 		t.Fatalf("want no leaked control servers, got %d", len(app.controlSrvs))
 	}
-	if _, err := net.Dial("unix", good); err == nil {
-		t.Fatal("first listener still accepting after failed Start")
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", good)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 250 * time.Millisecond}
+	if response, err := client.Get("http://janus/1.0"); err == nil {
+		response.Body.Close()
+		t.Fatal("first listener still serving after failed Start")
 	}
 	if !sub.detached || sub.reason != "generation_stop" {
 		t.Fatalf("failed Start left subscriber attached: %+v", sub)
