@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # package-release.sh — assemble one platform's self-contained release archive.
 #
-#   TAG=v1.6.7 PLAT=osx-arm64 scripts/package-release.sh
+#   TAG=v1.6.8 PLAT=osx-arm64 scripts/package-release.sh
 #
 # The workflow builds bin/caddy-janus[.exe] first. This script packages that
 # static binary with the operator-facing configuration, README, and license.
@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TAG=${TAG:?package-release: set TAG (for example, v1.6.7)}
+TAG=${TAG:?package-release: set TAG (for example, v1.6.8)}
 PLAT=${PLAT:?package-release: set PLAT}
 OUT=${OUT:-dist}
 

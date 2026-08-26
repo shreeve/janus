@@ -91,7 +91,8 @@ jobs:
             --adapter caddyfile >/dev/null
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             "$exe" list-modules --versions | \
-              grep "^janus ${GITHUB_REF_NAME#v}$" >/dev/null
+              awk -v version="$GITHUB_REF_NAME" \
+                '$1 == "janus" && $2 == version { found=1 } END { exit !found }'
           fi
 
       - uses: actions/upload-artifact@v7
