@@ -294,7 +294,7 @@ func (h *Handler) serveBrowseListing(w http.ResponseWriter, r *http.Request, roo
 			continue
 		}
 		entry := BrowseEntry{
-			Name: name, Size: info.Size(), SizeText: humanize.Bytes(uint64(max(info.Size(), 0))),
+			Name: strings.ToValidUTF8(name, "�"), Size: info.Size(), SizeText: humanize.Bytes(uint64(max(info.Size(), 0))),
 			Modified: info.ModTime(), ModifiedText: info.ModTime().UTC().Format(time.RFC3339),
 		}
 		escaped := baseEscaped + url.PathEscape(name)

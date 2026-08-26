@@ -135,9 +135,17 @@ func (a *App) stopControlListeners() error {
 	var mu sync.Mutex
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// Shutdown closes each pooled listener; Caddy unlinks a unix socket
-	// only when its last user closes, so a reload's overlapping app keeps
-	// the socket file.
+	// Close our listener handles before Shutdown. A failed Start can unwind
+	// immediately after launching Serve; closing here prevents that goroutine
+	// from racing past Shutdown's listener bookkeeping and accepting afterward.
+	// Caddy's pooled listener remains live when another generation shares it.
+	for _, s := range a.controlSrvs {
+		if err := s.ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) && first == nil {
+			first = err
+		}
+	}
+	// Shutdown now drains active connections. Caddy unlinks a unix socket only
+	// when the last pooled listener closes, so an overlapping app keeps it live.
 	for _, s := range a.controlSrvs {
 		wg.Add(1)
 		go func(s *controlServer) {
