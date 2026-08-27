@@ -253,6 +253,9 @@ func TestHeartbeatTTLFromEnv(t *testing.T) {
 		{"", defaultHeartbeatTTL, true},
 		{"2s", 2 * time.Second, true},
 		{"150ms", 150 * time.Millisecond, true},
+		{"3ms", 3 * time.Millisecond, true},
+		{"2ms", 0, false},
+		{"1ns", 0, false},
 		{"0", 0, false},
 		{"-5s", 0, false},
 		{"fifteen", 0, false},
@@ -269,4 +272,20 @@ func TestHeartbeatTTLFromEnv(t *testing.T) {
 			t.Fatalf("%q: want loud rejection, got %v", tt.val, got)
 		}
 	}
+}
+
+func TestSweeperFloorsTinyTickerInterval(t *testing.T) {
+	r := newAppRegistry()
+	// Bypass public validation to pin the sweeper's internal defense.
+	r.ttl = time.Nanosecond
+	rec, err := r.create("tiny", []string{"tiny.example.com"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.startSweeper(nil)
+	defer r.stopSweeper()
+	waitFor(t, "tiny-TTL sweeper to reap without panicking", func() bool {
+		_, err := r.get(rec.ID)
+		return err != nil
+	})
 }

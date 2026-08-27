@@ -51,8 +51,7 @@ const (
 // upstreamState is per-socket passive health, least-conn accounting, and the
 // socket's reusable proxy. Doorbell sockets never get an entry: they are
 // excluded from health. inflight and unhealthyUntil are atomics so release
-// and health marking never touch dp.mu — the request path acquires the
-// global mutex exactly once, in acquireUpstream.
+// and health marking never touch a shared selection lock.
 type upstreamState struct {
 	inflight       atomic.Int64
 	unhealthyUntil atomic.Int64 // time.Time UnixNano; 0 = never marked
@@ -78,9 +77,17 @@ type dataPlane struct {
 	// proxy's own default size) — without it every response copy allocates.
 	buffers *bufferPool
 
-	mu      sync.Mutex
+	// stateMu protects only membership and proxy initialization. Health and
+	// load counters live in stable entries and are atomic on the hot path.
+	stateMu sync.RWMutex
 	state   map[string]*upstreamState // socket path → health + inflight + proxy
-	flights map[string]*ringFlight    // app id → the one outstanding ring
+
+	// selectFallback is used only by direct callers that do not have a
+	// registry-backed AppRecord (principally focused unit tests).
+	selectFallback sync.Mutex
+
+	mu      sync.Mutex
+	flights map[string]*ringFlight // app id → the one outstanding ring
 }
 
 // proxyBufSize is the ReverseProxy copy-buffer size (the proxy's own default).
@@ -130,7 +137,6 @@ func (dp *dataPlane) serve(w http.ResponseWriter, r *http.Request) error {
 		accessFactsOf(r).clearOwner()
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
-	accessFactsOf(r).setOwner(rec)
 	return dp.serveResolved(w, r, host, rec)
 }
 
@@ -325,7 +331,7 @@ func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, rec Ap
 	var tried map[string]bool // allocated lazily: only a retry needs it
 	sawBusy := false
 	for {
-		path, st, ok := dp.acquireUpstream(rec.Upstreams, tried)
+		path, st, ok := dp.acquireUpstream(rec.Upstreams, tried, rec.selectMu)
 		if !ok {
 			if sawBusy {
 				// Every upstream bounced a marked 503 — capacity, not
@@ -357,23 +363,29 @@ func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, rec Ap
 // in-flight requests (uniform random among ties, via reservoir sampling so
 // no ties slice is built under the lock), charges it one in-flight, and
 // returns its state — the proxy, the lock-free release, and health marking
-// all ride the returned pointer, so this is the request's only dp.mu
-// acquisition.
-func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool) (string, *upstreamState, bool) {
+// all ride the returned pointer. Selection is serialized per app so unrelated
+// tenants do not contend with one another.
+func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool, selection *sync.Mutex) (string, *upstreamState, bool) {
 	now := time.Now().UnixNano()
-	dp.mu.Lock()
-	defer dp.mu.Unlock()
+	if selection == nil {
+		selection = &dp.selectFallback
+	}
+	selection.Lock()
+	defer selection.Unlock()
 
+	dp.stateMu.RLock()
 	var best int64
 	bestIdx := -1
+	var bestSt *upstreamState
 	ties := 0
 	for i := range ups {
 		u := &ups[i]
 		if u.Doorbell || tried[u.Path] {
 			continue
 		}
+		st := dp.state[u.Path]
 		var inflight int64
-		if st := dp.state[u.Path]; st != nil {
+		if st != nil {
 			if until := st.unhealthyUntil.Load(); until != 0 && now < until {
 				continue
 			}
@@ -383,18 +395,30 @@ func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool) (str
 		case bestIdx == -1 || inflight < best:
 			best = inflight
 			bestIdx = i
+			bestSt = st
 			ties = 1
 		case inflight == best:
 			ties++
 			if rand.IntN(ties) == 0 {
 				bestIdx = i
+				bestSt = st
 			}
 		}
 	}
+	// Steady state: the socket's state and proxy already exist, so charge
+	// and return under the shared lock — the process-wide exclusive lock is
+	// only for a socket's first touch, never a per-request serialization point.
+	if bestSt != nil && bestSt.proxy != nil {
+		bestSt.inflight.Add(1)
+		dp.stateMu.RUnlock()
+		return ups[bestIdx].Path, bestSt, true
+	}
+	dp.stateMu.RUnlock()
 	if bestIdx == -1 {
 		return "", nil, false
 	}
 	path := ups[bestIdx].Path
+	dp.stateMu.Lock()
 	st := dp.state[path]
 	if st == nil {
 		st = &upstreamState{}
@@ -403,6 +427,7 @@ func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool) (str
 	if st.proxy == nil {
 		st.proxy = dp.newProxy(path)
 	}
+	dp.stateMu.Unlock()
 	st.inflight.Add(1)
 	return path, st, true
 }
@@ -437,13 +462,13 @@ func (dp *dataPlane) markMidResponseFailure(at *attemptState, r *http.Request, p
 // stays valid after the map entry drops.
 func (dp *dataPlane) pruneState() {
 	referenced := dp.registry.allUpstreamPaths()
-	dp.mu.Lock()
+	dp.stateMu.Lock()
 	for path := range dp.state {
 		if !referenced[path] {
 			delete(dp.state, path)
 		}
 	}
-	dp.mu.Unlock()
+	dp.stateMu.Unlock()
 }
 
 // upstreamHealth reports how many of the given upstreams are currently
@@ -454,8 +479,8 @@ func (dp *dataPlane) pruneState() {
 // path uses; never called on a hot path.
 func (dp *dataPlane) upstreamHealth(ups []Upstream) (total, healthy int) {
 	now := time.Now().UnixNano()
-	dp.mu.Lock()
-	defer dp.mu.Unlock()
+	dp.stateMu.RLock()
+	defer dp.stateMu.RUnlock()
 	for i := range ups {
 		total++
 		if ups[i].Doorbell {
@@ -581,6 +606,11 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 			pr.SetXForwarded()
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			if authWallActive(resp.Request.Context()) {
+				// Strip before ReverseProxy can commit a streaming response or
+				// hijack a 101 connection and write its headers directly.
+				stripReservedAuthCookies(resp.Header)
+			}
 			markValues, markPresent := headerValues(resp.Header, ripMarkHeader)
 			resp.Header.Del(ripMarkHeader)
 			scrubTrailerDeclaration(resp.Header, ripMarkHeader)

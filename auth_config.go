@@ -35,11 +35,11 @@ const (
 	authToCap       = 2048
 
 	// Login throttle ladder waits (after the Nth failed attempt).
-	authThrottleWait4   = 10 * time.Second
-	authThrottleWait5   = 60 * time.Second
-	authThrottleWait6   = 300 * time.Second
-	authThrottleBan     = 24 * time.Hour
-	authThrottleBanAt   = 7 // fails >= 7 → 24h ban
+	authThrottleWait4      = 10 * time.Second
+	authThrottleWait5      = 60 * time.Second
+	authThrottleWait6      = 300 * time.Second
+	authThrottleBan        = 24 * time.Hour
+	authThrottleBanAt      = 7 // fails >= 7 → 24h ban
 	authThrottleMaxEntries = 65536
 
 	// Argon2 verification concurrency: at most authVerifyConcurrency
@@ -62,7 +62,7 @@ const (
 	passSaltLen  = 8
 	passKeyLen   = 15
 	passRawLen   = passSaltLen + passKeyLen // 23
-	passEncLen   = 31                   // base62 digits for 23 bytes
+	passEncLen   = 31                       // base62 digits for 23 bytes
 	passAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
 
@@ -326,7 +326,7 @@ func normalizeGatePrefix(raw string) (string, error) {
 		return "", fmt.Errorf("path %q must not contain //", raw)
 	}
 	if strings.Contains(raw, "..") {
-		return "", fmt.Errorf("path %q must not contain ..", raw)
+		return "", fmt.Errorf("path %q must not contain dot-dot", raw)
 	}
 	if strings.ContainsAny(raw, " \t\r\n") {
 		return "", fmt.Errorf("path %q must not contain whitespace", raw)
@@ -701,20 +701,22 @@ type authSiteEntry struct {
 	cfg      *authSite
 }
 
-// startAuth runs the cross-site Start work: build the site table, revoke
-// sessions whose user appears in no enabled site's resolved set (counted
-// and logged), and refresh the reaper's idle bound to the max effective
-// ttl. Runs at App Start — past the reload's point of no return — so an
-// aborted reload never logs users out; with the per-request set check
-// this revocation is promptness, not the security boundary.
-func (a *App) startAuth() error {
+// prepareAuth builds the generation-local site table during Start. It does
+// not mutate the pooled store: Caddy can still reject another app afterward.
+func (a *App) prepareAuth() error {
 	if a.state == nil || a.state.auth == nil {
 		return nil // no pooled state (native-config edge): nothing to reconcile
 	}
-	if err := a.buildAuthSiteTable(); err != nil {
-		return err
+	return a.buildAuthSiteTable()
+}
+
+// reconcileAuth applies irreversible pooled-store changes only after the new
+// generation is known to be active. Per-request gate checks remain the
+// security boundary while this prompt cleanup waits for Caddy's commit.
+func (a *App) reconcileAuth() {
+	if a.state == nil || a.state.auth == nil {
+		return
 	}
-	keep := map[string]bool{}
 	maxTTL := authDefaultTTL
 	enabled := false
 	for _, e := range a.authSites {
@@ -722,22 +724,52 @@ func (a *App) startAuth() error {
 			continue
 		}
 		enabled = true
-		for name := range e.cfg.users {
-			keep[name] = true
-		}
 		if e.cfg.ttl > maxTTL {
 			maxTTL = e.cfg.ttl
 		}
 	}
 	st := a.state.auth
 	st.reapTTL.Store(int64(maxTTL))
-	if n := st.revokeUsersNotIn(keep); n > 0 {
-		a.logger.Warn("janus auth: sessions revoked at reload (user absent from every enabled site's resolved set)",
-			zap.Int("revoked", n),
+	st.mu.Lock()
+	revoked := 0
+	for key, session := range st.sessions {
+		if !a.authSessionAllowed(session.user, session.host) {
+			delete(st.sessions, key)
+			revoked++
+		}
+	}
+	st.mu.Unlock()
+	st.reloadRevoked.Add(int64(revoked))
+	if revoked > 0 {
+		a.logger.Warn("janus auth: sessions revoked at reload (user absent from the minting host's enabled site)",
+			zap.Int("revoked", revoked),
 			zap.Bool("auth_enabled_anywhere", enabled),
 		)
 	}
-	return nil
+}
+
+// authSessionAllowed retains a host-bound session only when its user remains
+// in at least one enabled auth site that matches the minting host. A same-name
+// user on another host must not keep an unreachable stale session alive.
+func (a *App) authSessionAllowed(user, host string) bool {
+	host = strings.ToLower(host)
+	for _, e := range a.authSites {
+		if e.cfg == nil {
+			continue
+		}
+		if _, ok := e.cfg.users[user]; !ok {
+			continue
+		}
+		if len(e.patterns) == 0 {
+			return true
+		}
+		for _, pattern := range e.patterns {
+			if hostMatchesPattern(strings.ToLower(pattern), host) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildAuthSiteTable walks the provisioned HTTP app's servers and
@@ -769,6 +801,13 @@ func collectAuthRoutes(routes caddyhttp.RouteList, hosts []string, entries *[]au
 		for _, handler := range route.Handlers {
 			switch v := handler.(type) {
 			case *Handler:
+				v.authExactHosts = make(map[string]struct{}, len(routeHosts))
+				for _, host := range routeHosts {
+					host = strings.ToLower(host)
+					if !strings.Contains(host, "*") {
+						v.authExactHosts[host] = struct{}{}
+					}
+				}
 				*entries = append(*entries, authSiteEntry{patterns: routeHosts, cfg: v.authCfg})
 			case *caddyhttp.Subroute:
 				collectAuthRoutes(v.Routes, routeHosts, entries)

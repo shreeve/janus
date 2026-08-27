@@ -32,8 +32,8 @@ import (
 // The auth wall (docs/20260728-160734-capability-auth.md). Shared users,
 // path-prefix gates with allow lists, one host-wide session cookie, and
 // strip-then-inject Remote-User. The wall runs in the site handler
-// between ping and hub interception; sessions survive a config reload
-// and die with the process.
+// between ping and hub interception; eligible sessions survive config
+// reloads and all sessions die with the process.
 
 //go:embed auth.html
 var authPageHTML string
@@ -113,8 +113,8 @@ type authThrottleEntry struct {
 // authStore is the pooled session state: per-boot key, live sessions,
 // login throttle windows, the argon2 semaphore, and the /1.0/auth
 // counters. It lives in janusState (caddy.UsagePool) beside the
-// registry: a config reload never logs anyone out; a process restart
-// wipes every session and rotates the key.
+// registry: config reloads preserve eligible sessions while a process
+// restart wipes every session and rotates the key.
 type authStore struct {
 	key [32]byte // per-boot: session-key HMAC + CSRF signing
 
@@ -132,7 +132,7 @@ type authStore struct {
 	verifyWaiting atomic.Int64
 
 	// reapTTL is the slow reaper's idle bound: the max effective ttl
-	// across enabled sites, refreshed at App Start. Per-request expiry
+	// across enabled sites, refreshed after a config commits. Per-request expiry
 	// uses each site's own effective ttl; the reaper only stops an
 	// abandoned store growing forever.
 	reapTTL atomic.Int64 // nanoseconds
@@ -264,13 +264,21 @@ func (st *authStore) mint(user, host string) (string, error) {
 	return token, nil
 }
 
-// lookup resolves a presented token against the requesting site's
-// effective ttl: expired entries are deleted lazily; a live hit slides
-// lastSeen.
-func (st *authStore) lookup(token string, ttl time.Duration) (user string, issuedAt time.Time, ok bool) {
+// lookup resolves a presented token against its minting host and the
+// requesting site's effective ttl. Expired entries are deleted lazily;
+// an authorized call may request a sliding lastSeen refresh.
+func (st *authStore) lookup(token, host string, ttl time.Duration, refresh bool) (user string, issuedAt time.Time, ok bool) {
+	return st.lookupAllowed(token, host, ttl, refresh, nil)
+}
+
+// lookupAllowed combines session validation, gate authorization, and the
+// optional sliding refresh under one HMAC and one store lock. A nil allow set
+// means the caller only needs a host-valid live session.
+func (st *authStore) lookupAllowed(token, host string, ttl time.Duration, refresh bool, allow map[string]bool) (user string, issuedAt time.Time, ok bool) {
 	if token == "" {
 		return "", time.Time{}, false
 	}
+	host = strings.ToLower(host)
 	key := st.sessionKey(token)
 	now := st.now()
 	st.mu.Lock()
@@ -279,12 +287,20 @@ func (st *authStore) lookup(token string, ttl time.Duration) (user string, issue
 	if s == nil {
 		return "", time.Time{}, false
 	}
+	if s.host != host {
+		return "", time.Time{}, false
+	}
 	if now.Sub(s.lastSeen) > ttl {
 		delete(st.sessions, key)
 		st.expired.Add(1)
 		return "", time.Time{}, false
 	}
-	s.lastSeen = now
+	if allow != nil && !allow[s.user] {
+		return "", time.Time{}, false
+	}
+	if refresh {
+		s.lastSeen = now
+	}
 	return s.user, s.issuedAt, true
 }
 
@@ -333,10 +349,9 @@ func (st *authStore) revokeAll() int {
 	return n
 }
 
-// revokeUsersNotIn revokes sessions whose user appears in no enabled
-// site's resolved set. Runs at App Start — past the reload's point of
-// no return, so an aborted reload never logs users out. With the
-// per-request set check this is promptness, not the security boundary.
+// revokeUsersNotIn revokes sessions whose user is absent from keep. The
+// production reload path additionally considers each session's minting host;
+// this helper remains useful for direct store operations and tests.
 func (st *authStore) revokeUsersNotIn(keep map[string]bool) int {
 	st.mu.Lock()
 	n := 0
@@ -655,12 +670,26 @@ func safeTo(raw, gatePrefix string) string {
 			return fallback
 		}
 	}
-	// Path portion for prefix check (ignore query).
-	path := raw
-	if i := strings.IndexByte(raw, '?'); i >= 0 {
-		path = raw[:i]
+	u, err := url.ParseRequestURI(raw)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Fragment != "" {
+		return fallback
 	}
-	if !gatePathMatches(gatePrefix, path) {
+	escaped := u.EscapedPath()
+	for i := 0; i+2 < len(escaped); i++ {
+		if escaped[i] != '%' {
+			continue
+		}
+		value, err := strconv.ParseUint(escaped[i+1:i+3], 16, 8)
+		if err != nil || value == '/' || value == '\\' {
+			return fallback
+		}
+		i += 2
+	}
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil || decoded != u.Path || validateRequestPathString(decoded) != nil {
+		return fallback
+	}
+	if !gatePathMatches(gatePrefix, decoded) {
 		return fallback
 	}
 	return raw
@@ -675,10 +704,20 @@ func safeTo(raw, gatePrefix string) string {
 // response is per-identity must still bypass.
 type authIdentityKey struct{}
 
+// authWallActiveKey marks requests which passed through an enabled auth wall.
+// The data-plane response hook uses it to scrub reserved cookies before even
+// an upgraded or streaming upstream response can commit its headers.
+type authWallActiveKey struct{}
+
 // authIdentityOf reports the authenticated user, or "" pre-wall/off.
 func authIdentityOf(ctx context.Context) string {
 	user, _ := ctx.Value(authIdentityKey{}).(string)
 	return user
+}
+
+func authWallActive(ctx context.Context) bool {
+	active, _ := ctx.Value(authWallActiveKey{}).(bool)
+	return active
 }
 
 // serveAuthWall runs the wall for a site with effective auth on.
@@ -699,8 +738,12 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	}
 
 	gate := cfg.matchGate(path)
-	user, sessOK := h.authSessionUser(r)
-	authorized := sessOK && gate != nil && gate.allow[user]
+	user, authorized := "", false
+	if gate != nil {
+		// Validate, authorize, and refresh in one store transaction. Open paths
+		// and disallowed gates never extend the idle lifetime.
+		user, authorized = h.authSessionAllowed(r, gate.allow)
+	}
 
 	if gate != nil && !authorized {
 		w.Header().Set("Cache-Control", "no-store")
@@ -717,29 +760,25 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	// every proxied request when auth is on.
 	r.Header.Del("Remote-User")
 	stripAuthCookies(r)
+	ctx := context.WithValue(r.Context(), authWallActiveKey{}, true)
 	if authorized {
 		r.Header.Set("Remote-User", user)
-		r = r.WithContext(context.WithValue(r.Context(), authIdentityKey{}, user))
+		ctx = context.WithValue(ctx, authIdentityKey{}, user)
 	}
+	r = r.WithContext(ctx)
 	return r, false, nil
 }
 
-// authSessionUser resolves the session cookie against the store AND this
-// site's users table. Gate allow-list checks happen at the call site.
-func (h *Handler) authSessionUser(r *http.Request) (string, bool) {
+// authSessionAllowed resolves and refreshes a session only when its user is
+// authorized by the winning gate.
+func (h *Handler) authSessionAllowed(r *http.Request, allow map[string]bool) (string, bool) {
 	cfg := h.authCfg
 	c, err := r.Cookie(authCookieName)
 	if err != nil || c.Value == "" {
 		return "", false
 	}
-	user, _, ok := cfg.store.lookup(c.Value, cfg.ttl)
-	if !ok {
-		return "", false
-	}
-	if _, allowed := cfg.users[user]; !allowed {
-		return "", false
-	}
-	return user, true
+	user, _, ok := cfg.store.lookupAllowed(c.Value, normalizeHostHeader(r.Host), cfg.ttl, true, allow)
+	return user, ok
 }
 
 // authRejectPlainHTTP is the dead-wall answer: a site with effective auth
@@ -779,15 +818,27 @@ func stripAuthCookies(r *http.Request) {
 		return
 	}
 	kept := make([]string, 0, 4)
-	for _, c := range r.Cookies() {
-		if c.Name == authCookieName || c.Name == authCSRFCookieName ||
-			strings.HasPrefix(c.Name, authCookieName) {
-			continue
+	for _, line := range r.Header.Values("Cookie") {
+		for _, pair := range strings.Split(line, ";") {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			name := pair
+			if i := strings.IndexByte(pair, '='); i >= 0 {
+				name = strings.TrimSpace(pair[:i])
+			}
+			if authCookieNameReserved(name) {
+				continue
+			}
+			// Keep the original pair bytes, including quoted values. Parsing
+			// through Request.Cookies and rebuilding name=value would silently
+			// remove valid quoting from unrelated tenant cookies.
+			kept = append(kept, pair)
 		}
-		kept = append(kept, c.Name+"="+c.Value)
 	}
+	r.Header.Del("Cookie")
 	if len(kept) == 0 {
-		r.Header.Del("Cookie")
 		return
 	}
 	r.Header.Set("Cookie", strings.Join(kept, "; "))
@@ -810,7 +861,10 @@ func (w *authRespStrip) strip() {
 	if w.wroteHeader {
 		return
 	}
-	h := w.Header()
+	stripReservedAuthCookies(w.Header())
+}
+
+func stripReservedAuthCookies(h http.Header) {
 	vals := h.Values("Set-Cookie")
 	if len(vals) == 0 {
 		return
@@ -819,7 +873,7 @@ func (w *authRespStrip) strip() {
 	for _, v := range vals {
 		name := v
 		if i := strings.IndexByte(v, '='); i >= 0 {
-			name = v[:i]
+			name = strings.TrimSpace(v[:i])
 		}
 		if authCookieNameReserved(name) {
 			continue
@@ -830,7 +884,11 @@ func (w *authRespStrip) strip() {
 
 func (w *authRespStrip) WriteHeader(status int) {
 	w.strip()
-	w.wroteHeader = true
+	// A 1xx informational write (e.g. 103 Early Hints) does not commit the
+	// final header set: the scrub must still run on the real status later.
+	if status >= http.StatusOK {
+		w.wroteHeader = true
+	}
 	w.ResponseWriter.WriteHeader(status)
 }
 
@@ -850,6 +908,9 @@ func (w *authRespStrip) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 func (w *authRespStrip) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -907,7 +968,7 @@ func (h *Handler) authPageSession(r *http.Request) (string, time.Time, bool) {
 	if err != nil || c.Value == "" {
 		return "", time.Time{}, false
 	}
-	user, issuedAt, ok := cfg.store.lookup(c.Value, cfg.ttl)
+	user, issuedAt, ok := cfg.store.lookup(c.Value, normalizeHostHeader(r.Host), cfg.ttl, false)
 	if !ok {
 		return "", time.Time{}, false
 	}
@@ -1039,7 +1100,7 @@ func (h *Handler) serveAuthSignOut(w http.ResponseWriter, r *http.Request, g *au
 }
 
 // authSetCookie writes a __Host- shaped cookie: Secure, HttpOnly,
-// SameSite=Lax, Path=/, no Domain. maxAge 0 = session-scoped (the
+// SameSite=Strict, Path=/, no Domain. maxAge 0 = session-scoped (the
 // server's clock is the sole expiry authority).
 func authSetCookie(w http.ResponseWriter, name, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{

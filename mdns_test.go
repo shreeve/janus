@@ -19,8 +19,6 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/caddyserver/caddy/v2/modules/caddytls"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 // --- parse ---------------------------------------------------------------------
@@ -282,8 +280,9 @@ func TestMdnsDesiredSet(t *testing.T) {
 // --- fake responder ---------------------------------------------------------------
 
 type fakeHandle struct {
-	mu  sync.Mutex
-	srv dnssd.Service
+	mu           sync.Mutex
+	srv          dnssd.Service
+	serviceCalls int
 }
 
 func (h *fakeHandle) UpdateText(map[string]string, dnssd.Responder) {}
@@ -291,7 +290,14 @@ func (h *fakeHandle) UpdateText(map[string]string, dnssd.Responder) {}
 func (h *fakeHandle) Service() dnssd.Service {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.serviceCalls++
 	return h.srv
+}
+
+func (h *fakeHandle) calls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.serviceCalls
 }
 
 // rename models the library's post-announce conflict path: reprobe
@@ -304,19 +310,33 @@ func (h *fakeHandle) rename(host string) {
 }
 
 type fakeResponder struct {
-	mu       sync.Mutex
-	adds     []string
-	removes  []string
-	handles  map[string]*fakeHandle // original host label → live handle
-	renameTo map[string]string      // desired host label → renamed label
-	addErrs  map[string]int         // host label → remaining Add failures
-	addDelay time.Duration
-	die      chan struct{} // closed → Respond returns a non-cancel error
+	mu         sync.Mutex
+	adds       []string
+	removes    []string
+	handles    map[string]*fakeHandle // original host label → live handle
+	renameTo   map[string]string      // desired host label → renamed label
+	addErrs    map[string]int         // host label → remaining Add failures
+	addDelay   time.Duration
+	addStarted chan struct{}
+	addRelease <-chan struct{}
+	die        chan struct{} // closed → Respond returns a non-cancel error
 }
 
 func (f *fakeResponder) Add(srv dnssd.Service) (dnssd.ServiceHandle, error) {
-	if f.addDelay > 0 {
-		time.Sleep(f.addDelay)
+	f.mu.Lock()
+	delay, started, release := f.addDelay, f.addStarted, f.addRelease
+	f.mu.Unlock()
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
+	if delay > 0 {
+		time.Sleep(delay)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -579,6 +599,38 @@ func TestMdnsPostAnnounceRenameSurfaces(t *testing.T) {
 	}
 }
 
+func TestMdnsCarriesDesiredHostWithoutScanningHandles(t *testing.T) {
+	reg := newAppRegistry()
+	if _, err := reg.create("shop", []string{"shop.local"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeResponder{}
+	adv := newTestAdvertiser(t, reg, fake)
+	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
+		t.Fatal(err)
+	}
+	adv.reconcile()
+
+	fake.mu.Lock()
+	front, shop := fake.handles["janus"], fake.handles["shop"]
+	fake.mu.Unlock()
+	before := front.calls() + shop.calls()
+	if !adv.carriesHost("janus.local") || !adv.carriesHost("shop.local") {
+		t.Fatal("desired advertised host was not carried")
+	}
+	if after := front.calls() + shop.calls(); after != before {
+		t.Fatalf("desired-host lookup scanned live handles: calls %d -> %d", before, after)
+	}
+
+	front.rename("janus-2")
+	if !adv.carriesHost("janus-2.local") {
+		t.Fatal("post-announce effective name was not carried immediately")
+	}
+	if after := front.calls() + shop.calls(); after <= before {
+		t.Fatal("renamed-host fallback did not consult live handles")
+	}
+}
+
 // TestMdnsFailedAddRetries pins the must-fix: a failed responder.Add
 // leaves the entry visible on /1.0/mdns as "failed" (never silently
 // absent) and the next reconcile pass — the periodic cadence in
@@ -776,34 +828,21 @@ func TestMdnsNotifyNeverBlocks(t *testing.T) {
 	}
 }
 
-// --- aborted-reload detection -----------------------------------------------------
+// --- aborted-reload rollback --------------------------------------------------
 
-// TestMdnsAbortedReloadDetection pins the owner ruling on the
-// failed-reload flag: an aborted config reload leaves the pooled
-// advertiser running the aborted generation's settings (rollback is
-// deliberately not performed), and the aborted generation's teardown —
-// it is still the advertiser's most recent configurer while an older
-// generation survives — ERROR-logs the divergence with both
-// configurations. The normal paths (successful reload handover, process
-// shutdown, first boot, and an abort whose mdns settings match the
-// survivor's) never log it.
-func TestMdnsAbortedReloadDetection(t *testing.T) {
+func TestMdnsAbortedReloadRollback(t *testing.T) {
 	cfgA := &mdnsConfig{name: "janus.local", port: 80, apps: true, listen: ":80"}
 	cfgB := &mdnsConfig{name: "edge.local", port: 7680, apps: false, listen: ":7680",
 		canonical: "https://janus.lan.ripdev.io"}
-	newObserved := func() (*mdnsAdvertiser, *observer.ObservedLogs) {
-		core, logs := observer.New(zapcore.DebugLevel)
-		adv := newMdnsAdvertiser(newAppRegistry(), zap.New(core))
+	newAdvertiser := func() *mdnsAdvertiser {
+		adv := newMdnsAdvertiser(newAppRegistry(), zap.NewNop())
 		adv.newResponder = func() (dnssd.Responder, error) { return &fakeResponder{}, nil }
-		return adv, logs
-	}
-	divergence := func(logs *observer.ObservedLogs) []observer.LoggedEntry {
-		return logs.FilterMessage(mdnsAbortedReloadMsg).All()
+		return adv
 	}
 	genA, genB := "generation-A", "generation-B"
 
-	t.Run("aborted reload fires", func(t *testing.T) {
-		adv, logs := newObserved()
+	t.Run("changed settings", func(t *testing.T) {
+		adv := newAdvertiser()
 		if err := adv.configure(genA, cfgA); err != nil {
 			t.Fatal(err)
 		}
@@ -811,33 +850,25 @@ func TestMdnsAbortedReloadDetection(t *testing.T) {
 		if err := adv.configure(genB, cfgB); err != nil {
 			t.Fatal(err)
 		}
-		adv.generationRetired(genB) // B torn down while A survives
-		entries := divergence(logs)
-		if len(entries) != 1 {
-			t.Fatalf("divergence logs = %d, want 1", len(entries))
+		adv.reconcile() // rejected settings may reach the wire before Caddy aborts
+		if snap := adv.snapshot(cfgB.name); len(snap.entries) != 1 || snap.entries[0].Name != cfgB.name {
+			t.Fatalf("rejected configuration did not converge before rollback: %+v", snap.entries)
 		}
-		e := entries[0]
-		if e.Level != zapcore.ErrorLevel {
-			t.Fatalf("level = %v, want ERROR", e.Level)
+		adv.generationRetired(genB)
+		adv.reconcile()
+		adv.mu.Lock()
+		gotCfg, gotGen := adv.cfg, adv.lastGen
+		adv.mu.Unlock()
+		if !gotCfg.equal(cfgA) || gotGen != genA {
+			t.Fatalf("rollback cfg=%s gen=%v, want %s/%v", gotCfg.describe(), gotGen, cfgA.describe(), genA)
 		}
-		fields := e.ContextMap()
-		running, _ := fields["running"].(string)
-		expected, _ := fields["expected"].(string)
-		for _, want := range []string{"name=edge.local", "listen=:7680", "apps=false",
-			`canonical="https://janus.lan.ripdev.io"`} {
-			if !strings.Contains(running, want) {
-				t.Errorf("running %q missing %q", running, want)
-			}
-		}
-		for _, want := range []string{"name=janus.local", "listen=:80", "apps=true"} {
-			if !strings.Contains(expected, want) {
-				t.Errorf("expected %q missing %q", expected, want)
-			}
+		if snap := adv.snapshot(cfgA.name); len(snap.entries) != 1 || snap.entries[0].Name != cfgA.name {
+			t.Fatalf("restored configuration did not reconverge: %+v", snap.entries)
 		}
 	})
 
-	t.Run("aborted reload that disabled mdns fires", func(t *testing.T) {
-		adv, logs := newObserved()
+	t.Run("rejected disable", func(t *testing.T) {
+		adv := newAdvertiser()
 		if err := adv.configure(genA, cfgA); err != nil {
 			t.Fatal(err)
 		}
@@ -845,18 +876,25 @@ func TestMdnsAbortedReloadDetection(t *testing.T) {
 		if err := adv.configure(genB, nil); err != nil {
 			t.Fatal(err)
 		}
-		adv.generationRetired(genB)
-		entries := divergence(logs)
-		if len(entries) != 1 {
-			t.Fatalf("divergence logs = %d, want 1", len(entries))
+		adv.reconcile()
+		if snap := adv.snapshot(""); len(snap.entries) != 0 {
+			t.Fatalf("rejected disable did not converge before rollback: %+v", snap.entries)
 		}
-		if running, _ := entries[0].ContextMap()["running"].(string); running != "disabled" {
-			t.Fatalf("running = %q, want %q", running, "disabled")
+		adv.generationRetired(genB)
+		adv.reconcile()
+		adv.mu.Lock()
+		got := adv.cfg
+		adv.mu.Unlock()
+		if !got.equal(cfgA) {
+			t.Fatalf("rollback cfg=%s, want %s", got.describe(), cfgA.describe())
+		}
+		if snap := adv.snapshot(cfgA.name); len(snap.entries) != 1 || snap.entries[0].Name != cfgA.name {
+			t.Fatalf("restored configuration did not reconverge: %+v", snap.entries)
 		}
 	})
 
-	t.Run("successful handover stays silent", func(t *testing.T) {
-		adv, logs := newObserved()
+	t.Run("successful handover does not roll back", func(t *testing.T) {
+		adv := newAdvertiser()
 		if err := adv.configure(genA, cfgA); err != nil {
 			t.Fatal(err)
 		}
@@ -865,59 +903,126 @@ func TestMdnsAbortedReloadDetection(t *testing.T) {
 			t.Fatal(err)
 		}
 		adv.reconcile()
-		adv.generationRetired(genA) // the old generation retires; B configured last
-		if n := len(divergence(logs)); n != 0 {
-			t.Fatalf("handover logged %d divergences", n)
+		adv.generationRetired(genA)
+		adv.mu.Lock()
+		gotCfg, gotGen, gotPrevCfg, gotPrevGen := adv.cfg, adv.lastGen, adv.prevCfg, adv.prevGen
+		adv.mu.Unlock()
+		if !gotCfg.equal(cfgB) || gotGen != genB {
+			t.Fatalf("handover cfg=%s gen=%v, want %s/%v", gotCfg.describe(), gotGen, cfgB.describe(), genB)
+		}
+		if gotPrevCfg != nil || gotPrevGen != nil {
+			t.Fatalf("successful handover retained predecessor cfg=%v gen=%v", gotPrevCfg, gotPrevGen)
 		}
 	})
 
-	t.Run("process shutdown stays silent", func(t *testing.T) {
-		adv, logs := newObserved()
-		adv.run()
-		if err := adv.configure(genA, cfgA); err != nil {
-			t.Fatal(err)
-		}
-		adv.shutdown() // last reference: generationRetired is never invoked
-		if n := len(divergence(logs)); n != 0 {
-			t.Fatalf("shutdown logged %d divergences", n)
-		}
-	})
-
-	t.Run("first boot stays silent", func(t *testing.T) {
-		adv, logs := newObserved()
+	t.Run("in-flight add cannot outlive rollback", func(t *testing.T) {
+		fake := &fakeResponder{}
+		adv := newTestAdvertiser(t, newAppRegistry(), fake)
 		if err := adv.configure(genA, cfgA); err != nil {
 			t.Fatal(err)
 		}
 		adv.reconcile()
-		if n := len(divergence(logs)); n != 0 {
-			t.Fatalf("first boot logged %d divergences", n)
+
+		started := make(chan struct{}, 1)
+		release := make(chan struct{})
+		fake.mu.Lock()
+		fake.addStarted = started
+		fake.addRelease = release
+		fake.mu.Unlock()
+		if err := adv.configure(genB, cfgB); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan struct{})
+		go func() {
+			adv.reconcile()
+			close(done)
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("rejected generation never entered responder Add")
+		}
+
+		adv.generationRetired(genB)
+		close(release)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("stale responder Add did not finish")
+		}
+		adv.mu.Lock()
+		gotCfg, gotGen := adv.cfg, adv.lastGen
+		for _, entry := range adv.entries {
+			if entry.handle != nil {
+				adv.mu.Unlock()
+				t.Fatalf("stale Add handle survived rollback for %s", entry.name)
+			}
+		}
+		adv.mu.Unlock()
+		if !gotCfg.equal(cfgA) || gotGen != genA {
+			t.Fatalf("rollback cfg=%s gen=%v, want %s/%v", gotCfg.describe(), gotGen, cfgA.describe(), genA)
+		}
+		if adds, removes := fake.counts(); adds != 2 || removes != 2 {
+			t.Fatalf("stale Add cleanup adds=%d removes=%d, want 2/2", adds, removes)
+		}
+
+		adv.reconcile()
+		if snap := adv.snapshot(cfgA.name); len(snap.entries) != 1 || snap.entries[0].Name != cfgA.name {
+			t.Fatalf("restored configuration did not reconverge: %+v", snap.entries)
 		}
 	})
 
-	t.Run("identical-settings abort stays silent", func(t *testing.T) {
-		adv, logs := newObserved()
+	t.Run("in-flight add cannot stall identical handoff", func(t *testing.T) {
+		fake := &fakeResponder{}
+		started := make(chan struct{}, 1)
+		release := make(chan struct{})
+		fake.addStarted = started
+		fake.addRelease = release
+		adv := newTestAdvertiser(t, newAppRegistry(), fake)
 		if err := adv.configure(genA, cfgA); err != nil {
 			t.Fatal(err)
 		}
-		adv.reconcile()
-		same := &mdnsConfig{name: "janus.local", port: 80, apps: true, listen: ":80"}
-		if err := adv.configure(genB, same); err != nil {
+		done := make(chan struct{})
+		go func() {
+			adv.reconcile()
+			close(done)
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("first generation never entered responder Add")
+		}
+		cfgSame := &mdnsConfig{name: cfgA.name, port: cfgA.port, apps: cfgA.apps, listen: cfgA.listen}
+		if err := adv.configure(genB, cfgSame); err != nil {
 			t.Fatal(err)
 		}
-		adv.generationRetired(genB) // nothing diverged; a false ERROR would be its own bug
-		if n := len(divergence(logs)); n != 0 {
-			t.Fatalf("identical-settings abort logged %d divergences", n)
+		close(release)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("stale responder Add did not finish")
+		}
+
+		adv.reconcile()
+		snap := adv.snapshot(cfgSame.name)
+		if len(snap.entries) != 1 || snap.entries[0].State != mdnsStateAnnounced {
+			t.Fatalf("identical handoff remained stuck after stale Add: %+v", snap.entries)
+		}
+		if adds, removes := fake.counts(); adds != 2 || removes != 1 {
+			t.Fatalf("identical handoff Add cleanup adds=%d removes=%d, want 2/1", adds, removes)
+		}
+		adv.generationRetired(genA)
+		adv.mu.Lock()
+		prevCfg, prevGen := adv.prevCfg, adv.prevGen
+		adv.mu.Unlock()
+		if prevCfg != nil || prevGen != nil {
+			t.Fatalf("identical handoff retained predecessor cfg=%v gen=%v", prevCfg, prevGen)
 		}
 	})
 }
 
-// TestMdnsAbortedReloadDetectionThroughCleanup pins the seam itself:
-// App.Cleanup invokes the detector only when the pool release leaves a
-// surviving generation (janusPool.Delete returns deleted == false); the
-// last release destructs the pooled state with no divergence log.
-func TestMdnsAbortedReloadDetectionThroughCleanup(t *testing.T) {
-	core, logs := observer.New(zapcore.DebugLevel)
-	logger := zap.New(core)
+func TestMdnsAbortedReloadRollbackThroughCleanup(t *testing.T) {
+	logger := zap.NewNop()
 	load := func() *janusState {
 		stI, _, err := janusPool.LoadOrNew(janusStateKey, func() (caddy.Destructor, error) {
 			return newJanusState(logger, time.Hour)
@@ -931,7 +1036,8 @@ func TestMdnsAbortedReloadDetectionThroughCleanup(t *testing.T) {
 	st := load() // generation A provisions
 	st.mdns.newResponder = func() (dnssd.Responder, error) { return &fakeResponder{}, nil }
 	appA := &App{state: st}
-	if err := st.mdns.configure(appA, &mdnsConfig{name: "janus.local", port: 80, listen: ":80"}); err != nil {
+	cfgA := &mdnsConfig{name: "janus.local", port: 80, listen: ":80"}
+	if err := st.mdns.configure(appA, cfgA); err != nil {
 		t.Fatal(err)
 	}
 
@@ -947,16 +1053,15 @@ func TestMdnsAbortedReloadDetectionThroughCleanup(t *testing.T) {
 	if err := appB.Cleanup(); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(logs.FilterMessage(mdnsAbortedReloadMsg).All()); n != 1 {
-		t.Fatalf("aborted-generation cleanup: %d divergence logs, want 1", n)
+	st.mdns.mu.Lock()
+	gotCfg, gotGen := st.mdns.cfg, st.mdns.lastGen
+	st.mdns.mu.Unlock()
+	if !gotCfg.equal(cfgA) || gotGen != appA {
+		t.Fatalf("cleanup rollback cfg=%s gen=%v, want %s/%p", gotCfg.describe(), gotGen, cfgA.describe(), appA)
 	}
 
-	// Process shutdown: the last reference destructs, no new divergence.
 	if err := appA.Cleanup(); err != nil {
 		t.Fatal(err)
-	}
-	if n := len(logs.FilterMessage(mdnsAbortedReloadMsg).All()); n != 1 {
-		t.Fatalf("final cleanup: %d divergence logs, want %d", n, 1)
 	}
 }
 

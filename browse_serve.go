@@ -90,17 +90,17 @@ func browseIfNoneMatch(value, etag string) bool {
 	return false
 }
 
-func (h *Handler) serveColdBrowse(w http.ResponseWriter, r *http.Request) error {
+func (h *Handler) serveColdBrowsePath(w http.ResponseWriter, r *http.Request, requestPath string) error {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.NotFound(w, r)
 		return nil
 	}
-	requestPath, err := validatedRequestPath(r)
-	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return nil
+	roots := h.coldActive
+	if roots == nil && len(h.coldRoots) != 0 {
+		// Directly constructed handlers in focused tests do not run Provision.
+		roots = coldBrowseRoots(h.coldRoots)
 	}
-	if h.serveBrowseRoots(w, r, requestPath, coldBrowseRoots(h.coldRoots), "", false) {
+	if h.serveBrowseRoots(w, r, requestPath, roots, "", false) {
 		return nil
 	}
 	http.NotFound(w, r)
@@ -125,8 +125,8 @@ func coldBrowseRoots(roots []BrowseRoot) []activeBrowseRoot {
 	return out
 }
 
-func hotBrowseRoots(roots []FilesRoot, site string) []activeBrowseRoot {
-	out := make([]activeBrowseRoot, 0, len(roots))
+func hotBrowseRoots(roots []FilesRoot, site string, out []activeBrowseRoot) []activeBrowseRoot {
+	out = out[:0]
 	for _, root := range roots {
 		cache := root.Cache
 		if cache == "" {

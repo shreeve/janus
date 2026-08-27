@@ -97,6 +97,54 @@ func TestRegistryHostFirstWins(t *testing.T) {
 	}
 }
 
+func TestExactHostRejectsMalformedAuthorities(t *testing.T) {
+	r := newAppRegistry()
+	if _, err := r.create("exact", []string{"exact.example.com"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, authority := range []string{"exact.example.com", "exact.example.com:443", "EXACT.EXAMPLE.COM."} {
+		if _, ok := r.resolveRequestHost(authority); !ok {
+			t.Errorf("valid authority %q did not resolve", authority)
+		}
+	}
+	for _, authority := range []string{
+		"exact.example.com:", "exact.example.com:notaport", "exact.example.com:0", "exact.example.com:65536",
+		"exact.example.com:+443", "exact.example.com:-1", "[exact.example.com]:443",
+	} {
+		if _, ok := r.resolveRequestHost(authority); ok {
+			t.Errorf("malformed authority %q resolved exact host", authority)
+		}
+	}
+	if _, err := r.create("loopback", []string{"127.0.0.1"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, authority := range []string{"127.0.0.1:8080", "[127.0.0.1]:8080"} {
+		if _, ok := r.resolveRequestHost(authority); !ok {
+			t.Fatalf("registered exact IP authority %q did not resolve", authority)
+		}
+	}
+}
+
+func TestValidateHostnameGrammar(t *testing.T) {
+	longLabel := strings.Repeat("a", 63)
+	for _, host := range []string{
+		"a", "a.b", "shop.example.com", "a-b.c0", "0.0.0.0", longLabel + ".example",
+	} {
+		if err := validateHostname(host); err != nil {
+			t.Errorf("valid host %q rejected: %v", host, err)
+		}
+	}
+	for _, host := range []string{
+		"", ".", "a.", ".a", "a..b", "-a.b", "a-.b", "a.-b", "a.b-",
+		"A.b", "a_b", "a b", "a.b:443", longLabel + "a.example",
+		strings.Repeat("a.", 127) + "example.com",
+	} {
+		if err := validateHostname(host); err == nil {
+			t.Errorf("invalid host %q accepted", host)
+		}
+	}
+}
+
 func TestRegistryDeleteFreesHosts(t *testing.T) {
 	r := newAppRegistry()
 	rec, err := r.create("shop", []string{"shop.example.com"}, "")
@@ -298,6 +346,18 @@ func doJSON(t *testing.T, mux *http.ServeMux, method, path, body string) (int, m
 	return rr.Code, out
 }
 
+func TestDecodeJSONRejectsEveryTrailingToken(t *testing.T) {
+	for _, suffix := range []string{"}", "]", `{}`, `[]`, `true`} {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"app"}`+suffix))
+		var value struct {
+			Name string `json:"name"`
+		}
+		if err := decodeJSON(httptest.NewRecorder(), req, &value); err == nil {
+			t.Errorf("accepted trailing token %q", suffix)
+		}
+	}
+}
+
 func TestAppsHTTPLifecycle(t *testing.T) {
 	mux := newTestControlMux(t)
 
@@ -350,6 +410,7 @@ func TestAppsHTTPLifecycle(t *testing.T) {
 		`{"name":"shop2"}`,
 		`{"name":"shop2","hosts":[]}`,
 		`{"name":"shop2","hosts":["bad host"]}`,
+		`{"name":"shop2","hosts":["shop2.example.com"],"upstreams":[{"path":"/run/a.sock","unknown":true}]}`,
 	} {
 		code, _ = doJSON(t, mux, http.MethodPost, "/1.0/apps", b)
 		if code != http.StatusBadRequest {

@@ -21,6 +21,9 @@ func TestParseHeartbeatTTL(t *testing.T) {
 		"janus {\n heartbeat_ttl \n}",
 		"janus {\n heartbeat_ttl abc \n}",
 		"janus {\n heartbeat_ttl 0s \n}",
+		"janus {\n heartbeat_ttl 1ns \n}",
+		"janus {\n heartbeat_ttl 2ns \n}",
+		"janus {\n heartbeat_ttl 2ms \n}",
 		"janus {\n heartbeat_ttl -5s \n}",
 		"janus {\n heartbeat_ttl 5s \n heartbeat_ttl 6s \n}",
 	} {
@@ -53,6 +56,21 @@ func TestCascadeBool(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDuplicatePingRejected(t *testing.T) {
+	for _, source := range []string{
+		"janus {\n ping\n ping off\n}",
+		"janus {\n ping off\n ping on\n}",
+	} {
+		if err := new(App).UnmarshalCaddyfile(caddyfile.NewTestDispenser(source)); err == nil {
+			t.Errorf("global accepted duplicate ping in %q", source)
+		}
+		var handler Handler
+		if err := handler.UnmarshalCaddyfile(caddyfile.NewTestDispenser(source)); err == nil {
+			t.Errorf("site accepted duplicate ping in %q", source)
+		}
 	}
 }
 

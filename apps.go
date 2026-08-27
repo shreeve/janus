@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,13 @@ import (
 // is alive, independent of upstreams[].
 const defaultHeartbeatTTL = 15 * time.Second
 
+const minHeartbeatSweepInterval = time.Millisecond
+
+// Keep the documented ttl/3 sweep cadence at or above the operational floor.
+// The sweeper retains its own floor as defense against invalid direct state
+// construction in tests or future internal callers.
+const minHeartbeatTTL = 3 * minHeartbeatSweepInterval
+
 // heartbeatTTLEnv lets a test harness shorten the TTL. Unset in production.
 const heartbeatTTLEnv = "JANUS_HEARTBEAT_TTL"
 
@@ -38,8 +46,8 @@ func heartbeatTTLFromEnv() (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%s %q is not a Go duration (want e.g. \"15s\"): %v", heartbeatTTLEnv, v, err)
 	}
-	if d <= 0 {
-		return 0, fmt.Errorf("%s must be positive, got %q", heartbeatTTLEnv, v)
+	if d < minHeartbeatTTL {
+		return 0, fmt.Errorf("%s must be at least %v, got %q", heartbeatTTLEnv, minHeartbeatTTL, v)
 	}
 	return d, nil
 }
@@ -89,6 +97,11 @@ type AppRecord struct {
 	// consistent — a fill's snapshot can never pair a post-swap
 	// generation with pre-swap sockets.
 	genSnap uint64
+
+	// selectMu serializes least-connections selection only for this app.
+	// Registry snapshots share the pointer, so unrelated tenants never
+	// contend while a worker is selected and charged.
+	selectMu *sync.Mutex
 
 	// siteSuffix is the normalized suffix owned by Site. siteValue is the
 	// request-local label resolved from a pattern or alias. Both stay
@@ -184,6 +197,9 @@ func normalizeHosts(hosts []string) ([]string, error) {
 	return out, nil
 }
 
+// validateHostname checks the label grammar hostLabelRE describes with a
+// single allocation-free byte scan: this runs on every data-plane request
+// via resolveRequestHost, so it must never split or regexp-match.
 func validateHostname(h string) error {
 	if h == "" {
 		return errBadRequest("host must not be empty")
@@ -191,10 +207,30 @@ func validateHostname(h string) error {
 	if len(h) > 253 {
 		return errBadRequest("host %q is too long (max 253 chars)", h)
 	}
-	for _, label := range strings.Split(h, ".") {
-		if len(label) > 63 || !hostLabelRE.MatchString(label) {
+	labelLen := 0
+	for i := 0; i < len(h); i++ {
+		switch c := h[i]; {
+		case c == '.':
+			if labelLen == 0 || h[i-1] == '-' {
+				return errBadRequest("host %q is not a plausible hostname", h)
+			}
+			labelLen = 0
+		case c >= 'a' && c <= 'z' || c >= '0' && c <= '9':
+			labelLen++
+		case c == '-':
+			if labelLen == 0 {
+				return errBadRequest("host %q is not a plausible hostname", h)
+			}
+			labelLen++
+		default:
 			return errBadRequest("host %q is not a plausible hostname", h)
 		}
+		if labelLen > 63 {
+			return errBadRequest("host %q is not a plausible hostname", h)
+		}
+	}
+	if labelLen == 0 || h[len(h)-1] == '-' {
+		return errBadRequest("host %q is not a plausible hostname", h)
 	}
 	return nil
 }
@@ -283,13 +319,12 @@ type appRegistry struct {
 	browse *browseSupervisor
 	access *accessBridge
 
-	// purge is the cache's purge hook, invoked (outside the registry
-	// lock, after the generation bump inside it) on every purge event:
-	// upstreams PUT, DELETE, heartbeat reap, and host claim. Atomic
-	// because each config generation re-points it at its own cache store
-	// while the pooled registry keeps serving. Nil when no cache store is
-	// wired (tests).
-	purge atomic.Pointer[func(appID string)]
+	// purgeHooks fan purge events out to every live config generation's
+	// cache. Reload generations overlap, and a rejected generation must be
+	// removable without orphaning the surviving generation's purge hook.
+	// The separate lock keeps callbacks outside the registry mutation lock.
+	purgeMu    sync.RWMutex
+	purgeHooks map[*purgeOwner]func(appID string)
 
 	// hubTeardown tears the app's hub down on DELETE and TTL reap — the
 	// only events that kill a registration. Upstreams PUTs never touch
@@ -325,11 +360,12 @@ type appRegistry struct {
 
 func newAppRegistry() *appRegistry {
 	return &appRegistry{
-		apps:  map[string]*AppRecord{},
-		hosts: map[string]string{},
-		sites: map[string]string{},
-		now:   time.Now,
-		ttl:   defaultHeartbeatTTL,
+		apps:       map[string]*AppRecord{},
+		hosts:      map[string]string{},
+		sites:      map[string]string{},
+		purgeHooks: map[*purgeOwner]func(string){},
+		now:        time.Now,
+		ttl:        defaultHeartbeatTTL,
 	}
 }
 
@@ -346,15 +382,38 @@ func (r *appRegistry) bindAccess(bridge *accessBridge) error {
 	return nil
 }
 
-// setPurge points the purge hook at the current config generation's cache
-// store; assign-only, never unset, so a reload can never orphan purges.
+// purgeOwner is deliberately typed and comparable: accepting arbitrary any
+// keys here would let an accidental slice/map owner panic the registry.
+type purgeOwner struct{ _ byte }
+
+var testPurgeOwner = new(purgeOwner)
+
+// setPurge is the test seam for installing one replaceable hook.
 func (r *appRegistry) setPurge(fn func(appID string)) {
-	r.purge.Store(&fn)
+	r.bindPurge(testPurgeOwner, fn)
+}
+
+func (r *appRegistry) bindPurge(owner *purgeOwner, fn func(appID string)) {
+	r.purgeMu.Lock()
+	r.purgeHooks[owner] = fn
+	r.purgeMu.Unlock()
+}
+
+func (r *appRegistry) unbindPurge(owner *purgeOwner) {
+	r.purgeMu.Lock()
+	delete(r.purgeHooks, owner)
+	r.purgeMu.Unlock()
 }
 
 func (r *appRegistry) purgeApp(id string) {
-	if fn := r.purge.Load(); fn != nil {
-		(*fn)(id)
+	r.purgeMu.RLock()
+	hooks := make([]func(string), 0, len(r.purgeHooks))
+	for _, fn := range r.purgeHooks {
+		hooks = append(hooks, fn)
+	}
+	r.purgeMu.RUnlock()
+	for _, fn := range hooks {
+		fn(id)
 	}
 }
 
@@ -364,10 +423,6 @@ func (r *appRegistry) create(name string, hosts []string, bridgeVal string) (App
 
 func (r *appRegistry) createWithPolicy(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgeVal string) (AppRecord, error) {
 	return r.createWithLease(name, hosts, site, files, bridgeVal, nil, "heartbeat")
-}
-
-func (r *appRegistry) createWithPolicyAndUpstreams(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgeVal string, upstreams []Upstream) (AppRecord, error) {
-	return r.createWithLease(name, hosts, site, files, bridgeVal, upstreams, "heartbeat")
 }
 
 func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePolicy, files *FilesPolicy, bridgeVal string, upstreams []Upstream, lease string) (AppRecord, error) {
@@ -468,7 +523,7 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 	rec := &AppRecord{
 		ID: id, Name: name, Hosts: hosts, Upstreams: append([]Upstream{}, upstreams...),
 		Site: site, Files: files, Bridge: bridgeVal, Lease: lease,
-		gen: new(atomic.Uint64), siteSuffix: suffix,
+		gen: new(atomic.Uint64), selectMu: new(sync.Mutex), siteSuffix: suffix,
 	}
 	if r.access != nil {
 		rec.access = r.access.newState()
@@ -608,34 +663,37 @@ func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
 	return out, true
 }
 
-// resolveRequestHost preserves exact-host normalization while requiring a
-// syntactically valid DNS authority before a pattern may match.
+// resolveRequestHost normalizes exact and pattern hosts only after requiring
+// a syntactically valid DNS authority.
 func (r *appRegistry) resolveRequestHost(authority string) (AppRecord, bool) {
-	host := normalizeHostHeader(authority)
-	r.mu.RLock()
-	_, exact := r.hosts[host]
-	r.mu.RUnlock()
-	if exact {
-		return r.resolveHost(host)
-	}
-	rawHost := authority
+	host := authority
+	bracketed := strings.HasPrefix(authority, "[")
 	if strings.Contains(authority, ":") {
 		var port string
 		var err error
-		rawHost, port, err = net.SplitHostPort(authority)
+		host, port, err = net.SplitHostPort(authority)
 		if err != nil || port == "" {
 			return AppRecord{}, false
 		}
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
+		for i := 0; i < len(port); i++ {
+			if port[i] < '0' || port[i] > '9' {
+				return AppRecord{}, false
+			}
+		}
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n == 0 {
 			return AppRecord{}, false
 		}
 	}
-	rawHost = strings.ToLower(strings.TrimSuffix(rawHost, "."))
-	if net.ParseIP(rawHost) != nil || validateHostname(rawHost) != nil {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	ip := net.ParseIP(host)
+	if bracketed && ip == nil {
 		return AppRecord{}, false
 	}
-	return r.resolveHost(rawHost)
+	if ip == nil && validateHostname(host) != nil {
+		return AppRecord{}, false
+	}
+	return r.resolveHost(host)
 }
 
 // exists reports whether the app id is currently registered (the hub
@@ -863,7 +921,11 @@ func (r *appRegistry) startSweeper(logger *zap.Logger) {
 	r.sweepDone = make(chan struct{})
 	go func() {
 		defer close(r.sweepDone)
-		ticker := time.NewTicker(r.ttl / 3)
+		interval := r.ttl / 3
+		if interval < minHeartbeatSweepInterval {
+			interval = minHeartbeatSweepInterval
+		}
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -975,13 +1037,13 @@ func (r *appRegistry) heartbeatAges() map[string]time.Duration {
 func (a *App) appsRegistry() *appRegistry { return a.appsReg }
 
 type appCreateRequest struct {
-	Name       string          `json:"name"`
-	Hosts      json.RawMessage `json:"hosts"`
-	Site       json.RawMessage `json:"site"`
-	Files      json.RawMessage `json:"files"`
-	Upstreams  json.RawMessage `json:"upstreams"`
-	Bridge string          `json:"bridge"`
-	Lease      json.RawMessage `json:"lease"`
+	Name      string          `json:"name"`
+	Hosts     json.RawMessage `json:"hosts"`
+	Site      json.RawMessage `json:"site"`
+	Files     json.RawMessage `json:"files"`
+	Upstreams json.RawMessage `json:"upstreams"`
+	Bridge    string          `json:"bridge"`
+	Lease     json.RawMessage `json:"lease"`
 }
 
 type appPatchRequest struct {
@@ -1020,7 +1082,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return errBadRequest("malformed JSON body: %v", err)
 	}
-	if dec.More() {
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errBadRequest("malformed JSON body: trailing data")
 	}
 	return nil
@@ -1079,8 +1141,8 @@ func (a *App) handleAppsCreate(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, errBadRequest("upstreams must be an array"))
 			return
 		}
-		if err := json.Unmarshal(req.Upstreams, &upstreams); err != nil {
-			writeAPIError(w, errBadRequest("upstreams must be an array"))
+		if err := decodeStrictRaw(req.Upstreams, &upstreams); err != nil {
+			writeAPIError(w, errBadRequest("invalid upstreams: %v", err))
 			return
 		}
 	}
@@ -1111,7 +1173,7 @@ func decodeStrictRaw(raw json.RawMessage, value any) error {
 	if err := dec.Decode(value); err != nil {
 		return err
 	}
-	if dec.More() {
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errors.New("trailing data")
 	}
 	return nil

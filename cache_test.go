@@ -1200,6 +1200,49 @@ func TestCacheAppShareCap(t *testing.T) {
 	}
 }
 
+func TestCacheAppShareCapConcurrentAcrossShards(t *testing.T) {
+	// One entry fits the app share, but one fill per shard reaches admission
+	// together. The cross-shard check and insert must be one transaction:
+	// observing the old total concurrently must never overcommit the cap.
+	c := newCacheStore(cacheShardCount*4096, 2)
+	gen := new(atomic.Uint64)
+	base := time.Now()
+	c.now = func() time.Time { return base }
+
+	keys := make([]string, cacheShardCount)
+	for i, found := 0, 0; found < cacheShardCount; i++ {
+		key := fmt.Sprintf("h\n/concurrent-%d", i)
+		idx := int(c.hash(key) % cacheShardCount)
+		if keys[idx] == "" {
+			keys[idx] = key
+			found++
+		}
+	}
+
+	var arrived atomic.Int32
+	release := make(chan struct{})
+	c.beforeStoreAdmission = func() {
+		if arrived.Add(1) == cacheShardCount {
+			close(release)
+		}
+		<-release
+	}
+
+	var wg sync.WaitGroup
+	for _, key := range keys {
+		wg.Add(1)
+		go func(key string) {
+			defer wg.Done()
+			primeAndStore(c, "hog", key, gen, make([]byte, 1024), base)
+		}(key)
+	}
+	wg.Wait()
+
+	if got := c.appBytes("hog"); got > c.appShareBytes {
+		t.Fatalf("concurrent stores exceeded app share: %d > %d", got, c.appShareBytes)
+	}
+}
+
 // --- config: parse + cascade -------------------------------------------------------
 
 func TestParseCacheDirectiveGlobal(t *testing.T) {

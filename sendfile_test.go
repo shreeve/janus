@@ -456,9 +456,9 @@ func TestSendfileFailureDoesNotMarkUpstreamUnhealthy(t *testing.T) {
 	if rr.Code != http.StatusBadGateway || rr.Header().Get(sendfileHeader) != "" {
 		t.Fatalf("status=%d headers=%v", rr.Code, rr.Header())
 	}
-	dp.mu.Lock()
+	dp.stateMu.RLock()
 	st := dp.state[sock]
-	dp.mu.Unlock()
+	dp.stateMu.RUnlock()
 	if st == nil || st.unhealthyNow() {
 		t.Fatal("invalid sendfile response marked the upstream unhealthy")
 	}
@@ -744,9 +744,9 @@ func TestSendfileOnUpgradeReturns502WithoutHealthPenalty(t *testing.T) {
 	if rr.Code != http.StatusBadGateway || rr.Header().Get(sendfileHeader) != "" {
 		t.Fatalf("status=%d headers=%v", rr.Code, rr.Header())
 	}
-	dp.mu.Lock()
+	dp.stateMu.RLock()
 	st := dp.state[sock]
-	dp.mu.Unlock()
+	dp.stateMu.RUnlock()
 	if st == nil || st.unhealthyNow() {
 		t.Fatal("invalid upgrade sendfile marked the upstream unhealthy")
 	}

@@ -25,6 +25,10 @@ import (
 const (
 	// cacheShardCount is the shard fan-out (spec: 16–64 by key hash).
 	cacheShardCount = 32
+	// cacheAppAdmissionStripes serializes the per-app share check and store
+	// across shards without allocating one lock per transient app. It is off
+	// the HIT path; unrelated apps contend only on a bounded hash collision.
+	cacheAppAdmissionStripes = 64
 
 	// cacheKeyMax caps the primary key; longer keys bypass — a minted key
 	// can never be megabyte-scale.
@@ -206,8 +210,9 @@ func (sh *cacheShard) dkCount(h uint64) uint8 {
 // cacheStore is the process-wide pool (one per Janus process; always
 // constructed so /1.0/cache counters are always on).
 type cacheStore struct {
-	seed   maphash.Seed
-	shards [cacheShardCount]*cacheShard
+	seed         maphash.Seed
+	shards       [cacheShardCount]*cacheShard
+	appAdmission [cacheAppAdmissionStripes]sync.Mutex
 
 	maxBytes      int64
 	appShareBytes int64 // max_app_share percent of maxBytes
@@ -217,6 +222,9 @@ type cacheStore struct {
 
 	// now is the cache clock; tests inject a fake.
 	now func() time.Time
+
+	// beforeStoreAdmission is a test-only concurrency barrier.
+	beforeStoreAdmission func()
 }
 
 func newCacheStore(maxBytes int64, appSharePct int) *cacheStore {
@@ -245,6 +253,10 @@ func (c *cacheStore) hash(s string) uint64 { return maphash.String(c.seed, s) }
 
 func (c *cacheStore) shardFor(key string) *cacheShard {
 	return c.shards[c.hash(key)%cacheShardCount]
+}
+
+func (c *cacheStore) appAdmissionLock(appID string) *sync.Mutex {
+	return &c.appAdmission[c.hash(appID)%cacheAppAdmissionStripes]
 }
 
 // appBytes sums the app's accounted bytes across shards (store-time share

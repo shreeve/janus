@@ -2,9 +2,12 @@ package janus
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -13,7 +16,7 @@ import (
 )
 
 func init() {
-	caddy.RegisterModule(App{})
+	caddy.RegisterModule(new(App))
 }
 
 // App is the process-wide Janus application (cold config).
@@ -101,11 +104,16 @@ type App struct {
 	// cache is the one process-wide micro-cache pool. Always constructed
 	// (the /1.0/cache counters are always on); sites opt in via cascade.
 	cache *cacheStore
+	// purgeOwner identifies this generation's cache hook without exposing the
+	// registry to arbitrary, potentially non-comparable map keys.
+	purgeOwner *purgeOwner
 
 	// mdnsSrv is this config generation's front-door HTTP server
 	// (dedicated mode only); the pooled advertiser itself lives in
 	// state.mdns.
-	mdnsSrv *http.Server
+	mdnsSrv      *http.Server
+	mdnsLn       net.Listener
+	mdnsStopping atomic.Bool
 
 	// mdnsSharedPort and mdnsSharedRoutes wire the shared-mode front
 	// door (mdns with no listen): janus site handlers on the HTTP app's
@@ -125,10 +133,13 @@ type App struct {
 	browseCtx     context.Context
 	browseCancel  context.CancelFunc
 	coldHosts     []string
+
+	reconcileMu      sync.Mutex
+	reconcilePending bool
 }
 
 // CaddyModule returns the Caddy module information.
-func (App) CaddyModule() caddy.ModuleInfo {
+func (*App) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "janus",
 		New: func() caddy.Module { return new(App) },
@@ -142,8 +153,8 @@ func (a *App) Provision(ctx caddy.Context) error {
 	a.logger = ctx.Logger()
 	a.hubLog = a.logger.Named("hub")
 	a.ctx = ctx
-	if a.HeartbeatTTL < 0 {
-		return fmt.Errorf("janus: heartbeat_ttl must be positive, got %v", time.Duration(a.HeartbeatTTL))
+	if a.HeartbeatTTL != 0 && time.Duration(a.HeartbeatTTL) < minHeartbeatTTL {
+		return fmt.Errorf("janus: heartbeat_ttl must be at least %v, got %v", minHeartbeatTTL, time.Duration(a.HeartbeatTTL))
 	}
 	access, err := acquireAccessBridge(a.logger)
 	if err != nil {
@@ -183,17 +194,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if len(a.Control) == 0 {
 		a.Control = []Control{{Mode: "internal"}}
 	}
-	seen := map[string]bool{}
-	for i := range a.Control {
-		if err := a.Control[i].normalize(); err != nil {
-			return fmt.Errorf("janus: %w", err)
-		}
-		if seen[a.Control[i].Mode] {
-			return fmt.Errorf("janus: duplicate control mode %q", a.Control[i].Mode)
-		}
-		seen[a.Control[i].Mode] = true
-	}
-	return nil
+	return normalizeControls(a.Control)
 }
 
 // Start starts the Janus app.
@@ -207,12 +208,7 @@ func (a *App) Start() error {
 	if err := a.buildHubSiteTable(); err != nil {
 		return err
 	}
-	a.closeDisabledHubHosts()
-	// Auth Start work runs past the reload's point of no return (the
-	// mdns introspection precedent): removed-user session revocation
-	// and the reaper's ttl bound — an aborted reload never logs users
-	// out.
-	if err := a.startAuth(); err != nil {
+	if err := a.prepareAuth(); err != nil {
 		return err
 	}
 	if err := a.startBrowse(); err != nil {
@@ -239,6 +235,10 @@ func (a *App) Start() error {
 		a.stopBrowse()
 		return err
 	}
+	a.stageReconciliation()
+	if !a.hasActivePredecessor() {
+		a.commitReconciliation()
+	}
 	return nil
 }
 
@@ -247,29 +247,41 @@ func (a *App) Start() error {
 // stops the old app while the new one is already serving the same pooled
 // state.
 func (a *App) Stop() error {
-	a.stopBrowse()
-	a.stopAccessStreams()
-	cerr := a.stopControlListeners()
-	merr := a.stopMdns()
-	if cerr != nil {
-		return cerr
-	}
-	return merr
+	// Caddy swaps ActiveContext only after every new app has started. The old
+	// generation's Stop is therefore the first safe commit signal for pooled,
+	// irreversible reconciliation. An aborted new generation's Stop still sees
+	// the old active app, whose reconciliation is already complete.
+	a.commitActiveSuccessor()
+	return a.stopGenerationResources()
 }
 
-// Cleanup releases the app's reference on the pooled state; the last
-// release (process shutdown) destructs it. A release that leaves other
-// generations holding the state is either a successful reload's old
-// generation retiring or an aborted reload's new generation being torn
-// down — the advertiser tells them apart and ERROR-logs the aborted
-// case's config divergence.
-func (a *App) Cleanup() error {
+// stopGenerationResources tears down everything owned by this config
+// generation. It is deliberately idempotent: Caddy normally calls Stop before
+// Cleanup, but may call Cleanup directly when a fully started candidate fails
+// later in config setup.
+func (a *App) stopGenerationResources() error {
 	a.stopBrowse()
+	a.stopAccessStreams()
+	return errors.Join(a.stopControlListeners(), a.stopMdns())
+}
+
+// Cleanup first tears down this generation's resources, including when Caddy
+// rejects a started candidate without calling Stop. It then releases the app's
+// reference on the pooled state; the last release (process shutdown) destructs
+// it. A release that leaves other generations holding the state is either a
+// successful reload's old generation retiring or an aborted reload's new
+// generation being torn down — the advertiser tells them apart and rolls an
+// aborted generation back to its surviving predecessor.
+func (a *App) Cleanup() error {
+	generationErr := a.stopGenerationResources()
 	if a.state != nil {
 		a.state.browse.releaseCold(a)
 	}
 	var stateErr error
 	if a.state != nil {
+		if a.purgeOwner != nil {
+			a.state.registry.unbindPurge(a.purgeOwner)
+		}
 		deleted, err := janusPool.Delete(janusStateKey)
 		if !deleted {
 			a.state.mdns.generationRetired(a)
@@ -281,11 +293,60 @@ func (a *App) Cleanup() error {
 		a.accessReleased = true
 		accessErr := releaseAccessBridge()
 		a.access = nil
-		if stateErr == nil {
-			stateErr = accessErr
-		}
+		stateErr = errors.Join(stateErr, accessErr)
 	}
-	return stateErr
+	return errors.Join(generationErr, stateErr)
+}
+
+func (a *App) stageReconciliation() {
+	a.reconcileMu.Lock()
+	a.reconcilePending = true
+	a.reconcileMu.Unlock()
+}
+
+func (a *App) commitReconciliation() bool {
+	a.reconcileMu.Lock()
+	if !a.reconcilePending {
+		a.reconcileMu.Unlock()
+		return false
+	}
+	a.reconcilePending = false
+	a.reconcileMu.Unlock()
+	a.closeDisabledHubHosts()
+	a.reconcileAuth()
+	return true
+}
+
+func (a *App) activePredecessor() *App {
+	active, err := caddy.ActiveContext().AppIfConfigured("janus")
+	if err != nil || active == nil {
+		return nil
+	}
+	app, ok := active.(*App)
+	if !ok || app == a || app.state == nil || app.state != a.state {
+		return nil
+	}
+	return app
+}
+
+func (a *App) hasActivePredecessor() bool { return a.activePredecessor() != nil }
+
+func (a *App) commitSuccessor(next *App) bool {
+	if next == nil || next == a || next.state == nil || next.state != a.state {
+		return false
+	}
+	return next.commitReconciliation()
+}
+
+func (a *App) commitActiveSuccessor() {
+	active, err := caddy.ActiveContext().AppIfConfigured("janus")
+	if err != nil || active == nil {
+		return
+	}
+	next, ok := active.(*App)
+	if ok {
+		a.commitSuccessor(next)
+	}
 }
 
 func (a *App) stopAccessStreams() {

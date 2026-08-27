@@ -114,6 +114,11 @@ func (h *Handler) serveFiles(w http.ResponseWriter, r *http.Request, rec AppReco
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return true, nil
 	}
+	return h.serveFilesPath(w, r, requestPath, rec)
+}
+
+// serveFilesPath continues from the handler's one canonical path validation.
+func (h *Handler) serveFilesPath(w http.ResponseWriter, r *http.Request, requestPath string, rec AppRecord) (handled bool, err error) {
 	for _, prefix := range rec.Files.ProxyFirst {
 		if pathPrefixMatch(requestPath, prefix) {
 			return false, nil
@@ -124,30 +129,19 @@ func (h *Handler) serveFiles(w http.ResponseWriter, r *http.Request, rec AppReco
 		http.NotFound(w, r)
 		return true, nil
 	}
-	if h.serveBrowseRootsPrecompressed(w, r, requestPath, hotBrowseRoots(rec.Files.Roots, rec.siteValue), rec.Files.Shell, true, h.filesPrecompressed()) {
+	// Most registrations have only one or two roots. Keep their resolved
+	// descriptors on the stack; unusually large root sets spill normally.
+	var rootStorage [4]activeBrowseRoot
+	activeRoots := rootStorage[:0]
+	if len(rec.Files.Roots) > cap(rootStorage) {
+		activeRoots = make([]activeBrowseRoot, 0, len(rec.Files.Roots))
+	}
+	activeRoots = hotBrowseRoots(rec.Files.Roots, rec.siteValue, activeRoots)
+	if h.serveBrowseRootsPrecompressed(w, r, requestPath, activeRoots, rec.Files.Shell, true, h.filesPrecompressed()) {
 		return true, nil
 	}
 	http.NotFound(w, r)
 	return true, nil
-}
-
-func serveRootedFile(w http.ResponseWriter, r *http.Request, rootPath, relative, displayName, class string) bool {
-	root, err := os.OpenRoot(rootPath)
-	if err != nil {
-		return false
-	}
-	defer root.Close()
-	file, err := root.Open(relative)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return false
-	}
-	serveOpenedFileFromRoot(w, r, root, file, info, relative, displayName, class, nil)
-	return true
 }
 
 func serveAbsoluteFile(w http.ResponseWriter, r *http.Request, name string, precompressed []string) bool {

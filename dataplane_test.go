@@ -96,8 +96,8 @@ func (dp *dataPlane) testWaiters(appID string) int {
 }
 
 func (dp *dataPlane) testHasState(path string) bool {
-	dp.mu.Lock()
-	defer dp.mu.Unlock()
+	dp.stateMu.RLock()
+	defer dp.stateMu.RUnlock()
 	_, ok := dp.state[path]
 	return ok
 }
@@ -111,10 +111,10 @@ func TestPruneStateDropsUnreferencedPaths(t *testing.T) {
 	reg.pruneUpstreams = dp.pruneState
 	id := registerApp(t, reg, "prune.test", Upstream{Path: "/run/old1.sock"}, Upstream{Path: "/run/old2.sock"})
 
-	dp.mu.Lock()
+	dp.stateMu.Lock()
 	dp.state["/run/old1.sock"] = &upstreamState{}
 	dp.state["/run/old2.sock"] = &upstreamState{}
-	dp.mu.Unlock()
+	dp.stateMu.Unlock()
 
 	// The swap retires both old paths; their state must go with them.
 	if _, err := reg.setUpstreams(id, []Upstream{{Path: "/run/new1.sock"}}); err != nil {
@@ -125,9 +125,9 @@ func TestPruneStateDropsUnreferencedPaths(t *testing.T) {
 	}
 
 	// A still-referenced path survives pruning.
-	dp.mu.Lock()
+	dp.stateMu.Lock()
 	dp.state["/run/new1.sock"] = &upstreamState{}
-	dp.mu.Unlock()
+	dp.stateMu.Unlock()
 	dp.pruneState()
 	if !dp.testHasState("/run/new1.sock") {
 		t.Fatal("referenced socket path must survive pruning")
@@ -242,9 +242,9 @@ func TestDataPlaneAllUnhealthy503(t *testing.T) {
 	if rr.Header().Get("Retry-After") == "" {
 		t.Fatal("missing Retry-After")
 	}
-	dp.mu.Lock()
+	dp.stateMu.RLock()
 	st := dp.state[dead]
-	dp.mu.Unlock()
+	dp.stateMu.RUnlock()
 	if st == nil || !st.unhealthyNow() {
 		t.Fatal("failed dial did not mark upstream unhealthy")
 	}
@@ -322,9 +322,9 @@ func TestWorkerDiesMidResponseMarksUnhealthy(t *testing.T) {
 		doServe(dp, "GET", "app.test", "/", "")
 	}()
 
-	dp.mu.Lock()
+	dp.stateMu.RLock()
 	st := dp.state[sock]
-	dp.mu.Unlock()
+	dp.stateMu.RUnlock()
 	if st == nil || !st.unhealthyNow() {
 		t.Fatal("mid-response worker death did not mark the socket unhealthy")
 	}
@@ -367,9 +367,9 @@ func TestMarkedBusy503TriesNextUpstream(t *testing.T) {
 		t.Fatalf("want exactly one bounce off the busy worker, got %d", bounces.Load())
 	}
 	// The marked 503 never counts toward health.
-	dp.mu.Lock()
+	dp.stateMu.RLock()
 	st := dp.state[busy]
-	dp.mu.Unlock()
+	dp.stateMu.RUnlock()
 	if st != nil && st.unhealthyNow() {
 		t.Fatal("marked busy 503 poisoned the worker's health")
 	}
@@ -393,9 +393,9 @@ func TestAllWorkersBusy503RetryAfter(t *testing.T) {
 	}
 	// Busy workers stay healthy: the next request tries them again.
 	for _, p := range []string{b1, b2} {
-		dp.mu.Lock()
+		dp.stateMu.RLock()
 		st := dp.state[p]
-		dp.mu.Unlock()
+		dp.stateMu.RUnlock()
 		if st != nil && st.unhealthyNow() {
 			t.Fatalf("busy bounce marked %s unhealthy", p)
 		}
@@ -442,6 +442,27 @@ func TestRipMarkScrubbedFromClientResponses(t *testing.T) {
 	}
 }
 
+func TestAuthCookieScrubRunsBeforeUpgradeHandling(t *testing.T) {
+	dp, _ := newTestDataPlane(t)
+	rp := dp.newProxy("/run/test.sock")
+	req := httptest.NewRequest(http.MethodGet, "http://app.test/socket", nil)
+	req = req.WithContext(context.WithValue(req.Context(), authWallActiveKey{}, true))
+	resp := &http.Response{
+		StatusCode: http.StatusSwitchingProtocols,
+		Header:     make(http.Header),
+		Request:    req,
+	}
+	resp.Header.Add("Set-Cookie", "__Host-janus=evil")
+	resp.Header.Add("Set-Cookie", "sid=ok")
+	if err := rp.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	got := resp.Header.Values("Set-Cookie")
+	if len(got) != 1 || got[0] != "sid=ok" {
+		t.Fatalf("upgrade Set-Cookie after modify: %v", got)
+	}
+}
+
 func TestUnmarked503PassesThrough(t *testing.T) {
 	dp, reg := newTestDataPlane(t)
 	app503 := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -468,7 +489,7 @@ func TestAcquireUpstreamLeastConn(t *testing.T) {
 	dp.state["a"] = stateWithInflight(2)
 	dp.state["b"] = stateWithInflight(1)
 
-	path, st, ok := dp.acquireUpstream(ups, nil)
+	path, st, ok := dp.acquireUpstream(ups, nil, nil)
 	if !ok || path != "b" {
 		t.Fatalf("want b (least conn), got %q ok=%v", path, ok)
 	}
@@ -484,19 +505,19 @@ func TestAcquireUpstreamLeastConn(t *testing.T) {
 
 	// Unhealthy entries are skipped even when least loaded.
 	dp.markUnhealthy(dp.state["b"])
-	path, _, ok = dp.acquireUpstream(ups, nil)
+	path, _, ok = dp.acquireUpstream(ups, nil, nil)
 	if !ok || path != "a" {
 		t.Fatalf("want a (b unhealthy), got %q ok=%v", path, ok)
 	}
 
 	// Tried entries are skipped.
-	_, _, ok = dp.acquireUpstream(ups, map[string]bool{"a": true, "b": true})
+	_, _, ok = dp.acquireUpstream(ups, map[string]bool{"a": true, "b": true}, nil)
 	if ok {
 		t.Fatal("acquired an already-tried upstream")
 	}
 
 	// Doorbells are never acquired.
-	_, _, ok = dp.acquireUpstream([]Upstream{{Path: "bell", Doorbell: true}}, nil)
+	_, _, ok = dp.acquireUpstream([]Upstream{{Path: "bell", Doorbell: true}}, nil, nil)
 	if ok {
 		t.Fatal("acquired a doorbell as a worker")
 	}
@@ -507,7 +528,7 @@ func TestAcquireUpstreamTieBreakUniform(t *testing.T) {
 	ups := []Upstream{{Path: "a"}, {Path: "b"}, {Path: "c"}}
 	picks := map[string]int{}
 	for range 300 {
-		path, st, ok := dp.acquireUpstream(ups, nil)
+		path, st, ok := dp.acquireUpstream(ups, nil, nil)
 		if !ok {
 			t.Fatal("acquire failed on all-healthy ties")
 		}
@@ -519,6 +540,39 @@ func TestAcquireUpstreamTieBreakUniform(t *testing.T) {
 		if picks[p] < 59 || picks[p] > 141 {
 			t.Fatalf("tie-break not uniform: picks=%v", picks)
 		}
+	}
+}
+
+func TestAcquireUpstreamSelectionIsPerApp(t *testing.T) {
+	dp, _ := newTestDataPlane(t)
+	blockedApp := new(sync.Mutex)
+	otherApp := new(sync.Mutex)
+	blockedApp.Lock()
+	blockedDone := make(chan struct{})
+	go func() {
+		_, st, ok := dp.acquireUpstream([]Upstream{{Path: "blocked"}}, nil, blockedApp)
+		if ok {
+			st.inflight.Add(-1)
+		}
+		close(blockedDone)
+	}()
+	defer func() {
+		blockedApp.Unlock()
+		<-blockedDone
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		_, st, ok := dp.acquireUpstream([]Upstream{{Path: "other"}}, nil, otherApp)
+		if ok {
+			st.inflight.Add(-1)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("one app's selection lock blocked an unrelated app")
 	}
 }
 

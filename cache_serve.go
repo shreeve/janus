@@ -30,17 +30,22 @@ type cacheSite struct {
 
 // serveCache runs the per-request decision table for a cache-on site.
 func (h *Handler) serveCache(w http.ResponseWriter, r *http.Request) error {
-	cc := h.cacheCfg
-	c := cc.store
-	dp := h.dp
-
 	host := normalizeHostHeader(r.Host)
-	rec, ok := dp.registry.resolveRequestHost(r.Host) // generation snapshot rides rec.genSnap
+	rec, ok := h.dp.registry.resolveRequestHost(r.Host) // generation snapshot rides rec.genSnap
 	if !ok {
 		accessFactsOf(r).clearOwner()
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
 	accessFactsOf(r).setOwner(rec)
+	return h.serveCacheResolved(w, r, host, rec)
+}
+
+// serveCacheResolved continues from the handler's single host resolution.
+// The generation snapshot in rec remains the cache fill fence.
+func (h *Handler) serveCacheResolved(w http.ResponseWriter, r *http.Request, host string, rec AppRecord) error {
+	cc := h.cacheCfg
+	c := cc.store
+	dp := h.dp
 
 	if cacheBypassRequest(r) {
 		return c.bypassServe(w, r, dp, cc, host, rec)
@@ -346,6 +351,15 @@ func (c *cacheStore) storeFill(sh *cacheShard, key string, f *cacheFlight, ckeyH
 		return // cannot fit even after eviction; simply not stored
 	}
 	now := c.now()
+
+	if c.beforeStoreAdmission != nil {
+		c.beforeStoreAdmission()
+	}
+	// The per-app cap spans every shard. Serialize its read/evict/insert
+	// transaction so concurrent fills cannot all admit against a stale total.
+	admission := c.appAdmissionLock(appID)
+	admission.Lock()
+	defer admission.Unlock()
 
 	sh.mu.Lock()
 	defer sh.mu.Unlock()

@@ -2,6 +2,7 @@ package janus
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 )
 
@@ -316,7 +318,7 @@ func TestAuthParseHardErrors(t *testing.T) {
 		jblock("auth {\n user alice " + blob + "\n gate ones { alice }\n}"),
 		jblock("auth {\n user alice " + blob + "\n gate /a//b/ { alice }\n}"),
 		jblock("auth {\n user alice " + blob + "\n gate /a/../b/ { alice }\n}"),
-		jblock("auth {\n user alice " + blob + "\n gate /one/ { alice }\n gate /one { alice }\n}"), // dup after norm
+		jblock("auth {\n user alice " + blob + "\n gate /one/ { alice }\n gate /one { alice }\n}"),       // dup after norm
 		jblock("auth {\n user alice " + blob + "\n gate /one/ { alice }\n gate /one/auth/ { alice }\n}"), // shadow
 	}
 	for _, cf := range cases {
@@ -391,6 +393,10 @@ func TestSafeTo(t *testing.T) {
 		{"", "/one/", "/one/"},
 		{"/one/reports", "/one/", "/one/reports"},
 		{"/one/reports?q=1", "/one/", "/one/reports?q=1"},
+		{"/one/%2e%2e/public", "/one/", "/one/"},
+		{"/one/%2E./public", "/one/", "/one/"},
+		{"/one/%2fpublic", "/one/", "/one/"},
+		{"/one/%5cpublic", "/one/", "/one/"},
 		{"/other", "/one/", "/one/"},
 		{"//evil.example", "/one/", "/one/"},
 		{`/\evil.example`, "/", "/"},
@@ -441,7 +447,7 @@ func TestAuthEndpointDispatch(t *testing.T) {
 
 	t.Run("login round trip", func(t *testing.T) {
 		session := ah.login(t, "app.test", "alice", "open-sesame")
-		if user, _, ok := ah.st.lookup(session, time.Hour); !ok || user != "alice" {
+		if user, _, ok := ah.st.lookup(session, "app.test", time.Hour, true); !ok || user != "alice" {
 			t.Fatalf("minted session does not resolve: %q %v", user, ok)
 		}
 	})
@@ -617,6 +623,56 @@ func TestAuthWallFork(t *testing.T) {
 	})
 }
 
+func TestAuthSessionDoesNotCrossHosts(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	session := ah.login(t, "app.test", "alice", "open-sesame")
+	r := authReq(http.MethodGet, "other.test", "/private", nil)
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	rr, out := ah.wall(t, r)
+	if out != nil || rr.Code != http.StatusUnauthorized {
+		t.Fatalf("cross-host session passed: fallthrough=%v status=%d", out != nil, rr.Code)
+	}
+}
+
+func TestAuthOpenAndDisallowedPathsDoNotRefreshSession(t *testing.T) {
+	users := aliceUsers(t)
+	users["bob"] = testCred(t, "carol-pass")
+	ah := newAuthHarnessGates(t, users, time.Hour, map[string][]string{
+		"/allowed/":    {"alice"},
+		"/disallowed/": {"bob"},
+	})
+	now := time.Now()
+	ah.st.now = func() time.Time { return now }
+	session := ah.loginDoor(t, "app.test", "/allowed/auth", "alice", "open-sesame")
+
+	now = now.Add(40 * time.Minute)
+	open := authReq(http.MethodGet, "app.test", "/public", nil)
+	open.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	if _, out := ah.wall(t, open); out == nil {
+		t.Fatal("open path did not fall through")
+	}
+
+	now = now.Add(10 * time.Minute)
+	disallowed := authReq(http.MethodGet, "app.test", "/disallowed/report", nil)
+	disallowed.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	if rr, out := ah.wall(t, disallowed); out != nil || rr.Code != http.StatusUnauthorized {
+		t.Fatalf("disallowed gate passed: fallthrough=%v status=%d", out != nil, rr.Code)
+	}
+
+	status := authReq(http.MethodGet, "app.test", "/allowed/auth", nil)
+	status.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	if rr, out := ah.wall(t, status); out != nil || rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "alice") {
+		t.Fatalf("status page did not recognize live session: fallthrough=%v status=%d body=%q", out != nil, rr.Code, rr.Body.String())
+	}
+
+	now = now.Add(11 * time.Minute)
+	allowed := authReq(http.MethodGet, "app.test", "/allowed/report", nil)
+	allowed.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	if rr, out := ah.wall(t, allowed); out != nil || rr.Code != http.StatusUnauthorized {
+		t.Fatalf("idle session was refreshed: fallthrough=%v status=%d", out != nil, rr.Code)
+	}
+}
+
 func TestAuthPlainHTTPDeadWall(t *testing.T) {
 	ah := newAuthHarness(t, aliceUsers(t), 0)
 	rr, out := ah.wall(t, httptest.NewRequest(http.MethodGet, "http://app.test/x", nil))
@@ -728,11 +784,11 @@ func TestAuthSessionStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(30 * time.Minute)
-	if _, _, ok := st.lookup(token, time.Hour); !ok {
+	if _, _, ok := st.lookup(token, "app.test", time.Hour, true); !ok {
 		t.Fatal("live session missed")
 	}
 	now = now.Add(2 * time.Hour)
-	if _, _, ok := st.lookup(token, time.Hour); ok {
+	if _, _, ok := st.lookup(token, "app.test", time.Hour, true); ok {
 		t.Fatal("idle session survived past ttl")
 	}
 
@@ -741,10 +797,10 @@ func TestAuthSessionStore(t *testing.T) {
 	if n := st.revokeUsersNotIn(map[string]bool{"alice": true}); n != 1 {
 		t.Fatalf("revokeUsersNotIn = %d, want 1", n)
 	}
-	if _, _, ok := st.lookup(tokA, time.Hour); !ok {
+	if _, _, ok := st.lookup(tokA, "a.test", time.Hour, true); !ok {
 		t.Fatal("kept user's session revoked")
 	}
-	if _, _, ok := st.lookup(tokB, time.Hour); ok {
+	if _, _, ok := st.lookup(tokB, "b.test", time.Hour, true); ok {
 		t.Fatal("removed user's session survived")
 	}
 
@@ -770,7 +826,7 @@ func TestAuthSessionIDPrefixResolution(t *testing.T) {
 	if found, _ := st.revokeID(list[0].ID); !found {
 		t.Fatal("listed id failed to revoke")
 	}
-	if _, _, ok := st.lookup(tok, time.Hour); ok {
+	if _, _, ok := st.lookup(tok, "app.test", time.Hour, true); ok {
 		t.Fatal("revoked session still resolves")
 	}
 }
@@ -936,6 +992,11 @@ func TestAuthOrderingPingBeforeWall(t *testing.T) {
 
 func TestAuthOrderingWallBeforeHub(t *testing.T) {
 	ah := newAuthHarness(t, aliceUsers(t), 0)
+	reg := newAppRegistry()
+	if _, err := reg.create("app", []string{"app.test"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	ah.h.dp = newDataPlane(reg, nil)
 	ah.h.hubCfg = &hubSite{path: "/hub", maxConns: 4, maxFrame: hubDefaultMaxFrame, maxChannels: 4, originAny: true}
 	rr := httptest.NewRecorder()
 	r := authReq(http.MethodGet, "app.test", "/hub", nil,
@@ -946,6 +1007,52 @@ func TestAuthOrderingWallBeforeHub(t *testing.T) {
 	}
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", rr.Code)
+	}
+}
+
+func TestAuthUnknownHostRejectedBeforeWall(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	reg := newAppRegistry()
+	if _, err := reg.create("known", []string{"known.test"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	ah.h.dp = newDataPlane(reg, nil)
+
+	rr := httptest.NewRecorder()
+	err := ah.h.ServeHTTP(rr, authReq(http.MethodGet, "unknown.test", "/private", nil), nil)
+	var he caddyhttp.HandlerError
+	if !errors.As(err, &he) || he.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown auth host: want HandlerError 404, got %v", err)
+	}
+	if rr.Code == http.StatusUnauthorized || strings.Contains(rr.Body.String(), "Sign in") {
+		t.Fatalf("unknown host reached auth wall: status=%d body=%q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthExactColdHostReachesWall(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	ah.h.dp = newDataPlane(newAppRegistry(), nil)
+	ah.h.authExactHosts = map[string]struct{}{"cold.test": {}}
+
+	rr := httptest.NewRecorder()
+	if err := ah.h.ServeHTTP(rr, authReq(http.MethodGet, "cold.test", "/private", nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("exact cold auth host: want wall 401, got %d body=%q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthWildcardStillRequiresHotClaim(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	ah.h.dp = newDataPlane(newAppRegistry(), nil)
+	ah.h.authExactHosts = map[string]struct{}{}
+
+	rr := httptest.NewRecorder()
+	err := ah.h.ServeHTTP(rr, authReq(http.MethodGet, "unknown.test", "/private", nil), nil)
+	var he caddyhttp.HandlerError
+	if !errors.As(err, &he) || he.StatusCode != http.StatusNotFound {
+		t.Fatalf("wildcard unknown auth host: want HandlerError 404, got %v", err)
 	}
 }
 
@@ -1017,11 +1124,50 @@ func TestAuthRespStripReservedCookies(t *testing.T) {
 	w := &authRespStrip{ResponseWriter: rec}
 	w.Header().Add("Set-Cookie", "__Host-janus=evil")
 	w.Header().Add("Set-Cookie", "__Host-janus_csrf=evil")
+	w.Header().Add("Set-Cookie", " __Host-janus-shadow=evil")
 	w.Header().Add("Set-Cookie", "sid=ok")
 	w.WriteHeader(200)
 	got := rec.Header().Values("Set-Cookie")
 	if len(got) != 1 || got[0] != "sid=ok" {
 		t.Fatalf("Set-Cookie after strip: %v", got)
+	}
+}
+
+func TestStripAuthCookiesPreservesUnrelatedQuotedValues(t *testing.T) {
+	r := authReq(http.MethodGet, "app.test", "/", nil)
+	r.Header.Add("Cookie", `__Host-janus=secret; quoted="a b"; tenant=value`)
+	r.Header.Add("Cookie", `__Host-janus_csrf=csrf; second="x,y"`)
+	stripAuthCookies(r)
+	if got, want := r.Header.Get("Cookie"), `quoted="a b"; tenant=value; second="x,y"`; got != want {
+		t.Fatalf("Cookie = %q, want %q", got, want)
+	}
+}
+
+func TestAuthRespStripScrubsFinalHeadersAfterEarlyHints(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := &authRespStrip{ResponseWriter: rec}
+	w.WriteHeader(http.StatusEarlyHints)
+	w.Header().Add("Set-Cookie", "__Host-janus=evil")
+	w.Header().Add("Set-Cookie", "sid=ok")
+	w.WriteHeader(http.StatusOK)
+	got := rec.Header().Values("Set-Cookie")
+	if len(got) != 1 || got[0] != "sid=ok" {
+		t.Fatalf("Set-Cookie committed after 1xx informational write: %v", got)
+	}
+}
+
+func TestAuthRespStripFlushesOnlyAfterCookieScrub(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := &authRespStrip{ResponseWriter: rec}
+	w.Header().Add("Set-Cookie", "__Host-janus=evil")
+	w.Header().Add("Set-Cookie", "sid=ok")
+	w.Flush()
+	if !rec.Flushed || rec.Code != http.StatusOK {
+		t.Fatalf("flush state: flushed=%v status=%d", rec.Flushed, rec.Code)
+	}
+	got := rec.Result().Header.Values("Set-Cookie")
+	if len(got) != 1 || got[0] != "sid=ok" {
+		t.Fatalf("Set-Cookie committed by Flush: %v", got)
 	}
 }
 

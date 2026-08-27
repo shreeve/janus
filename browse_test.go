@@ -584,6 +584,10 @@ func TestBrowseColdRoutingUsesActiveHandler(t *testing.T) {
 		response.Body.String() != "cold-root" {
 		t.Fatalf("cold handler routing: err=%v status=%d body=%q", err, response.Code, response.Body.String())
 	}
+	post := httptest.NewRecorder()
+	if err := h.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "http://cold.test/cold.txt", nil), nil); err != nil || post.Code != http.StatusNotFound {
+		t.Fatalf("cold non-read method: err=%v status=%d body=%q", err, post.Code, post.Body.String())
+	}
 }
 
 func TestBrowseRawSelectionForms(t *testing.T) {

@@ -92,8 +92,7 @@ type mdnsConfig struct {
 }
 
 // equal reports whether two desired configurations are the same mdns
-// posture (nil = disabled). An aborted reload whose mdns settings match
-// the surviving generation's has no divergence to report.
+// posture (nil = disabled).
 func (c *mdnsConfig) equal(o *mdnsConfig) bool {
 	if c == nil || o == nil {
 		return c == o
@@ -103,8 +102,7 @@ func (c *mdnsConfig) equal(o *mdnsConfig) bool {
 		mdnsIfacesEqual(c.ifaces, o.ifaces)
 }
 
-// describe renders a configuration for the divergence log: every knob
-// an operator would compare, on one line.
+// describe renders every configuration knob on one line for lifecycle logs.
 func (c *mdnsConfig) describe() string {
 	if c == nil {
 		return "disabled"
@@ -198,8 +196,10 @@ type mdnsAdvertiser struct {
 
 	mu          sync.Mutex
 	cfg         *mdnsConfig // desired; nil = disabled
+	epoch       uint64      // changes whenever desired config ownership changes
 	lastGen     any         // the config generation whose configure last took hold
-	prevCfg     *mdnsConfig // the configuration that configure replaced
+	prevGen     any         // predecessor generation, for aborted-reload rollback
+	prevCfg     *mdnsConfig // predecessor configuration, for aborted-reload rollback
 	entries     map[string]*mdnsEntry
 	skipped     map[string]bool // multi-label .local hosts currently registered
 	responder   dnssd.Responder
@@ -280,46 +280,53 @@ func (a *mdnsAdvertiser) configure(gen any, cfg *mdnsConfig) error {
 		}
 		a.startResponderLocked(r, cfg.ifaces)
 	}
+	a.prevGen = a.lastGen
 	a.prevCfg = a.cfg
 	a.cfg = cfg
 	a.lastGen = gen
+	a.epoch++
 	a.mu.Unlock()
 	a.kickReconcile()
 	return nil
 }
 
-// mdnsAbortedReloadMsg is the divergence ERROR's message, pinned by
-// TestMdnsAbortedReloadDetection.
-const mdnsAbortedReloadMsg = "janus mdns: aborted config reload left the pooled advertiser running the aborted generation's settings; the surviving config expects the settings it was reloading away from; rollback is not performed — mdns reconciles on the next successful reload"
-
-// generationRetired is the aborted-reload detector, called by
+// generationRetired rolls back an aborted reload, called by
 // App.Cleanup when a config generation releases its pooled-state
 // reference while another generation survives (janusPool.Delete
 // returned deleted == false). On a successful reload the retiring
 // generation is the old one and the surviving new generation has
-// already reconfigured the advertiser, so the identity check fails and
-// nothing logs; process shutdown is the last reference and never
-// reaches here; first boot retires nothing. Only an aborted reload
-// retires the generation that configured last while an older one
-// survives — the advertiser keeps running the aborted settings, and
-// that divergence is ERROR-logged with both configurations. Rollback is
-// deliberately not performed (owner ruling): state reconciles on the
-// next successful reload.
+// already reconfigured the advertiser, so the identity check fails, its
+// predecessor snapshot is cleared, and nothing logs. Process shutdown is the
+// last reference and never reaches here. Only an aborted reload retires the
+// generation that configured last while an older one survives. Restore that
+// predecessor atomically and wake the reconcile loop so rejected settings
+// cannot persist in the pooled advertiser.
 func (a *mdnsAdvertiser) generationRetired(gen any) {
 	a.mu.Lock()
 	if a.lastGen != gen {
+		// The old generation retiring after a successful handoff is no longer
+		// a rollback candidate. Do not retain its app/config graph indefinitely.
+		if a.prevGen == gen {
+			a.prevGen = nil
+			a.prevCfg = nil
+		}
 		a.mu.Unlock()
 		return
 	}
-	running, expected := a.cfg, a.prevCfg
+	rejected, restored := a.cfg, a.prevCfg
+	a.cfg = restored
+	a.lastGen = a.prevGen
+	a.prevCfg = nil
+	a.prevGen = nil
+	a.epoch++
 	a.mu.Unlock()
-	if running.equal(expected) {
-		return // identical mdns settings on both generations: no divergence
+	if !rejected.equal(restored) {
+		a.logger.Warn("janus mdns: rolled back aborted config reload",
+			zap.String("rejected", rejected.describe()),
+			zap.String("restored", restored.describe()),
+		)
 	}
-	a.logger.Error(mdnsAbortedReloadMsg,
-		zap.String("running", running.describe()),
-		zap.String("expected", expected.describe()),
-	)
+	a.kickReconcile()
 }
 
 // startResponderLocked installs a responder and starts its Respond loop.
@@ -352,6 +359,7 @@ func (a *mdnsAdvertiser) startResponderLocked(r dnssd.Responder, ifaces []string
 func (a *mdnsAdvertiser) shutdown() {
 	a.mu.Lock()
 	a.cfg = nil
+	a.epoch++
 	a.mu.Unlock()
 	close(a.stop)
 	<-a.done
@@ -362,7 +370,9 @@ func (a *mdnsAdvertiser) shutdown() {
 // set. The only caller is the reconcile goroutine (and shutdown, after
 // the loop exits), so responder I/O — including the multi-second probe
 // per new name, during which the library answers no queries — is
-// serialized here and never under a registry lock.
+// serialized here and never under a registry lock. The configuration epoch
+// fences responder operations that complete after a reload rollback or a
+// newer generation takes ownership.
 func (a *mdnsAdvertiser) reconcile() {
 	// Phase 1: teardown. A responder whose Respond loop died on its own
 	// is discarded and rebuilt from zero — nothing was withdrawn, so the
@@ -371,6 +381,7 @@ func (a *mdnsAdvertiser) reconcile() {
 	// full teardown with goodbyes.
 	a.mu.Lock()
 	cfg := a.cfg
+	epoch := a.epoch
 	respondDied := false
 	if a.responder != nil {
 		select {
@@ -423,7 +434,7 @@ func (a *mdnsAdvertiser) reconcile() {
 	// live under the lock. Entries whose Add failed re-enter the add set
 	// — the periodic pass is the retry cadence.
 	a.mu.Lock()
-	if a.cfg != cfg {
+	if a.epoch != epoch || a.cfg != cfg {
 		a.mu.Unlock()
 		return // reconfigured mid-pass; the pending kick re-runs
 	}
@@ -477,6 +488,12 @@ func (a *mdnsAdvertiser) reconcile() {
 		}
 	}
 	for _, e := range adds {
+		a.mu.Lock()
+		current := a.epoch == epoch && a.entries[e.key()] == e
+		a.mu.Unlock()
+		if !current {
+			continue
+		}
 		label := strings.TrimSuffix(e.name, ".local")
 		srv, err := dnssd.NewService(dnssd.Config{
 			Name:          label,
@@ -488,14 +505,19 @@ func (a *mdnsAdvertiser) reconcile() {
 			BlockedIPNets: mdnsBlockedNets,
 		})
 		if err != nil {
-			a.markFailed(e)
+			a.markFailed(e, epoch)
 			a.logger.Error("janus mdns service", zap.String("name", e.name), zap.Error(err))
 			continue
 		}
 		handle, err := responder.Add(srv) // probes: expect multi-second latency
 		a.mu.Lock()
-		if a.entries[e.key()] != e {
+		if a.epoch != epoch || a.entries[e.key()] != e {
 			// Withdrawn or reconfigured while probing: the next pass owns it.
+			// Drop a still-current entry so an identical-config handoff cannot
+			// strand it forever in the otherwise-transient probing state.
+			if a.entries[e.key()] == e {
+				delete(a.entries, e.key())
+			}
 			a.mu.Unlock()
 			if err == nil && handle != nil {
 				responder.Remove(handle)
@@ -537,6 +559,10 @@ func (a *mdnsAdvertiser) reconcile() {
 	// A newly observed rename updates the stored state and logs WARN
 	// once, on this pass or the next periodic one.
 	a.mu.Lock()
+	if a.epoch != epoch {
+		a.mu.Unlock()
+		return
+	}
 	type rename struct{ configured, effective string }
 	var renames []rename
 	for _, e := range a.entries {
@@ -560,10 +586,16 @@ func (a *mdnsAdvertiser) reconcile() {
 
 // markFailed marks an entry failed (still visible on /1.0/mdns; the
 // periodic pass retries it) unless it was withdrawn mid-flight.
-func (a *mdnsAdvertiser) markFailed(e *mdnsEntry) {
+func (a *mdnsAdvertiser) markFailed(e *mdnsEntry, epoch uint64) {
 	a.mu.Lock()
 	if a.entries[e.key()] == e {
-		e.state = mdnsStateFailed
+		if a.epoch == epoch {
+			e.state = mdnsStateFailed
+		} else {
+			// Ownership changed after service construction began. Deleting the
+			// probing placeholder lets the new epoch recreate it on its pass.
+			delete(a.entries, e.key())
+		}
 	}
 	a.mu.Unlock()
 }
@@ -610,10 +642,19 @@ func (a *mdnsAdvertiser) desiredLocked(cfg *mdnsConfig) map[string]*mdnsEntry {
 func (a *mdnsAdvertiser) carriesHost(host string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, e := range a.entries {
-		if e.name == host {
+	// The overwhelmingly common case is a configured identity: the front-door
+	// name or an app's desired .local name. Entries are already keyed by type,
+	// name, and port, so answer those in constant time. Only an effective name
+	// produced by a conflict rename needs the live-handle scan below; reading the
+	// handle here preserves the contract that a post-announce rename is visible
+	// immediately, before the next reconcile pass.
+	if a.cfg != nil {
+		if a.entries[mdnsEntryKey(mdnsTypeFrontDoor, host, a.cfg.port)] != nil ||
+			a.entries[mdnsEntryKey(mdnsTypeAppHost, host, 443)] != nil {
 			return true
 		}
+	}
+	for _, e := range a.entries {
 		if eff, _ := e.observed(); eff == host {
 			return true
 		}
@@ -735,13 +776,15 @@ func (a *App) startMdns() error {
 		if !ok {
 			return fmt.Errorf("janus mdns: listen %s: %T is not a stream listener", ms.Listen, lnAny)
 		}
+		ln = &idempotentListener{Listener: ln}
 		srv := &http.Server{
 			Handler:           a.mdnsFrontDoor(),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		a.mdnsSrv = srv
+		a.mdnsLn = ln
 		go func() {
-			if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+			if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed && !a.mdnsStopping.Load() {
 				a.logger.Error("janus mdns front door stopped", zap.Error(serveErr))
 			}
 		}()
@@ -769,14 +812,28 @@ func (a *App) startMdns() error {
 // stopMdns closes this config generation's front-door server; the pooled
 // listener socket survives while another generation still holds it.
 func (a *App) stopMdns() error {
-	if a.mdnsSrv == nil {
+	if a.mdnsSrv == nil && a.mdnsLn == nil {
 		return nil
+	}
+	a.mdnsStopping.Store(true)
+	var closeErr error
+	if a.mdnsLn != nil {
+		if err := a.mdnsLn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErr = err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := a.mdnsSrv.Shutdown(ctx)
+	var shutdownErr error
+	if a.mdnsSrv != nil {
+		shutdownErr = a.mdnsSrv.Shutdown(ctx)
+	}
 	a.mdnsSrv = nil
-	return err
+	a.mdnsLn = nil
+	if closeErr != nil {
+		return closeErr
+	}
+	return shutdownErr
 }
 
 // mdnsSharedPasteBlock is the exact site block the shared-coverage

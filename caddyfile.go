@@ -52,6 +52,9 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 				a.Control = append(a.Control, c)
 			case "ping":
+				if a.Ping != nil {
+					return d.Err("duplicate ping directive in the same block")
+				}
 				on, err := parseOnOff(d.RemainingArgs())
 				if err != nil {
 					return d.Errf("ping: %v", err)
@@ -121,8 +124,8 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return err
 				}
 				dur, perr := caddy.ParseDuration(val)
-				if perr != nil || dur <= 0 {
-					return d.Errf("heartbeat_ttl: want a positive duration (e.g. 15s), got %q", val)
+				if perr != nil || dur < minHeartbeatTTL {
+					return d.Errf("heartbeat_ttl: want a duration of at least %v (e.g. 15s), got %q", minHeartbeatTTL, val)
 				}
 				a.HeartbeatTTL = caddy.Duration(dur)
 			case "token":

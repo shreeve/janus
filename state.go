@@ -93,6 +93,7 @@ func (st *janusState) Destruct() error {
 	for _, h := range st.hubs.snapshotAll() {
 		st.hubs.teardownApp(h.id)
 	}
+	st.dp.transport.CloseIdleConnections()
 	return nil
 }
 

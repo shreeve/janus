@@ -184,7 +184,8 @@ func (a *App) provisionCacheStore() error {
 		}
 	}
 	a.cache = newCacheStore(maxBytes, share)
-	a.appsReg.setPurge(a.cache.purgeApp)
+	a.purgeOwner = new(purgeOwner)
+	a.appsReg.bindPurge(a.purgeOwner, a.cache.purgeApp)
 	return nil
 }
 

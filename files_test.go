@@ -266,8 +266,8 @@ func TestSitePolicyHardErrors(t *testing.T) {
 func TestSitePolicyRemapAliasBeneathPattern(t *testing.T) {
 	dir := t.TempDir()
 	site, suffix, err := normalizeSitePolicy(&SitePolicy{
-		Host: "{site}.Example.com",
-		Dir:  dir,
+		Host:    "{site}.Example.com",
+		Dir:     dir,
 		Aliases: map[string]string{"Local.example.com": "ola"},
 	})
 	if err != nil {

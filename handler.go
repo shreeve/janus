@@ -56,11 +56,13 @@ type Handler struct {
 
 	// authCfg is the site's effective auth configuration; nil when the
 	// effective auth is off, so the bypass path costs one nil check.
-	authCfg *authSite
+	authCfg        *authSite
+	authExactHosts map[string]struct{}
 
 	browseEnabled bool
 	browseCfg     *BrowseSettings
 	coldRoots     []BrowseRoot
+	coldActive    []activeBrowseRoot
 }
 
 // CaddyModule returns the Caddy module information.
@@ -155,6 +157,7 @@ func (h *Handler) provisionBrowse() error {
 			}
 		}
 		h.coldRoots = append([]BrowseRoot(nil), h.Browse.Roots...)
+		h.coldActive = coldBrowseRoots(h.coldRoots)
 	}
 	if len(h.coldRoots) > 0 && !enabled {
 		return fmt.Errorf("janus browse: cold roots require effective browse on")
@@ -200,16 +203,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		_, err := w.Write([]byte("pong\n"))
 		return err
 	}
+	host := normalizeHostHeader(r.Host)
+	var rec AppRecord
+	resolved := false
 	// The auth wall (after ping — /ping answers unauthenticated; before
 	// hub interception — an upgrade under a gate without a session gets
 	// 401 here): gate login doors, path allow lists, strip on every
 	// fall-through; authorized gated traffic gets Remote-User injected.
 	if h.authCfg != nil {
-		if h.dp != nil {
-			if provisional, ok := h.dp.registry.resolveRequestHost(r.Host); ok {
-				facts.setOwner(provisional)
+		// A wildcard/catch-all Janus route does not itself admit arbitrary hot
+		// app hosts. Reject an unknown host before the wall can expose a login
+		// surface or spend password-KDF work on it. An exact Caddy host route
+		// and a configured cold browse root are explicit cold admission and do
+		// not depend on a hot registration.
+		requireHotClaim := !h.authExactHostClaim(host) &&
+			!(h.browseEnabled && len(h.coldRoots) > 0)
+		if requireHotClaim && h.dp != nil {
+			if rec, resolved = h.dp.registry.resolveRequestHost(r.Host); resolved {
+				facts.setOwner(rec)
 				facts.setClass("auth")
+			} else {
+				facts.clearOwner()
+				return caddyhttp.Error(http.StatusNotFound,
+					fmt.Errorf("janus: unknown host %q", host))
 			}
+		} else if requireHotClaim {
+			facts.clearOwner()
+			return caddyhttp.Error(http.StatusNotFound, nil)
 		}
 		rr, handled, err := h.serveAuthWall(w, r)
 		if handled || err != nil {
@@ -219,14 +239,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		r = rr
 		w = &authRespStrip{ResponseWriter: w}
 	}
-	if _, err := validatedRequestPath(r); err != nil {
+	requestPath, err := validatedRequestPath(r)
+	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return nil
 	}
 	assetRequest := h.browseEnabled && strings.HasPrefix(r.URL.EscapedPath(), browseAssetPrefix)
-	var host string
-	var rec AppRecord
-	host = normalizeHostHeader(r.Host)
 	// startBrowse validates and reserves the exact hosts that can activate a
 	// cold-root handler. The active handler is therefore the routing claim;
 	// serving must not depend on a generation-start side table mutating the
@@ -236,14 +254,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			h.serveBrowseAsset(w, r)
 			return nil
 		}
-		return h.serveColdBrowse(w, r)
+		return h.serveColdBrowsePath(w, r, requestPath)
 	}
 	if h.dp == nil {
 		return caddyhttp.Error(http.StatusNotFound, nil)
 	}
-	var ok bool
-	rec, ok = h.dp.registry.resolveRequestHost(r.Host)
-	if !ok {
+	if !resolved {
+		rec, resolved = h.dp.registry.resolveRequestHost(r.Host)
+	}
+	if !resolved {
 		facts.clearOwner()
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
@@ -261,19 +280,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	// the same path flows through the data plane like any other.
 	if h.hubCfg != nil && r.URL.Path == h.hubCfg.path && websocket.IsWebSocketUpgrade(r) {
 		facts.setClass("hub")
-		return h.serveHub(w, r)
+		return h.serveHubResolved(w, r, host, rec)
 	}
 	if (h.filesEnabled() || h.browseEnabled) && rec.Files != nil {
-		handled, err := h.serveFiles(w, r, rec)
+		handled, err := h.serveFilesPath(w, r, requestPath, rec)
 		if handled || err != nil {
 			return err
 		}
 	}
 	if h.cacheCfg != nil {
-		return h.serveCache(w, r)
+		return h.serveCacheResolved(w, r, host, rec)
 	}
 	facts.setClass("proxy")
 	return h.dp.serveResolved(w, r, host, rec)
+}
+
+// authExactHostClaim reports whether this handler sits below an exact Caddy
+// host matcher for host. Wildcard and catch-all routes still require the hot
+// registry: their configuration describes behavior, not tenant admission.
+func (h *Handler) authExactHostClaim(host string) bool {
+	_, ok := h.authExactHosts[host]
+	return ok
 }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
@@ -293,6 +320,9 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for nesting := d.Nesting(); d.NextBlock(nesting); {
 		switch d.Val() {
 		case "ping":
+			if h.Ping != nil {
+				return d.Err("duplicate ping directive in the same block")
+			}
 			on, err := parseOnOff(d.RemainingArgs())
 			if err != nil {
 				return d.Errf("ping: %v", err)
