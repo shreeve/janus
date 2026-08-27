@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -20,17 +21,32 @@ import (
 )
 
 type controlServer struct {
-	mode   string
-	server *http.Server
-	ln     net.Listener
-	mu     sync.Mutex
-	conns  map[net.Conn]struct{}
+	mode     string
+	server   *http.Server
+	ln       net.Listener
+	stopping atomic.Bool
+	mu       sync.Mutex
+	conns    map[net.Conn]struct{}
+}
+
+// idempotentListener makes Close safe across Janus's early explicit close and
+// net/http's documented deferred close in Server.Serve. This is required for
+// Caddy's reference-counted listeners, where a second Close is not harmless.
+type idempotentListener struct {
+	net.Listener
+	once sync.Once
+	err  error
+}
+
+func (ln *idempotentListener) Close() error {
+	ln.once.Do(func() { ln.err = ln.Listener.Close() })
+	return ln.err
 }
 
 func (a *App) startControlListeners() error {
-	mux := a.controlMux()
 	for i := range a.Control {
 		c := &a.Control[i]
+		mux := a.controlMuxAt(c.basePath)
 		handler := http.Handler(mux)
 		if c.secret != "" {
 			handler = bearerAuth(c.secret, mux)
@@ -94,6 +110,7 @@ func (a *App) startControlListeners() error {
 		if c.useTLS {
 			ln = tls.NewListener(ln, srv.TLSConfig)
 		}
+		ln = &idempotentListener{Listener: ln}
 
 		cs.ln = ln
 		a.controlSrvs = append(a.controlSrvs, cs)
@@ -106,7 +123,7 @@ func (a *App) startControlListeners() error {
 		)
 		go func(s *controlServer) {
 			err := s.server.Serve(s.ln)
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err != nil && !errors.Is(err, http.ErrServerClosed) && !s.stopping.Load() {
 				a.logger.Error("janus control server stopped",
 					zap.String("mode", s.mode),
 					zap.Error(err),
@@ -140,6 +157,7 @@ func (a *App) stopControlListeners() error {
 	// from racing past Shutdown's listener bookkeeping and accepting afterward.
 	// Caddy's pooled listener remains live when another generation shares it.
 	for _, s := range a.controlSrvs {
+		s.stopping.Store(true)
 		if err := s.ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) && first == nil {
 			first = err
 		}
@@ -151,6 +169,10 @@ func (a *App) stopControlListeners() error {
 		go func(s *controlServer) {
 			defer wg.Done()
 			if err := s.server.Shutdown(ctx); err != nil {
+				// The drain deadline expired: a handler slower than the
+				// deadline must not outlive its generation, so force the
+				// remaining connections closed.
+				s.closeConnections()
 				mu.Lock()
 				if first == nil {
 					first = err
@@ -165,67 +187,64 @@ func (a *App) stopControlListeners() error {
 }
 
 func (a *App) controlMux() *http.ServeMux {
+	return a.controlMuxAt("")
+}
+
+func (a *App) controlMuxAt(base string) *http.ServeMux {
 	mux := http.NewServeMux()
-	// Register under each base path; empty base → /1.0
-	paths := map[string]bool{"": true}
-	for _, c := range a.Control {
-		paths[c.basePath] = true
-	}
-	for base := range paths {
-		p1 := base + "/1.0"
-		p2 := base + "/1.0/health"
-		// "/{$}" matches only the trailing-slash form — never a subtree.
-		// An unknown path under /1.0 gets the mux's 404 and a known path
-		// with the wrong method gets its 405; a typo'd or wrong-method
-		// call must never get a 200 that masks the mistake.
-		mux.HandleFunc(p1, a.handleControlRoot)
-		mux.HandleFunc(p1+"/{$}", a.handleControlRoot)
-		mux.HandleFunc(p2, a.handleControlHealth)
-		mux.HandleFunc(p2+"/{$}", a.handleControlHealth)
+	p1 := base + "/1.0"
+	p2 := base + "/1.0/health"
+	// "/{$}" matches only the trailing-slash form — never a subtree.
+	// An unknown path under /1.0 gets the mux's 404 and a known path
+	// with the wrong method gets its 405; a typo'd or wrong-method
+	// call must never get a 200 that masks the mistake.
+	mux.HandleFunc(p1, a.handleControlRoot)
+	mux.HandleFunc(p1+"/{$}", a.handleControlRoot)
+	mux.HandleFunc(p2, a.handleControlHealth)
+	mux.HandleFunc(p2+"/{$}", a.handleControlHealth)
 
-		apps := base + "/1.0/apps"
-		mux.HandleFunc("POST "+apps, a.handleAppsCreate)
-		mux.HandleFunc("GET "+apps, a.handleAppsList)
-		mux.HandleFunc("GET "+apps+"/{id}", a.handleAppsGet)
-		mux.HandleFunc("PATCH "+apps+"/{id}", a.handleAppsPatch)
-		mux.HandleFunc("DELETE "+apps+"/{id}", a.handleAppsDelete)
-		mux.HandleFunc("PUT "+apps+"/{id}/upstreams", a.handleAppsUpstreamsPut)
-		mux.HandleFunc("POST "+apps+"/{id}/heartbeat", a.handleAppsHeartbeat)
-		mux.HandleFunc(apps+"/{id}/access", a.handleAccessStream)
-		mux.HandleFunc("GET "+base+"/1.0/access", a.handleAccessStatus)
-		mux.HandleFunc("GET "+base+"/1.0/access/{$}", a.handleAccessStatus)
+	apps := base + "/1.0/apps"
+	mux.HandleFunc("POST "+apps, a.handleAppsCreate)
+	mux.HandleFunc("GET "+apps, a.handleAppsList)
+	mux.HandleFunc("GET "+apps+"/{id}", a.handleAppsGet)
+	mux.HandleFunc("PATCH "+apps+"/{id}", a.handleAppsPatch)
+	mux.HandleFunc("DELETE "+apps+"/{id}", a.handleAppsDelete)
+	mux.HandleFunc("PUT "+apps+"/{id}/upstreams", a.handleAppsUpstreamsPut)
+	mux.HandleFunc("POST "+apps+"/{id}/heartbeat", a.handleAppsHeartbeat)
+	mux.HandleFunc(apps+"/{id}/access", a.handleAccessStream)
+	mux.HandleFunc("GET "+base+"/1.0/access", a.handleAccessStatus)
+	mux.HandleFunc("GET "+base+"/1.0/access/{$}", a.handleAccessStatus)
 
-		mux.HandleFunc("GET "+base+"/1.0/tls/ask", a.handleTLSAsk)
+	mux.HandleFunc("GET "+base+"/1.0/tls/ask", a.handleTLSAsk)
 
-		// Cache counters, always on: a non-blocking snapshot of per-shard
-		// atomics (monotonic, not mutually atomic). A tight scrape loop
-		// can never degrade the data plane.
-		mux.HandleFunc("GET "+base+"/1.0/cache", a.handleCacheStats)
-		mux.HandleFunc("GET "+base+"/1.0/cache/{$}", a.handleCacheStats)
+	// Cache counters, always on: a non-blocking snapshot of per-shard
+	// atomics (monotonic, not mutually atomic). A tight scrape loop
+	// can never degrade the data plane.
+	mux.HandleFunc("GET "+base+"/1.0/cache", a.handleCacheStats)
+	mux.HandleFunc("GET "+base+"/1.0/cache/{$}", a.handleCacheStats)
 
-		// Hub: publish plane, membership snapshot, and counters (always on).
-		mux.HandleFunc("POST "+apps+"/{id}/hub/publish", a.handleHubPublish)
-		mux.HandleFunc("GET "+apps+"/{id}/hub", a.handleHubSnapshot)
-		mux.HandleFunc("GET "+base+"/1.0/hub", a.handleHubStats)
-		mux.HandleFunc("GET "+base+"/1.0/hub/{$}", a.handleHubStats)
+	// Hub: publish plane, membership snapshot, and counters (always on).
+	mux.HandleFunc("POST "+apps+"/{id}/hub/publish", a.handleHubPublish)
+	mux.HandleFunc("GET "+apps+"/{id}/hub", a.handleHubSnapshot)
+	mux.HandleFunc("GET "+base+"/1.0/hub", a.handleHubStats)
+	mux.HandleFunc("GET "+base+"/1.0/hub/{$}", a.handleHubStats)
 
-		// mDNS advertiser state, always on: {"enabled": false} when the
-		// capability is off, the full advertiser view when on.
-		mux.HandleFunc("GET "+base+"/1.0/mdns", a.handleMdnsState)
-		mux.HandleFunc("GET "+base+"/1.0/mdns/{$}", a.handleMdnsState)
+	// mDNS advertiser state, always on: {"enabled": false} when the
+	// capability is off, the full advertiser view when on.
+	mux.HandleFunc("GET "+base+"/1.0/mdns", a.handleMdnsState)
+	mux.HandleFunc("GET "+base+"/1.0/mdns/{$}", a.handleMdnsState)
 
-		// Auth wall state, always on: {"enabled": false} when no site's
-		// effective auth is on; counters, the session list, and
-		// revocation (observe and revoke — never configure).
-		mux.HandleFunc("GET "+base+"/1.0/auth", a.handleAuthState)
-		mux.HandleFunc("GET "+base+"/1.0/auth/{$}", a.handleAuthState)
-		mux.HandleFunc("GET "+base+"/1.0/auth/sessions", a.handleAuthSessions)
-		mux.HandleFunc("DELETE "+base+"/1.0/auth/sessions", a.handleAuthSessionsWipe)
-		mux.HandleFunc("DELETE "+base+"/1.0/auth/sessions/{id}", a.handleAuthSessionDelete)
+	// Auth wall state, always on: {"enabled": false} when no site's
+	// effective auth is on; counters, the session list, and
+	// revocation (observe and revoke — never configure).
+	mux.HandleFunc("GET "+base+"/1.0/auth", a.handleAuthState)
+	mux.HandleFunc("GET "+base+"/1.0/auth/{$}", a.handleAuthState)
+	mux.HandleFunc("GET "+base+"/1.0/auth/sessions", a.handleAuthSessions)
+	mux.HandleFunc("DELETE "+base+"/1.0/auth/sessions", a.handleAuthSessionsWipe)
+	mux.HandleFunc("DELETE "+base+"/1.0/auth/sessions/{id}", a.handleAuthSessionDelete)
 
-		mux.HandleFunc("GET "+base+"/1.0/browse", a.handleBrowseState)
-		mux.HandleFunc("GET "+base+"/1.0/browse/{$}", a.handleBrowseState)
-	}
+	mux.HandleFunc("GET "+base+"/1.0/browse", a.handleBrowseState)
+	mux.HandleFunc("GET "+base+"/1.0/browse/{$}", a.handleBrowseState)
 	return mux
 }
 

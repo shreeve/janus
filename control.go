@@ -181,6 +181,26 @@ func (c *Control) parseHTTPListen(requireHTTPS bool) error {
 	if err != nil {
 		return fmt.Errorf("invalid listen URL %q: %w", c.Listen, err)
 	}
+	if u.User != nil {
+		return fmt.Errorf("listen URL must not contain user information: %q", c.Listen)
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("listen URL must not contain a query: %q", c.Listen)
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("listen URL must not contain a fragment: %q", c.Listen)
+	}
+	// net/url may leave RawPath empty when an escape decodes to a form it
+	// considers canonical (for example %25). Inspect the original path
+	// spelling as well so no escaped alias reaches ServeMux.
+	rawAuthority := strings.TrimPrefix(c.Listen, u.Scheme+"://")
+	rawPath := ""
+	if slash := strings.IndexByte(rawAuthority, '/'); slash >= 0 {
+		rawPath = rawAuthority[slash:]
+	}
+	if u.RawPath != "" || strings.Contains(rawPath, "%") {
+		return fmt.Errorf("listen URL path must not contain percent escapes: %q", c.Listen)
+	}
 	switch u.Scheme {
 	case "http":
 		if requireHTTPS {
@@ -215,5 +235,68 @@ func (c *Control) parseHTTPListen(requireHTTPS bool) error {
 	if c.basePath == "/" {
 		c.basePath = ""
 	}
+	// Go 1.22+ ServeMux paths interpret braces as wildcards and panic on
+	// malformed patterns. Control URL paths are literal prefixes, so reject
+	// wildcard syntax before a configured value can reach HandleFunc.
+	if strings.ContainsAny(c.basePath, "{}") {
+		return fmt.Errorf("listen URL path must not contain '{' or '}': %q", c.Listen)
+	}
+	if strings.Contains(c.basePath, "//") || strings.Contains(c.basePath, "/./") ||
+		strings.Contains(c.basePath, "/../") || strings.HasSuffix(c.basePath, "/.") ||
+		strings.HasSuffix(c.basePath, "/..") {
+		return fmt.Errorf("listen URL path must be canonical: %q", c.Listen)
+	}
 	return nil
+}
+
+// normalizeControls resolves every listener and rejects aliases before Start.
+// Different modes may not bind the same network/address: SO_REUSEPORT would
+// otherwise split requests nondeterministically between two policy wrappers.
+func normalizeControls(controls []Control) error {
+	modes := make(map[string]bool, len(controls))
+	binds := make([]Control, 0, len(controls))
+	for i := range controls {
+		if err := controls[i].normalize(); err != nil {
+			return fmt.Errorf("janus: %w", err)
+		}
+		c := controls[i]
+		if modes[c.Mode] {
+			return fmt.Errorf("janus: duplicate control mode %q", c.Mode)
+		}
+		modes[c.Mode] = true
+		for _, prior := range binds {
+			if controlBindsOverlap(prior, c) {
+				return fmt.Errorf("janus: control %s listen %q and control %s listen %q have overlapping %s addresses %q and %q",
+					prior.Mode, prior.Listen, c.Mode, c.Listen, c.network, prior.addr, c.addr)
+			}
+		}
+		binds = append(binds, c)
+	}
+	return nil
+}
+
+func controlBindsOverlap(a, b Control) bool {
+	if a.network != b.network {
+		return false
+	}
+	if a.network != "tcp" {
+		return a.addr == b.addr
+	}
+	aHost, aPort, aErr := net.SplitHostPort(a.addr)
+	bHost, bPort, bErr := net.SplitHostPort(b.addr)
+	if aErr != nil || bErr != nil || aPort != bPort {
+		return false
+	}
+	if strings.EqualFold(aHost, bHost) {
+		return true
+	}
+	aIP, bIP := net.ParseIP(aHost), net.ParseIP(bHost)
+	if aIP != nil && aIP.IsUnspecified() || bIP != nil && bIP.IsUnspecified() {
+		return true
+	}
+	if strings.EqualFold(aHost, "localhost") && bIP != nil && bIP.IsLoopback() ||
+		strings.EqualFold(bHost, "localhost") && aIP != nil && aIP.IsLoopback() {
+		return true
+	}
+	return aIP != nil && bIP != nil && aIP.Equal(bIP)
 }

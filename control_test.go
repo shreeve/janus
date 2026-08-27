@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +46,109 @@ func TestParseTokenArg(t *testing.T) {
 		if kind != tt.kind || ref != tt.ref {
 			t.Fatalf("%q: got (%s,%s), want (%s,%s)", tt.val, kind, ref, tt.kind, tt.ref)
 		}
+	}
+}
+
+func TestControlRejectsUnsafeListenURLs(t *testing.T) {
+	for _, listen := range []string{
+		"http://user@127.0.0.1:7600/admin",
+		"http://127.0.0.1:7600/admin?debug=1",
+		"http://127.0.0.1:7600/admin#fragment",
+		"http://127.0.0.1:7600/{",
+		"http://127.0.0.1:7600/%7Bname%7D",
+		"http://127.0.0.1:7600/%61dmin",
+		"http://127.0.0.1:7600/%25admin",
+		"http://127.0.0.1:7600/admin%20api",
+		"http://127.0.0.1:7600/admin//v1",
+		"http://127.0.0.1:7600/admin/../ops",
+	} {
+		c := Control{Mode: "local", Listen: listen}
+		if err := c.normalize(); err == nil {
+			t.Errorf("accepted unsafe listen URL %q", listen)
+		}
+	}
+}
+
+func TestNormalizeControlsRejectsEffectiveBindCollision(t *testing.T) {
+	t.Setenv("JANUS_TEST_TOKEN", "secret")
+	for _, publicListen := range []string{
+		"https://127.0.0.1:17601/public",
+		"https://0.0.0.0:17601/public",
+		"https://localhost:17601/public",
+	} {
+		controls := []Control{
+			{Mode: "local", Listen: "https://127.0.0.1:17601/local"},
+			{Mode: "public", Listen: publicListen, TokenKind: tokenEnv, Token: "JANUS_TEST_TOKEN"},
+		}
+		err := normalizeControls(controls)
+		if err == nil || !strings.Contains(err.Error(), "overlapping tcp addresses") {
+			t.Errorf("want effective-bind collision for %q, got %v", publicListen, err)
+		}
+	}
+}
+
+func TestControlMuxBaseIsolation(t *testing.T) {
+	app := &App{}
+	for _, tt := range []struct {
+		name      string
+		mux       http.Handler
+		served    string
+		notServed string
+	}{
+		{name: "root", mux: app.controlMuxAt(""), served: "/1.0", notServed: "/admin/1.0"},
+		{name: "prefixed", mux: app.controlMuxAt("/admin"), served: "/admin/1.0", notServed: "/1.0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			served := httptest.NewRecorder()
+			tt.mux.ServeHTTP(served, httptest.NewRequest(http.MethodGet, tt.served, nil))
+			if served.Code != http.StatusOK {
+				t.Fatalf("%s: got %d, want 200", tt.served, served.Code)
+			}
+			missing := httptest.NewRecorder()
+			tt.mux.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, tt.notServed, nil))
+			if missing.Code != http.StatusNotFound {
+				t.Fatalf("%s: got %d, want 404", tt.notServed, missing.Code)
+			}
+		})
+	}
+}
+
+type closeCountingListener struct {
+	net.Listener
+	closes atomic.Int32
+}
+
+func (ln *closeCountingListener) Close() error {
+	ln.closes.Add(1)
+	return ln.Listener.Close()
+}
+
+func TestIdempotentListenerClosesCaddyHandleOnce(t *testing.T) {
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counted := &closeCountingListener{Listener: raw}
+	ln := &idempotentListener{Listener: counted}
+	srv := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})}
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ln) }()
+
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("Serve did not return after listener close")
+	}
+	if got := counted.closes.Load(); got != 1 {
+		t.Fatalf("underlying listener closed %d times, want 1", got)
 	}
 }
 
