@@ -37,7 +37,7 @@ app.example.com {
 
 Registry, data plane, and hub state live in pooled process state: a Caddy config reload never drops a registration or a WebSocket. Everything is memory-only by contract — a restart empties the registry and tenants re-register. See [`Caddyfile.minimal`](Caddyfile.minimal) for the operator-facing starting point, [`Caddyfile.example`](Caddyfile.example) for the full capability walkthrough, and [`docs/`](docs/) for the contracts.
 
-This repository is a Go module. Caddy is a dependency, not a git submodule. A Janus-enabled binary is produced with [xcaddy](https://github.com/caddyserver/xcaddy), which compiles stock Caddy together with this module into one static `caddy` binary.
+This repository is a Go module. Caddy is a dependency, not a git submodule. The `janus` binary is built from [`cmd/janus`](cmd/janus/main.go), which compiles stock Caddy, this module, and the Route 53 DNS provider into one static executable; the module also loads into any custom Caddy build like any other plugin.
 
 **License:** Apache License 2.0 (same family as Caddy’s source).
 
@@ -110,7 +110,6 @@ behind Janus in production, unchanged.
 ## Requirements
 
 - **Go** — current stable release ([go.dev/dl](https://go.dev/dl/))
-- **xcaddy** — builds Caddy with modules
 - A `Caddyfile` that loads Janus (repo root)
 
 ### Install Go (macOS, Homebrew)
@@ -124,13 +123,6 @@ go version               # confirm current stable
 ### Install Go (official tarball)
 
 Follow [go.dev/doc/install](https://go.dev/doc/install). On macOS Apple Silicon, that is typically the `darwin-arm64` archive or `.pkg` from [go.dev/dl](https://go.dev/dl/). Ensure `$(go env GOPATH)/bin` is on your `PATH` so tools installed with `go install` are available.
-
-### Install xcaddy
-
-```bash
-go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
-xcaddy version
-```
 
 ## Capability order
 
@@ -150,28 +142,25 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 10 | **access log** | JSON-compatible durable access log plus bounded app-scoped NDJSON streams on `/1.0` | [`capability-access-log`](docs/20260801-081600-capability-access-log.md) |
 
 ```bash
-export PATH="$(go env GOPATH)/bin:$PATH"
-
-go mod tidy
-mkdir -p bin
-xcaddy build \
-  --with github.com/shreeve/janus=. \
-  --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
-  --output ./bin/caddy-janus
+make janus   # go build ./cmd/janus -> bin/janus
 
 go test ./...
-./test.sh   # capability-ordered acceptance groups, ending with access
+./test.sh    # capability-ordered acceptance groups, ending with access
 ```
 
-The `chi` replacement is an intentional security pin for the prebuilt Caddy
-binary; Caddy 2.11.4 otherwise resolves chi 5.2.5.
+`cmd/janus` is the binary's main package: stock Caddy, the Janus module,
+and the Route 53 DNS provider (DNS-01 wildcard certificates), compiled as
+one static executable. go.mod pins every dependency, including chi at
+v5.3.2 — a security pin above the v5.2.5 that Caddy 2.11.4 resolves alone.
+`janus version`, `-v`, `-V`, and `--version` all report the Janus and Caddy
+versions; every other subcommand is stock Caddy.
 
 ### 1. ping (data plane)
 
 Trusted wildcard cert in [`certs/`](certs/); DNS → `127.0.0.1`; SNI picks the site. No control plane required.
 
 ```bash
-./bin/caddy-janus run
+./bin/janus run
 ```
 
 ```bash
@@ -181,7 +170,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://off.ripdev.io/ping
 # → 404
 ```
 
-On some systems binding :443 needs elevated privileges (`sudo ./bin/caddy-janus run …`). On current macOS it often works without sudo.
+On some systems binding :443 needs elevated privileges (`sudo ./bin/janus run …`). On current macOS it often works without sudo.
 
 ### 2. control (`/1.0`)
 
@@ -226,7 +215,7 @@ curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `caddy janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: unchanged reloads keep eligible sessions, removing a user or host revokes its sessions after commit, and a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
 
 ```bash
-./bin/caddy-janus janus-auth-hash                 # mint a version-a passhash (password prompted, never argv)
+./bin/janus janus-auth-hash                 # mint a version-a passhash (password prompted, never argv)
 curl -s http://127.0.0.1:7600/1.0/auth      # wall counters + session count
 curl -s http://127.0.0.1:7600/1.0/auth/sessions
 ```
@@ -242,42 +231,27 @@ curl -sN "http://127.0.0.1:7600/1.0/apps/$APP_ID/access?after=0"
 
 ## Build and run
 
-From this repository (local module replacement is automatic when you run `xcaddy` inside the module):
+From this repository:
 
 ```bash
-# Develop: build a temporary caddy+janus and run it
-xcaddy run
-
-# Produce a binary (see ping-only proof above)
-xcaddy build \
-  --with github.com/shreeve/janus=. \
-  --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
-  --output ./bin/caddy-janus
-./bin/caddy-janus run
+make janus        # go build ./cmd/janus -> bin/janus
+./bin/janus run
 ```
 
-From anywhere, against a published module version:
+From anywhere, against a published version:
 
 ```bash
-xcaddy build \
-  --with github.com/shreeve/janus@main \
-  --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
-  --output ./caddy
+go install github.com/shreeve/janus/cmd/janus@v1.8.0
 ```
 
-Pin Caddy and Janus versions for reproducible builds (replace versions as appropriate):
+Janus also remains a plain Caddy module: builders that assemble their own
+Caddy (xcaddy or a custom main) add `github.com/shreeve/janus` like any
+other plugin.
+
+Confirm the modules are linked:
 
 ```bash
-xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.7.2 \
-  --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
-  --output ./caddy
-```
-
-Confirm the module is linked:
-
-```bash
-./bin/caddy-janus list-modules | grep janus
+./bin/janus list-modules | grep -E '^janus$|route53'
 ```
 
 ### Prebuilt releases
@@ -294,25 +268,28 @@ The tagged release workflow publishes five self-contained archives:
 
 Download the matching archive from the
 [releases page](https://github.com/shreeve/janus/releases) and extract it.
-On macOS and Linux, run `./install.sh` to install `caddy-janus` into
+On macOS and Linux, run `./install.sh` to install `janus` into
 `/usr/local/bin`, or choose another destination with
 `BIN="$HOME/bin" ./install.sh`. The extracted binary also runs in place.
-On Windows, run `caddy-janus.exe` directly. Each archive also contains
+On Windows, run `janus.exe` directly. Each archive also contains
 `Caddyfile.minimal`, `Caddyfile.example`, the README, and the license; the installer deliberately
 leaves configuration in the archive rather than overwriting a live Caddyfile.
 The release's `janus-<tag>-checksums.txt` verifies every archive.
+(Debian packages the unrelated WebRTC gateway janus-gateway as `janus`;
+on a host running both, install this binary under a different `BIN`.)
 
 Release builds run on native GitHub runners and compile from the pushed tag,
-so `list-modules --versions` on a downloaded binary reports the exact Janus
-version. Pushing a `v*` tag runs the release workflow automatically.
+so `janus version` on a downloaded binary reports the exact Janus and Caddy
+versions, and `janus build-info` records the tagged module version. Pushing
+a `v*` tag runs the release workflow automatically.
 
 For a local development build:
 
 ```bash
-make janus              # working tree -> bin/caddy-janus
+make janus              # working tree -> bin/janus
 make unit               # fast Go test suite
 make test               # build + unit + acceptance suite
-make install            # build + install -> /usr/local/bin/caddy-janus
+make install            # build + install -> /usr/local/bin/janus
 # make install BIN="$HOME/bin"
 ```
 

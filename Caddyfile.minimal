@@ -7,7 +7,7 @@
 # example.com placeholders; substitute your own. Check this file
 # without serving anything:
 #
-#   ./bin/caddy-janus validate --config Caddyfile.minimal --adapter caddyfile
+#   ./bin/janus validate --config Caddyfile.minimal --adapter caddyfile
 #
 # Sites carry no tls directive on purpose: Caddy manages certificates
 # (ACME) for every named host, which is the production default.

@@ -9,7 +9,7 @@
 # on *.ripdev.io). Domains here are example.com placeholders; substitute
 # your own. Check it without serving anything:
 #
-#   ./bin/caddy-janus validate --config Caddyfile.example --adapter caddyfile
+#   ./bin/janus validate --config Caddyfile.example --adapter caddyfile
 #
 # Cold vs hot, in one breath: this file admits CAPABILITIES — what a host
 # may do (ping, cache, hub, auth, files) and where /1.0 listens. The hot /1.0 API wires

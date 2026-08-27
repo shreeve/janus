@@ -138,8 +138,8 @@ make unit              # developer / unit
 make test              # build + unit + acceptance (foreground!)
 
 make janus
-./bin/caddy-janus validate   # Caddyfile.minimal / Caddyfile.example: add --config … --adapter caddyfile
-./bin/caddy-janus run
+./bin/janus validate   # Caddyfile.minimal / Caddyfile.example: add --config … --adapter caddyfile
+./bin/janus run
 ```
 
 Rebuild after Go changes; `bin/` is gitignored.
