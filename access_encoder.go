@@ -160,6 +160,15 @@ func (e *AccessEncoder) EncodeEntry(entry zapcore.Entry, fields []zapcore.Field)
 		facts.completionSize = size
 		facts.mu.Unlock()
 		request := e.request.request.Request
+		if !state.observed() {
+			if validationErr := validateAccessEvent(facts, request, fields); validationErr != nil {
+				e.invariant(entry, facts, validationErr.Error())
+				return e.wrapped.EncodeEntry(entry, fields)
+			}
+			if state.publishUnobserved() {
+				return e.wrapped.EncodeEntry(entry, fields)
+			}
+		}
 		event, eventErr := buildAccessEvent(facts, request, entry, fields, 0)
 		if eventErr != nil {
 			e.invariant(entry, facts, eventErr.Error())

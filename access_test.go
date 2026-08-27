@@ -185,11 +185,19 @@ func TestAccessRegistrationLifecycleAndSequence(t *testing.T) {
 	if err != nil || cloned.access != rec.access {
 		t.Fatalf("clone lost access state: rec=%p clone=%p err=%v", rec.access, cloned.access, err)
 	}
+	built := false
 	rec.access.publish(func(sequence uint64) ([]byte, error) {
+		built = true
 		return []byte(`{"sequence":"` + strconv.FormatUint(sequence, 10) + `"}` + "\n"), nil
 	})
 	if rec.access.head != 1 {
 		t.Fatalf("first sequence=%d", rec.access.head)
+	}
+	if built {
+		t.Fatal("subscriber-free publication constructed an undeliverable event")
+	}
+	if bridge.counters.published.Load() != 1 {
+		t.Fatalf("subscriber-free publication count=%d, want 1", bridge.counters.published.Load())
 	}
 	if err := registry.delete(rec.ID); err != nil {
 		t.Fatal(err)
@@ -818,7 +826,8 @@ func TestAccessEncoderNoOwnerAndPublicationFailurePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if bridge.counters.published.Load() != 0 || bridge.counters.invariantFailures.Load() != 0 {
-		t.Fatalf("no-owner entry changed counters: %+v", bridge.counters)
+		t.Fatalf("no-owner entry changed counters: published=%d invariants=%d",
+			bridge.counters.published.Load(), bridge.counters.invariantFailures.Load())
 	}
 
 	state := bridge.newState()

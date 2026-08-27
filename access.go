@@ -149,6 +149,40 @@ type accessState struct {
 	closeReason string
 }
 
+func (st *accessState) observed() bool {
+	st.mu.Lock()
+	observed := len(st.subscribers) != 0
+	st.mu.Unlock()
+	return observed
+}
+
+// publishUnobserved completes a validated publication without materializing
+// an event when no stream can receive it. It returns false if a subscriber
+// attached since observed was checked, in which case the caller publishes the
+// fully built event normally.
+func (st *accessState) publishUnobserved() bool {
+	st.mu.Lock()
+	if st.tombstone {
+		st.mu.Unlock()
+		return true
+	}
+	if len(st.subscribers) != 0 {
+		st.mu.Unlock()
+		return false
+	}
+	if st.head == math.MaxUint64 {
+		detached := st.tombstoneLocked("sequence_exhausted")
+		st.mu.Unlock()
+		st.wake(detached)
+		st.bridge.logger.Error("janus access sequence exhausted")
+		return true
+	}
+	st.head++
+	st.bridge.counters.published.Add(1)
+	st.mu.Unlock()
+	return true
+}
+
 func (st *accessState) publish(build func(uint64) ([]byte, error)) {
 	st.mu.Lock()
 	if st.tombstone {
@@ -164,6 +198,14 @@ func (st *accessState) publish(build func(uint64) ([]byte, error)) {
 	}
 	st.head++
 	seq := st.head
+	if len(st.subscribers) == 0 {
+		// Sequence and publication accounting are part of the observation
+		// contract even without a listener. Avoid constructing and encoding
+		// an event that cannot be delivered.
+		st.bridge.counters.published.Add(1)
+		st.mu.Unlock()
+		return
+	}
 	data, err := build(seq)
 	if err != nil {
 		for sub := range st.subscribers {
@@ -485,17 +527,11 @@ func integerField(fields []zapcore.Field, key string) (int64, bool) {
 func buildAccessEvent(f *accessFacts, r *http.Request, entry zapcore.Entry, fields []zapcore.Field, seq uint64) (accessEvent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.owner.state == nil {
-		return accessEvent{}, errors.New("access event has no owner")
-	}
-	if !validUUID(f.requestID) {
-		return accessEvent{}, errors.New("access event has invalid request id")
+	if err := validateAccessEventLocked(f, r, fields); err != nil {
+		return accessEvent{}, err
 	}
 	statusValue, _ := integerField(fields, "status")
 	size, _ := integerField(fields, "size")
-	if size < 0 {
-		return accessEvent{}, errors.New("access event has negative recorder size")
-	}
 	status := int(statusValue)
 	if f.upgraded {
 		status = http.StatusSwitchingProtocols
@@ -506,9 +542,6 @@ func buildAccessEvent(f *accessFacts, r *http.Request, entry zapcore.Entry, fiel
 	var statusPtr *int
 	if status == 0 && f.outcome == "complete" {
 		status = http.StatusOK
-	}
-	if status != 0 && (status < 100 || status > 599) {
-		return accessEvent{}, errors.New("access event has invalid status")
 	}
 	if status >= 100 && status <= 599 {
 		statusPtr = &status
@@ -549,12 +582,6 @@ func buildAccessEvent(f *accessFacts, r *http.Request, entry zapcore.Entry, fiel
 	if class == "" {
 		class = "janus"
 	}
-	if !accessResponseClasses[class] {
-		return accessEvent{}, errors.New("access event has unknown response class")
-	}
-	if !accessCacheVerdicts[f.cacheVerdict] {
-		return accessEvent{}, errors.New("access event has unknown cache verdict")
-	}
 	retries := uint64(0)
 	if f.attempts > 0 {
 		retries = f.attempts - 1
@@ -563,17 +590,11 @@ func buildAccessEvent(f *accessFacts, r *http.Request, entry zapcore.Entry, fiel
 		retries = math.MaxUint32
 	}
 	duration := time.Since(f.start).Seconds()
-	if duration < 0 || math.IsInf(duration, 0) || math.IsNaN(duration) {
-		return accessEvent{}, errors.New("invalid access duration")
-	}
 	outcome := f.outcome
 	if f.upgraded {
 		outcome = "upgraded"
 	} else if r.Context().Err() != nil {
 		outcome = "client_canceled"
-	}
-	if !accessOutcomes[outcome] {
-		return accessEvent{}, errors.New("access event has unknown outcome")
 	}
 	return accessEvent{
 		V: 1, Type: "access", Sequence: strconv.FormatUint(seq, 10),
@@ -586,6 +607,62 @@ func buildAccessEvent(f *accessFacts, r *http.Request, entry zapcore.Entry, fiel
 		RetryCount: uint32(retries), Outcome: outcome, Mark: f.mark,
 		TruncatedFields: truncated, OmittedFields: omitted,
 	}, nil
+}
+
+// validateAccessEvent checks the invariant-bearing fields without allocating
+// the event payload. The encoder uses it before publication so malformed
+// completions are still reported when no stream is subscribed.
+func validateAccessEvent(f *accessFacts, r *http.Request, fields []zapcore.Field) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return validateAccessEventLocked(f, r, fields)
+}
+
+func validateAccessEventLocked(f *accessFacts, r *http.Request, fields []zapcore.Field) error {
+	if f.owner.state == nil {
+		return errors.New("access event has no owner")
+	}
+	if !validUUID(f.requestID) {
+		return errors.New("access event has invalid request id")
+	}
+	statusValue, _ := integerField(fields, "status")
+	if size, _ := integerField(fields, "size"); size < 0 {
+		return errors.New("access event has negative recorder size")
+	}
+	status := int(statusValue)
+	if f.upgraded {
+		status = http.StatusSwitchingProtocols
+	}
+	if status == 0 && f.outcome == "complete" {
+		status = http.StatusOK
+	}
+	if status != 0 && (status < 100 || status > 599) {
+		return errors.New("access event has invalid status")
+	}
+	class := f.responseClass
+	if class == "" {
+		class = "janus"
+	}
+	if !accessResponseClasses[class] {
+		return errors.New("access event has unknown response class")
+	}
+	if !accessCacheVerdicts[f.cacheVerdict] {
+		return errors.New("access event has unknown cache verdict")
+	}
+	duration := time.Since(f.start).Seconds()
+	if duration < 0 || math.IsInf(duration, 0) || math.IsNaN(duration) {
+		return errors.New("invalid access duration")
+	}
+	outcome := f.outcome
+	if f.upgraded {
+		outcome = "upgraded"
+	} else if r.Context().Err() != nil {
+		outcome = "client_canceled"
+	}
+	if !accessOutcomes[outcome] {
+		return errors.New("access event has unknown outcome")
+	}
+	return nil
 }
 
 var _ caddy.Destructor = (*accessBridge)(nil)
