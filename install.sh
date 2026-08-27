@@ -47,11 +47,13 @@ main() {
   if [ -n "$tag" ]; then
     case "$tag" in v*) ;; *) tag="v$tag" ;; esac
   else
-    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+    tag=$(curl -fsSLI --retry 3 --retry-delay 1 -o /dev/null -w '%{url_effective}' \
       "https://github.com/$REPO/releases/latest") || fail "cannot reach github.com"
     tag=${tag##*/}
-    [ "$tag" != latest ] || fail "no releases found for $REPO"
   fi
+  # With no releases, GitHub redirects .../latest to .../releases — so the
+  # resolved "tag" is only real if it looks like one.
+  case "$tag" in v*) ;; *) fail "no releases found for $REPO" ;; esac
 
   asset="$NAME-$tag-$plat.tar.gz"
   base="https://github.com/$REPO/releases/download/$tag"
@@ -60,11 +62,11 @@ main() {
   trap 'rm -rf "$tmp"' EXIT
 
   say "installing $NAME $tag ($plat)"
-  curl -fSL --progress-bar -o "$tmp/$asset" "$base/$asset" \
+  curl -fSL --retry 3 --retry-delay 1 --progress-bar -o "$tmp/$asset" "$base/$asset" \
     || fail "download failed: $base/$asset"
 
   # --- verify against the release's published checksums --------------------
-  curl -fsSL -o "$tmp/checksums.txt" "$base/$NAME-$tag-checksums.txt" \
+  curl -fsSL --retry 3 --retry-delay 1 -o "$tmp/checksums.txt" "$base/$NAME-$tag-checksums.txt" \
     || fail "download failed: $NAME-$tag-checksums.txt"
   if command -v sha256sum >/dev/null; then
     sum=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
@@ -77,7 +79,37 @@ main() {
 
   # --- extract and hand off to the archive's own installer ------------------
   tar -xzf "$tmp/$asset" -C "$tmp"
+
+  # Linux binds :80/:443 as non-root only with cap_net_bind_service, and the
+  # install writes a fresh inode — which silently drops any capability the
+  # old binary carried. Capture before, restore after; hint when absent.
+  dest="${BIN:-/usr/local/bin}/$NAME"
+  had_caps=
+  if [ "$os" = Linux ] && command -v getcap >/dev/null; then
+    had_caps=$(getcap "$dest" 2>/dev/null || true)
+  fi
+
   bash "$tmp/$NAME-$tag-$plat/install.sh"
+
+  if [ "$os" = Linux ]; then
+    case "$had_caps" in
+      *cap_net_bind_service*)
+        say "restoring cap_net_bind_service (upgrades drop it with the old inode)"
+        if [ "$(id -u)" = 0 ]; then setcap cap_net_bind_service=+ep "$dest"
+        else sudo setcap cap_net_bind_service=+ep "$dest"; fi
+        ;;
+      *)
+        case "$(getcap "$dest" 2>/dev/null || true)" in
+          *cap_net_bind_service*) ;;
+          *)
+            say ""
+            say "note: to let $NAME bind :80/:443 as non-root, run:"
+            say "  sudo setcap cap_net_bind_service=+ep $dest"
+            ;;
+        esac
+        ;;
+    esac
+  fi
 }
 
 main "$@"

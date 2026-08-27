@@ -57,6 +57,14 @@ run_as_owner() {
     "$@"
   fi
 }
+# Linux: the replacement is a fresh inode, which silently drops any
+# file capability (cap_net_bind_service) the old binary carried —
+# capture it now so it can be restored after the swap.
+HAD_CAPS=
+if [[ "$(uname -s)" == Linux ]] && command -v getcap >/dev/null; then
+  HAD_CAPS="$(getcap "$DEST" 2>/dev/null || true)"
+fi
+
 STAGE="$(run_as_owner mktemp "$DEST_DIR/.janus.install.XXXXXX")"
 cleanup_stage() {
   if [[ -n "${STAGE:-}" ]]; then
@@ -71,6 +79,18 @@ run_as_owner mv -f "$STAGE" "$DEST"
 run_as_owner rm -f "$DEST_DIR/caddy-janus"
 STAGE=""
 trap - EXIT HUP INT TERM
+
+if [[ "$(uname -s)" == Linux ]]; then
+  if [[ "$HAD_CAPS" == *cap_net_bind_service* ]]; then
+    echo "restoring cap_net_bind_service (upgrades drop it with the old inode)"
+    if [[ "$(id -u)" == 0 ]]; then setcap cap_net_bind_service=+ep "$DEST"
+    else sudo setcap cap_net_bind_service=+ep "$DEST"; fi
+  elif [[ "$(getcap "$DEST" 2>/dev/null || true)" != *cap_net_bind_service* ]]; then
+    echo
+    echo "note: to let janus bind :80/:443 as non-root, run:"
+    echo "  sudo setcap cap_net_bind_service=+ep $DEST"
+  fi
+fi
 
 echo "installed janus -> $DEST_DIR  (on your PATH)"
 echo "try: janus version"
