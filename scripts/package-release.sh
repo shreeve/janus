@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # package-release.sh — assemble one platform's self-contained release archive.
 #
-#   TAG=v1.6.8 PLAT=osx-arm64 scripts/package-release.sh
+#   TAG=v1.7.0 PLAT=osx-arm64 scripts/package-release.sh
 #
 # The workflow builds bin/caddy-janus[.exe] first. This script packages that
-# static binary with the operator-facing configuration, README, and license.
+# static binary with an installer, operator-facing configuration, README, and
+# license. Windows archives omit the Unix install.sh and run in place.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TAG=${TAG:?package-release: set TAG (for example, v1.6.8)}
+TAG=${TAG:?package-release: set TAG (for example, v1.7.0)}
 PLAT=${PLAT:?package-release: set PLAT}
 OUT=${OUT:-dist}
 
+[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || {
+  echo "package-release: TAG must be a safe semantic version (for example, v1.7.0)" >&2
+  exit 2
+}
 case "$PLAT" in
-  osx-arm64|linux-amd64|linux-arm64|windows-amd64|windows-arm64) ;;
+  osx-arm64 | linux-amd64 | linux-arm64 | windows-amd64 | windows-arm64) ;;
   *)
-    echo "package-release: unsupported platform: $PLAT" >&2
+    echo "package-release: unsupported PLAT $PLAT" >&2
     exit 2
     ;;
 esac
@@ -40,6 +45,7 @@ else
   }
   cp bin/caddy-janus "$root/caddy-janus"
   chmod 0755 "$root/caddy-janus"
+  install -m 0755 scripts/release-install.sh "$root/install.sh"
 fi
 
 cp Caddyfile.example README.md LICENSE "$root/"

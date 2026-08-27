@@ -1,7 +1,8 @@
 # Release — push a v* tag and five self-contained Janus archives appear on the
 # GitHub Release: osx-arm64, linux-amd64, linux-arm64, windows-amd64, and
 # windows-arm64. Each archive contains the static Caddy+Janus binary, the
-# operator-facing Caddyfile, README, and license.
+# operator-facing Caddyfile, README, and license. Unix archives also include an
+# install.sh that puts caddy-janus on PATH without touching live configuration.
 name: Release
 
 on:
@@ -10,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -21,10 +22,42 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
+      - name: Unit, vet, and race gates
+        run: |
+          go test ./...
+          go vet ./...
+          go test -race ./...
+
+  acceptance:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: janus
+      - uses: actions/checkout@v5
+        with:
+          repository: shreeve/rip
+          path: rip
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: janus/go.mod
+          cache-dependency-path: janus/go.sum
+      - uses: oven-sh/setup-bun@v2
+      - name: Build acceptance binary
+        working-directory: janus
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          PATH="$(go env GOPATH)/bin:$PATH" make janus
+      - name: Full acceptance gate
+        working-directory: janus
+        # The suite intentionally exercises the production HTTPS port (443).
+        # GitHub's macOS runner provides passwordless sudo; preserve the tool
+        # path so the checked-out Rip manager can invoke Bun.
+        run: sudo env "PATH=$PATH" "HOME=$HOME" NO_COLOR=1 ./test.sh
 
   build:
-    needs: test
+    needs: [test, acceptance]
     strategy:
       fail-fast: false
       matrix:
@@ -45,7 +78,15 @@ jobs:
       - name: Install xcaddy
         shell: bash
         run: |
-          go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
+          for attempt in 1 2 3; do
+            if go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7; then
+              break
+            fi
+            if (( attempt == 3 )); then
+              exit 1
+            fi
+            sleep "$((attempt * 10))"
+          done
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       # Tagged builds resolve the pushed module tag directly, so Caddy's
@@ -55,6 +96,7 @@ jobs:
         shell: bash
         run: |
           caddy_version=$(awk '$1 == "github.com/caddyserver/caddy/v2" { print $2 }' go.mod)
+          chi_version=v5.3.2
           module=github.com/shreeve/janus=.
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             module="github.com/shreeve/janus@$GITHUB_REF_NAME"
@@ -65,24 +107,52 @@ jobs:
           mkdir -p bin
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             xcaddy build "$caddy_version" --with "$module" \
+              --replace "github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@$chi_version" \
               --output "bin/caddy-janus$suffix"
 
       - name: Package
         shell: bash
         run: |
-          TAG="$GITHUB_REF_NAME" PLAT=${{ matrix.plat }} scripts/package-release.sh
+          package_tag="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            package_tag=v0.0.0-dev
+          fi
+          TAG="$package_tag" PLAT=${{ matrix.plat }} scripts/package-release.sh
 
       - name: Smoke-test packaged archive
         shell: bash
         run: |
-          name="janus-$GITHUB_REF_NAME-${{ matrix.plat }}"
+          package_tag="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            package_tag=v0.0.0-dev
+          fi
+          name="janus-$package_tag-${{ matrix.plat }}"
           mkdir -p "$RUNNER_TEMP/janus-smoke"
           if [[ "${{ matrix.goos }}" == windows ]]; then
             7z x "dist/$name.zip" -o"$RUNNER_TEMP/janus-smoke" -y >/dev/null
             exe="$RUNNER_TEMP/janus-smoke/$name/caddy-janus.exe"
           else
             tar -C "$RUNNER_TEMP/janus-smoke" -xzf "dist/$name.tar.gz"
-            exe="$RUNNER_TEMP/janus-smoke/$name/caddy-janus"
+            packaged_exe="$RUNNER_TEMP/janus-smoke/$name/caddy-janus"
+            install_bin="$RUNNER_TEMP/janus-install"
+            mkdir -p "$install_bin"
+            chmod 0700 "$install_bin"
+            printf 'stale executable\n' > "$install_bin/caddy-janus"
+            chmod 0755 "$install_bin/caddy-janus"
+            BIN="$install_bin" "$RUNNER_TEMP/janus-smoke/$name/install.sh"
+            exe="$install_bin/caddy-janus"
+            [[ -x "$exe" ]]
+            cmp "$packaged_exe" "$exe"
+            if [[ "${{ matrix.goos }}" == darwin ]]; then
+              [[ "$(stat -f '%Lp' "$install_bin")" == 700 ]]
+            else
+              [[ "$(stat -c '%a' "$install_bin")" == 700 ]]
+            fi
+            # Installing to the extraction directory is a safe no-op; the
+            # installer must never delete its own source binary.
+            BIN="$RUNNER_TEMP/janus-smoke/$name" \
+              "$RUNNER_TEMP/janus-smoke/$name/install.sh"
+            [[ -x "$packaged_exe" ]]
           fi
           "$exe" version
           "$exe" list-modules --versions | grep '^janus ' >/dev/null
@@ -107,6 +177,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
@@ -122,4 +194,5 @@ jobs:
             janus-*.tar.gz janus-*.zip "janus-$GITHUB_REF_NAME-checksums.txt" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Janus $GITHUB_REF_NAME" \
-            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes the Caddy+Janus binary, Caddyfile.example, README, and license."
+            --generate-notes \
+            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes the Caddy+Janus binary, Caddyfile.example, README, and license; Unix archives also include install.sh."

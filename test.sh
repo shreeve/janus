@@ -14,14 +14,16 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
+TMP_BASE="${TMPDIR:-/tmp}"
+TEST_RUN_DIR="$(mktemp -d "${TMP_BASE%/}/janus-test-state.XXXXXX")"
 CADDY_BIN="${CADDY_BIN:-$ROOT/bin/caddy-janus}"
 CADDY_LOG="${CADDY_LOG:-$ROOT/.test-caddy.log}"
 CADDY_PID=""
+CADDY_PID_FILE="$TEST_RUN_DIR/caddy.pid"
 
 # testkit: the suite's Go support binary (fixture servers, WS driver,
 # JSON/string utilities). Built fresh at suite start from ./testkit.
 TESTKIT="$ROOT/.test-testkit"
-TMP_BASE="${TMPDIR:-/tmp}"
 BROWSE_COLD_ROOT="$(mktemp -d "${TMP_BASE%/}/janus-browse-cold.XXXXXX")"
 export JANUS_BROWSE_COLD_ROOT="$BROWSE_COLD_ROOT"
 
@@ -211,25 +213,43 @@ build_testkit() {
 	go build -o "$TESTKIT" ./testkit
 }
 
-kill_listeners() {
-	local port=$1
-	if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-		lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | while read -r pid; do
-			kill "$pid" 2>/dev/null || true
-		done
+pid_is_owned() {
+	local pid=$1 marker=$2 command
+	[[ "$pid" =~ ^[0-9]+$ && -n "$marker" ]] || return 1
+	command="$(ps -ww -p "$pid" -o command= 2>/dev/null)" || return 1
+	[[ "$command" == *"$marker"* ]]
+}
+
+stop_owned_pid() {
+	local pid=$1 marker=$2
+	if pid_is_owned "$pid" "$marker"; then
+		kill "$pid" 2>/dev/null || true
+	elif [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+		echo "refusing to stop pid $pid: command does not match $marker" >&2
+	fi
+}
+
+require_ports_free() {
+	local port listeners busy=0
+	for port in "$@"; do
+		listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 {print}' || true)"
+		if [[ -n "$listeners" ]]; then
+			echo "test port $port is already in use:" >&2
+			printf '%s\n' "$listeners" >&2
+			busy=1
+		fi
+	done
+	if ((busy)); then
+		echo "stop the owning service before running the Janus acceptance suite" >&2
+		return 1
 	fi
 }
 
 start_caddy() {
-	# clear stale listeners from prior runs
-	kill_listeners 443
-	kill_listeners 7600
-	kill_listeners 8443
-	kill_listeners 7680
-	kill_listeners 7681
-	kill_listeners 7602
-	kill_listeners 8444
-	kill_listeners 8081
+	# Fixed ports must be exclusive. Killing an unknown listener is unsafe, and
+	# supervised services can immediately restart with SO_REUSEPORT and split
+	# acceptance traffic between two Caddy processes.
+	require_ports_free 443 2019 7600 8443 7680 7681 7602 8444 8081 || return 1
 	rm -f "$ROOT/run/janus.sock"
 	sleep 0.5
 	# Pin caddy storage so the internal CA root lands at a known path
@@ -237,12 +257,14 @@ start_caddy() {
 	XDG_DATA_HOME="$ROOT/.test-caddy-data" \
 		"$CADDY_BIN" run --config "$ROOT/Caddyfile" >"$CADDY_LOG" 2>&1 &
 	CADDY_PID=$!
+	printf '%s\n' "$CADDY_PID" >"$CADDY_PID_FILE"
 	local i
 	for i in $(seq 1 50); do
 		if ! kill -0 "$CADDY_PID" 2>/dev/null; then
 			echo "caddy exited early; see $CADDY_LOG" >&2
 			tail -20 "$CADDY_LOG" >&2 || true
 			CADDY_PID=""
+			rm -f "$CADDY_PID_FILE"
 			return 1
 		fi
 		if curl -sS -o /dev/null --max-time 1 https://on.ripdev.io/ping 2>/dev/null \
@@ -257,10 +279,22 @@ start_caddy() {
 }
 
 stop_caddy() {
-	if [[ -n "${CADDY_PID:-}" ]] && kill -0 "$CADDY_PID" 2>/dev/null; then
-		kill "$CADDY_PID" 2>/dev/null || true
-		wait "$CADDY_PID" 2>/dev/null || true
+	local pid="${CADDY_PID:-}"
+	if [[ -s "$CADDY_PID_FILE" ]]; then
+		pid="$(<"$CADDY_PID_FILE")"
 	fi
+	if pid_is_owned "$pid" "$CADDY_BIN"; then
+		stop_owned_pid "$pid" "$CADDY_BIN"
+		wait "$pid" 2>/dev/null || true
+		local i
+		for i in $(seq 1 100); do
+			kill -0 "$pid" 2>/dev/null || break
+			sleep 0.05
+			done
+	elif [[ -n "$pid" ]]; then
+		stop_owned_pid "$pid" "$CADDY_BIN"
+	fi
+	rm -f "$CADDY_PID_FILE"
 	CADDY_PID=""
 }
 
@@ -279,6 +313,7 @@ cleanup() {
 	rm -rf "$ROOT/.test-files" "$ROOT/.test-sendfile" "$ROOT/.test-browse" \
 		"$ROOT"/.test-mdns-* "$BROWSE_COLD_ROOT"
 	rm -f "$ROOT/.test-sendfile-app-id"
+	rmdir "$TEST_RUN_DIR" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
@@ -375,7 +410,7 @@ case_reload_no_split_brain() {
 	# pre-reload registration SURVIVES the reload — only DELETE, TTL reap,
 	# or a process restart removes it. Split-brain would show a fresh,
 	# empty registry behind one listener.
-	capi POST /1.0/apps '{"name":"reload","hosts":["reload.example.com"]}'
+	capi POST /1.0/apps '{"name":"reload","hosts":["reload.ripdev.io"]}'
 	eq "$REPLY_CODE" "201"
 	local old_id
 	old_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -398,6 +433,14 @@ case_reload_no_split_brain() {
 		sleep 0.1
 	done
 	ok "-n \"$ready\"" "control listeners never answered after reload"
+	ok "-S \"$ROOT/run/janus.sock\"" "internal control socket vanished after reload"
+	# Every probe opens a new UDS connection. Repeated success pins Caddy's
+	# listener reference count: retiring the old generation must not close or
+	# unlink the new generation's socket handle.
+	for i in $(seq 1 10); do
+		capi_unix GET /1.0/health
+		eq "$REPLY_CODE" "200"
+	done
 
 	# The pre-reload registration survived the reload on BOTH listeners.
 	capi GET /1.0/apps
@@ -406,8 +449,12 @@ case_reload_no_split_brain() {
 	capi_unix GET /1.0/apps
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" "\"$old_id\""
+	# The active HTTPS handler is bound to that same registry. With no
+	# upstreams the registered host is unavailable (503), never unknown
+	# (404); this catches a data-plane/control-plane split after reload.
+	eq "$(http_code https://reload.ripdev.io/)" "503"
 	# Its host is still claimed: a rival registration conflicts.
-	capi POST /1.0/apps '{"name":"rival","hosts":["reload.example.com"]}'
+	capi POST /1.0/apps '{"name":"rival","hosts":["reload.ripdev.io"]}'
 	eq "$REPLY_CODE" "409"
 	capi DELETE "/1.0/apps/$old_id"
 	eq "$REPLY_CODE" "204"
@@ -576,9 +623,9 @@ case_apps_empty_after_restart() {
 # must go through files (like APP_ID_FILE) — array appends in a subshell
 # never reach the parent, and the cleaner would leak every fixture server.
 DATA_APP_FILE="$ROOT/.test-data-app-id"
-DATA_PIDS_FILE="$ROOT/.test-data-pids"
-DATA_SOCKS_FILE="$ROOT/.test-data-socks"
-DATA_HITFILES_FILE="$ROOT/.test-data-files"
+DATA_PIDS_FILE="$TEST_RUN_DIR/data-pids"
+DATA_SOCKS_FILE="$TEST_RUN_DIR/data-socks"
+DATA_HITFILES_FILE="$TEST_RUN_DIR/data-files"
 
 data_app_id() {
 	cat "$DATA_APP_FILE"
@@ -630,7 +677,7 @@ stop_data_fixtures() {
 	local pid f path
 	if [[ -f "$DATA_PIDS_FILE" ]]; then
 		while read -r pid; do
-			kill "$pid" 2>/dev/null || true
+			stop_owned_pid "$pid" "$TESTKIT"
 		done <"$DATA_PIDS_FILE"
 	fi
 	for f in "$DATA_SOCKS_FILE" "$DATA_HITFILES_FILE"; do
@@ -1349,7 +1396,7 @@ case_tls_allowed_host_minted() {
 	# The served leaf is the on-demand mint: internal CA issuer, exact SAN.
 	cert="$(echo | openssl s_client -connect 127.0.0.1:8443 \
 		-servername odt.janus.test 2>/dev/null |
-		openssl x509 -noout -issuer -ext subjectAltName 2>/dev/null)"
+		openssl x509 -noout -issuer -text 2>/dev/null)"
 	if ! printf '%s' "$cert" | grep -q 'Caddy Local Authority'; then
 		printf 'leaf not minted by the internal CA: %s' "$cert" >&2
 		return 1
@@ -1426,7 +1473,7 @@ case_tls_alive_not_routable_allowed() {
 HUB_SOCK="$ROOT/run/hub-tenant.sock"
 HUB_BRIDGE_LOG="$ROOT/.test-hub-bridge.jsonl"
 HUB_PLAYBOOK="$ROOT/.test-hub-playbook"
-HUB_PIDS_FILE="$ROOT/.test-hub-pids"
+HUB_PIDS_FILE="$TEST_RUN_DIR/hub-pids"
 HUB_APP_FILE="$ROOT/.test-hub-app-id"       # hubapp: hub1, hubany, api
 HUB_ISO_FILE="$ROOT/.test-hub-iso-id"       # hubiso: hub2 (per-app isolation)
 HUB_CAP_FILE="$ROOT/.test-hub-cap-id"       # hubcap: hubten + hubtwenty (floor 10)
@@ -1440,7 +1487,7 @@ hub_direct_id() { cat "$HUB_DIRECT_FILE"; }
 stop_hub_fixtures() {
 	if [[ -f "$HUB_PIDS_FILE" ]]; then
 		while read -r pid; do
-			kill "$pid" 2>/dev/null || true
+			stop_owned_pid "$pid" "$TESTKIT"
 		done <"$HUB_PIDS_FILE"
 	fi
 	rm -f "$HUB_PIDS_FILE" "$HUB_BRIDGE_LOG" "$HUB_PLAYBOOK" \
@@ -2312,7 +2359,7 @@ EOF
 
 # --- cases: tenant ------------------------------------------------------------
 #
-# Phase 8: the first real tenant. Runs the actual @rip-lang/server manager
+# Phase 8: the first real tenant. Runs the actual rip/sites manager
 # and workers from the sibling rip checkout (../rip) against this Janus:
 # registration on /1.0, HTTPS routing to a worker unix socket, hot reload
 # through the doorbell (a save is never served stale), heartbeats, and a
@@ -2322,9 +2369,9 @@ EOF
 #
 # The sibling checkout and bun are REQUIRED — missing pieces fail the suite.
 
-RIP_ROOT="$(cd "$ROOT/.." && pwd)/rip"
-TENANT_DIR_FILE="$ROOT/.test-tenant-dir"
-TENANT_PID_FILE="$ROOT/.test-tenant-pid"
+RIP_ROOT="${RIP_ROOT:-$(cd "$ROOT/.." && pwd)/rip}"
+TENANT_DIR_FILE="$TEST_RUN_DIR/tenant-dir"
+TENANT_PID_FILE="$TEST_RUN_DIR/tenant-pid"
 TENANT_LOG="$ROOT/.test-tenant-manager.log"
 TENANT_HOST="e2e.ripdev.io"
 
@@ -2334,7 +2381,7 @@ tenant_pid() { cat "$TENANT_PID_FILE"; }
 require_rip() {
 	local missing=()
 	[[ -f "$RIP_ROOT/src/loader.js" ]] || missing+=("$RIP_ROOT/src/loader.js")
-	[[ -f "$RIP_ROOT/packages/server/server.rip" ]] || missing+=("$RIP_ROOT/packages/server/server.rip")
+	[[ -f "$RIP_ROOT/packages/sites/manager.rip" ]] || missing+=("$RIP_ROOT/packages/sites/manager.rip")
 	command -v bun >/dev/null 2>&1 || missing+=("bun on PATH (https://bun.sh)")
 	if ((${#missing[@]} > 0)); then
 		echo "tenant group requires the sibling rip checkout and bun; missing:" >&2
@@ -2347,7 +2394,7 @@ require_rip() {
 write_tenant_app() {
 	local version=$1
 	cat >"$(tenant_dir)/app.rip" <<RIP
-import { get, post, start } from '@rip-lang/server'
+import { get, post, start } from 'rip/sites'
 
 get '/' -> { message: 'hello', version: $version }
 
@@ -2359,14 +2406,34 @@ RIP
 }
 
 stop_tenant() {
-	local pid
+	local pid child children tenant_path tenant_real tmp_real
 	if [[ -f "$TENANT_PID_FILE" ]]; then
 		pid="$(cat "$TENANT_PID_FILE")"
-		kill "$pid" 2>/dev/null || true
+		if pid_is_owned "$pid" "$RIP_ROOT/packages/sites/manager.rip"; then
+			# Capture only this manager's direct workers before asking it to exit.
+			# A global pkill can terminate unrelated Rip sites on the same machine.
+			children="$(pgrep -P "$pid" 2>/dev/null || true)"
+			stop_owned_pid "$pid" "$RIP_ROOT/packages/sites/manager.rip"
+			wait "$pid" 2>/dev/null || true
+			for child in $children; do
+				stop_owned_pid "$child" "$RIP_ROOT/packages/sites/worker.rip"
+			done
+		else
+			stop_owned_pid "$pid" "$RIP_ROOT/packages/sites/manager.rip"
+		fi
 	fi
-	pkill -f 'server/worker\.rip' 2>/dev/null || true
 	if [[ -f "$TENANT_DIR_FILE" ]]; then
-		rm -rf "$(cat "$TENANT_DIR_FILE")"
+		tenant_path="$(cat "$TENANT_DIR_FILE")"
+		if [[ -d "$tenant_path" ]]; then
+			tenant_real="$(cd "$tenant_path" && pwd -P)"
+			tmp_real="$(cd "$TMP_BASE" && pwd -P)"
+			if [[ "$(dirname "$tenant_real")" == "$tmp_real" &&
+				"$(basename "$tenant_real")" == janus-tenant.* ]]; then
+				rm -rf "$tenant_real"
+			else
+				echo "refusing to remove unexpected tenant directory: $tenant_real" >&2
+			fi
+		fi
 	fi
 	rm -f "$TENANT_DIR_FILE" "$TENANT_PID_FILE" "$TENANT_LOG"
 }
@@ -2380,17 +2447,13 @@ tenant_upstreams() {
 case_tenant_register() {
 	require_rip || return 1
 	local dir
-	dir="$(mktemp -d /tmp/janus-tenant.XXXXXX)"
+	dir="$(mktemp -d "${TMP_BASE%/}/janus-tenant.XXXXXX")"
 	printf '%s' "$dir" >"$TENANT_DIR_FILE"
 	write_tenant_app 1
-	# Resolve @rip-lang/server to the sibling checkout — never a published
-	# copy from bun's global cache.
-	mkdir -p "$dir/node_modules/@rip-lang"
-	ln -sfn "$RIP_ROOT/packages/server" "$dir/node_modules/@rip-lang/server"
 	(cd "$dir" && exec env RIP_HEARTBEAT_MS=500 \
-		bun --preload="$RIP_ROOT/src/loader.js" "$RIP_ROOT/packages/server/server.rip" \
-		--name e2e --host "$TENANT_HOST" --workers 2 \
-		--control http://127.0.0.1:7600) >"$TENANT_LOG" 2>&1 &
+		bun --preload="$RIP_ROOT/src/loader.js" "$RIP_ROOT/packages/sites/manager.rip" \
+		"$dir/app.rip" --watch --name e2e --host "$TENANT_HOST" --workers 2 \
+		--control http://127.0.0.1:7600 --access-log=off) >"$TENANT_LOG" 2>&1 &
 	local pid=$!
 	printf '%s' "$pid" >"$TENANT_PID_FILE"
 	local i
@@ -2491,7 +2554,7 @@ case_tenant_sigterm_deregisters() {
 
 MDNS_URL="http://127.0.0.1:7680"
 MDNS_APP_FILE="$ROOT/.test-mdns-app-id"
-MDNS_CANON_PID_FILE="$ROOT/.test-mdns-canon-pid"
+MDNS_CANON_PID_FILE="$TEST_RUN_DIR/mdns-canon-pid"
 
 mdns_app_id() { cat "$MDNS_APP_FILE"; }
 
@@ -2561,7 +2624,7 @@ mdns_wait_settled() {
 
 stop_mdns_canon() {
 	if [[ -f "$MDNS_CANON_PID_FILE" ]]; then
-		kill "$(cat "$MDNS_CANON_PID_FILE")" 2>/dev/null || true
+		stop_owned_pid "$(cat "$MDNS_CANON_PID_FILE")" "$CADDY_BIN"
 		rm -f "$MDNS_CANON_PID_FILE"
 	fi
 }
@@ -3011,14 +3074,18 @@ AUTH_WALL="https://authwall.ripdev.io"
 AUTH_CAROL="https://authcarol.ripdev.io"
 AUTH_SOCK="$ROOT/run/auth-up.sock"
 AUTH_HITS="$ROOT/.test-auth-hits"
-AUTH_PIDS_FILE="$ROOT/.test-auth-pids"
+AUTH_PIDS_FILE="$TEST_RUN_DIR/auth-pids"
 AUTH_APP_FILE="$ROOT/.test-auth-app-id"
 AUTH_ALICE_COOKIE="$ROOT/.test-auth-alice-cookie"
 
 stop_auth_fixtures() {
 	if [[ -f "$AUTH_PIDS_FILE" ]]; then
 		while read -r pid; do
-			kill "$pid" 2>/dev/null || true
+			if pid_is_owned "$pid" "$TESTKIT"; then
+				stop_owned_pid "$pid" "$TESTKIT"
+			else
+				stop_owned_pid "$pid" "$CADDY_BIN"
+			fi
 		done <"$AUTH_PIDS_FILE"
 	fi
 	rm -f "$AUTH_PIDS_FILE" "$AUTH_SOCK"
@@ -3592,6 +3659,7 @@ EOF
 		echo "minter caddy never became ready:" >&2
 		tail -5 "$log" >&2 || true
 		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
 		rm -rf "$dir"
 		return 1
 	fi
@@ -3612,6 +3680,7 @@ EOF
 		json_has "$(cat "$log")" 'site with auth reached over plain HTTP'
 	} || rc=1
 	kill "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
 	rm -rf "$dir"
 	return $rc
 }

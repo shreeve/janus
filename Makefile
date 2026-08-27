@@ -8,6 +8,7 @@
 .PHONY: all janus unit test install clean
 
 CADDY_VERSION := $(shell awk '$$1 == "github.com/caddyserver/caddy/v2" { print $$2 }' go.mod)
+CHI_VERSION := v5.3.2
 XCADDY ?= xcaddy
 OUT ?= bin/caddy-janus
 BIN ?= /usr/local/bin
@@ -18,6 +19,7 @@ janus:
 	mkdir -p "$(dir $(OUT))"
 	$(XCADDY) build "$(CADDY_VERSION)" \
 		--with github.com/shreeve/janus=. \
+		--replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@$(CHI_VERSION) \
 		--output "$(OUT)"
 	"$(OUT)" list-modules | grep janus >/dev/null
 	@echo "built $(OUT)  ($$("$(OUT)" version))"
