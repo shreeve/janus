@@ -257,15 +257,32 @@ notes.example.com {
 # dials — and is exactly the perimeter the auth capability requires:
 #
 #   incus config device add ct duckui proxy bind=host \
-#     listen=unix:/run/janus/duckui.sock connect=tcp:127.0.0.1:4213
+#     listen=unix:/opt/janus/run/duckui.sock connect=tcp:[::1]:9497 \
+#     uid=997 gid=986 mode=0660
+#
+# Three things in that command are easy to get wrong. The port is
+# whatever the launcher set ui_local_port to (9497 here), not the
+# extension's 4213 default — check with `ss -ltnp` rather than assuming.
+# The UI listens on IPv6 loopback ONLY, so connect=tcp:127.0.0.1:… dials
+# nothing; it must be [::1]. And uid/gid/mode must name the janus user,
+# because the socket lives in Janus's own runtime dir (drwxr-x--- and
+# janus-only) and Janus has to be able to write to it to connect.
 #
 # Then register it, because the wall runs before host resolution and an
 # unregistered host is a 404 whether or not the caller signed in:
 #
 #   curl -sX POST http://127.0.0.1:7600/1.0/apps \
-#     -d '{"name":"duckui","hosts":["duckui.example.com"]}'
-#   curl -sX PUT http://127.0.0.1:7600/1.0/apps/{id}/upstreams \
-#     -d '{"upstreams":[{"path":"/run/janus/duckui.sock"}]}'
+#     -H 'Content-Type: application/json' \
+#     -d '{"name":"duckui","hosts":["duckui.example.com"],
+#          "lease":"process",
+#          "upstreams":[{"path":"/opt/janus/run/duckui.sock"}]}'
+#
+# lease:"process" is load-bearing. The default heartbeat lease is reaped
+# by the 15s TTL sweep, and a long-lived app nobody is heartbeating for
+# will simply vanish; the process lease is skipped by that sweep. It does
+# NOT survive a janus restart or a reboot, and nothing rebuilds it — so
+# the launcher should re-register on start rather than treating this as
+# one-time setup.
 #
 # Everything else is off on purpose. cache: query answers are per-user
 # and must never be shared. hub: the UI speaks its own SSE, not Janus's

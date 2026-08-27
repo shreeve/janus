@@ -9,7 +9,7 @@ or a WebSocket. Everything is memory-only by contract: a restart
 empties the registry and tenants re-register.
 
 **Era: stewardship.** Feature-complete at v1.0.0 — every build-spec
-box ticked; nine capabilities shipped. Ongoing work is fix,
+box ticked; ten capabilities shipped. Ongoing work is fix,
 harden, measure. New behavior arrives as a capability through the
 proven loop: **design contract → adversarial review → revise →
 implement → pin in tests → measure** (mdns, capability 5, is the

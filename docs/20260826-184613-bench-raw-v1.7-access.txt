@@ -1,0 +1,28 @@
+Janus v1.7 access no-subscriber fast-path raw provenance
+timestamp: 2026-08-26T18:46:13-06:00
+base commit: 5daddf32c0ceb88f909cb9d2d8c338ec772cddce (v1.6.8)
+working_tree: uncommitted v1.7 hardening present
+go version go1.27.0 darwin/arm64
+ProductName: macOS
+ProductVersion: 26.6.2
+BuildVersion: 25G83
+Apple M5
+command: go test -run '^$' -bench '^BenchmarkAccessEncoderBridge/(json-baseline|no-subscribers|one-draining-subscriber|four-subscriber-fanout)$' -benchmem -benchtime=500ms -count=3 .
+goos: darwin
+goarch: arm64
+pkg: github.com/shreeve/janus
+cpu: Apple M5
+BenchmarkAccessEncoderBridge/json-baseline-10          1065766       559.8 ns/op    1425 B/op     8 allocs/op
+BenchmarkAccessEncoderBridge/json-baseline-10          1000000       556.4 ns/op    1425 B/op     8 allocs/op
+BenchmarkAccessEncoderBridge/json-baseline-10          1000000       561.0 ns/op    1425 B/op     8 allocs/op
+BenchmarkAccessEncoderBridge/no-subscribers-10          645835       880.7 ns/op    2395 B/op    15 allocs/op
+BenchmarkAccessEncoderBridge/no-subscribers-10          679388       870.2 ns/op    2395 B/op    15 allocs/op
+BenchmarkAccessEncoderBridge/no-subscribers-10          703708       875.5 ns/op    2394 B/op    15 allocs/op
+BenchmarkAccessEncoderBridge/one-draining-subscriber-10          249814      2290 ns/op    3736 B/op    24 allocs/op
+BenchmarkAccessEncoderBridge/one-draining-subscriber-10          257788      2323 ns/op    3736 B/op    24 allocs/op
+BenchmarkAccessEncoderBridge/one-draining-subscriber-10          257925      2311 ns/op    3736 B/op    24 allocs/op
+BenchmarkAccessEncoderBridge/four-subscriber-fanout-10           239010      2542 ns/op    3736 B/op    24 allocs/op
+BenchmarkAccessEncoderBridge/four-subscriber-fanout-10           234652      2540 ns/op    3736 B/op    24 allocs/op
+BenchmarkAccessEncoderBridge/four-subscriber-fanout-10           237102      2522 ns/op    3736 B/op    24 allocs/op
+PASS
+ok github.com/shreeve/janus 7.550s

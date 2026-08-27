@@ -128,7 +128,7 @@ Follow [go.dev/doc/install](https://go.dev/doc/install). On macOS Apple Silicon,
 ### Install xcaddy
 
 ```bash
-go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
 xcaddy version
 ```
 
@@ -156,11 +156,15 @@ go mod tidy
 mkdir -p bin
 xcaddy build \
   --with github.com/shreeve/janus=. \
+  --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
   --output ./bin/caddy-janus
 
 go test ./...
 ./test.sh   # capability-ordered acceptance groups, ending with access
 ```
+
+The `chi` replacement is an intentional security pin for the prebuilt Caddy
+binary; Caddy 2.11.4 otherwise resolves chi 5.2.5.
 
 ### 1. ping (data plane)
 
@@ -219,7 +223,7 @@ curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 
 ### 6. auth
 
-URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `caddy janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: a config reload keeps them, a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
+URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `caddy janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: unchanged reloads keep eligible sessions, removing a user or host revokes its sessions after commit, and a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
 
 ```bash
 ./bin/caddy-janus janus-auth-hash                 # mint a version-a passhash (password prompted, never argv)
@@ -247,6 +251,7 @@ xcaddy run
 # Produce a binary (see ping-only proof above)
 xcaddy build \
   --with github.com/shreeve/janus=. \
+  --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
   --output ./bin/caddy-janus
 ./bin/caddy-janus run
 ```
@@ -256,6 +261,7 @@ From anywhere, against a published module version:
 ```bash
 xcaddy build \
   --with github.com/shreeve/janus@main \
+  --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
   --output ./caddy
 ```
 
@@ -263,7 +269,8 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.6.8 \
+  --with github.com/shreeve/janus@v1.7.0 \
+  --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
   --output ./caddy
 ```
 
@@ -286,10 +293,14 @@ The tagged release workflow publishes five self-contained archives:
 | Windows ARM64 | `janus-<tag>-windows-arm64.zip` |
 
 Download the matching archive from the
-[releases page](https://github.com/shreeve/janus/releases), extract it,
-and run `caddy-janus` (`caddy-janus.exe` on Windows). Each archive also
-contains `Caddyfile.example`, the README, and the license. The release's
-`janus-<tag>-checksums.txt` verifies every archive.
+[releases page](https://github.com/shreeve/janus/releases) and extract it.
+On macOS and Linux, run `./install.sh` to install `caddy-janus` into
+`/usr/local/bin`, or choose another destination with
+`BIN="$HOME/bin" ./install.sh`. The extracted binary also runs in place.
+On Windows, run `caddy-janus.exe` directly. Each archive also contains
+`Caddyfile.example`, the README, and the license; the installer deliberately
+leaves configuration in the archive rather than overwriting a live Caddyfile.
+The release's `janus-<tag>-checksums.txt` verifies every archive.
 
 Release builds run on native GitHub runners and compile from the pushed tag,
 so `list-modules --versions` on a downloaded binary reports the exact Janus
