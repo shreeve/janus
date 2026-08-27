@@ -1,26 +1,21 @@
-# janus — build and install the Caddy + Janus binary
+# janus — build and install the Janus binary
 #
-# `make janus` builds the working tree with the Caddy version pinned in
-# go.mod. `make install` copies that binary onto PATH in /usr/local/bin,
-# using sudo only when the destination is not writable. GitHub releases use
+# `make janus` compiles cmd/janus — stock Caddy plus the Janus module and
+# the Route 53 DNS provider — with every dependency pinned in go.mod.
+# `make install` copies that binary onto PATH in /usr/local/bin, using sudo
+# only when the destination is not writable. GitHub releases use
 # scripts/package-release.sh after building each native platform in CI.
 
 .PHONY: all janus unit test install clean
 
-CADDY_VERSION := $(shell awk '$$1 == "github.com/caddyserver/caddy/v2" { print $$2 }' go.mod)
-CHI_VERSION := v5.3.2
-XCADDY ?= xcaddy
-OUT ?= bin/caddy-janus
+OUT ?= bin/janus
 BIN ?= /usr/local/bin
 
 all: janus
 
 janus:
 	mkdir -p "$(dir $(OUT))"
-	$(XCADDY) build "$(CADDY_VERSION)" \
-		--with github.com/shreeve/janus=. \
-		--replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@$(CHI_VERSION) \
-		--output "$(OUT)"
+	go build -trimpath -o "$(OUT)" ./cmd/janus
 	"$(OUT)" list-modules | grep janus >/dev/null
 	@echo "built $(OUT)  ($$("$(OUT)" version))"
 
@@ -32,16 +27,17 @@ test: janus unit
 
 # Match Harbor's local install behavior. Removing the destination first is
 # load-bearing on macOS: replacing the inode avoids a stale kernel signature
-# cache after installing a newly linked executable.
+# cache after installing a newly linked executable. Both names are removed so
+# exactly one janus binary lives on PATH.
 install: janus
 	@sudo= ; \
 	  if [ ! -d "$(BIN)" ]; then install -d -m 0755 "$(BIN)" 2>/dev/null || sudo=sudo; fi; \
 	  [ -w "$(BIN)" ] || sudo=sudo; \
 	  [ -z "$$sudo" ] || echo "  $(BIN) needs elevated access — using sudo"; \
 	  $$sudo install -d -m 0755 "$(BIN)"; \
-	  $$sudo rm -f "$(BIN)/caddy-janus"; \
-	  $$sudo install -m 0755 "$(OUT)" "$(BIN)/caddy-janus"; \
-	  echo "installed caddy-janus -> $(BIN)  (on your PATH)"
+	  $$sudo rm -f "$(BIN)/janus" "$(BIN)/caddy-janus"; \
+	  $$sudo install -m 0755 "$(OUT)" "$(BIN)/janus"; \
+	  echo "installed janus -> $(BIN)  (on your PATH)"
 
 clean:
 	rm -rf bin

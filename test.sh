@@ -16,7 +16,7 @@ cd "$ROOT"
 
 TMP_BASE="${TMPDIR:-/tmp}"
 TEST_RUN_DIR="$(mktemp -d "${TMP_BASE%/}/janus-test-state.XXXXXX")"
-CADDY_BIN="${CADDY_BIN:-$ROOT/bin/caddy-janus}"
+CADDY_BIN="${CADDY_BIN:-$ROOT/bin/janus}"
 CADDY_LOG="${CADDY_LOG:-$ROOT/.test-caddy.log}"
 CADDY_PID=""
 CADDY_PID_FILE="$TEST_RUN_DIR/caddy.pid"
@@ -201,12 +201,8 @@ need_caddy() {
 }
 
 build_caddy() {
-	command -v xcaddy >/dev/null 2>&1 || {
-		echo "xcaddy not found; install: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest" >&2
-		return 1
-	}
 	mkdir -p bin
-	xcaddy build --with github.com/shreeve/janus=. --output "$CADDY_BIN"
+	go build -trimpath -o "$CADDY_BIN" ./cmd/janus
 }
 
 build_testkit() {
