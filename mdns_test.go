@@ -972,7 +972,7 @@ func TestMdnsAbortedReloadRollback(t *testing.T) {
 		}
 	})
 
-	t.Run("in-flight add cannot stall identical handoff", func(t *testing.T) {
+	t.Run("in-flight add survives identical handoff without a flap", func(t *testing.T) {
 		fake := &fakeResponder{}
 		started := make(chan struct{}, 1)
 		release := make(chan struct{})
@@ -1000,16 +1000,19 @@ func TestMdnsAbortedReloadRollback(t *testing.T) {
 		select {
 		case <-done:
 		case <-time.After(time.Second):
-			t.Fatal("stale responder Add did not finish")
+			t.Fatal("in-flight responder Add did not finish")
 		}
 
 		adv.reconcile()
 		snap := adv.snapshot(cfgSame.name)
 		if len(snap.entries) != 1 || snap.entries[0].State != mdnsStateAnnounced {
-			t.Fatalf("identical handoff remained stuck after stale Add: %+v", snap.entries)
+			t.Fatalf("identical handoff disturbed the probing entry: %+v", snap.entries)
 		}
-		if adds, removes := fake.counts(); adds != 2 || removes != 1 {
-			t.Fatalf("identical handoff Add cleanup adds=%d removes=%d, want 2/1", adds, removes)
+		// The no-flap contract at the responder level: the identical reload
+		// keeps the epoch, the in-flight Add installs, and the name is never
+		// withdrawn or re-probed.
+		if adds, removes := fake.counts(); adds != 1 || removes != 0 {
+			t.Fatalf("identical handoff flapped the responder: adds=%d removes=%d, want 1/0", adds, removes)
 		}
 		adv.generationRetired(genA)
 		adv.mu.Lock()

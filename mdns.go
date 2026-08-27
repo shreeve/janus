@@ -280,11 +280,17 @@ func (a *mdnsAdvertiser) configure(gen any, cfg *mdnsConfig) error {
 		}
 		a.startResponderLocked(r, cfg.ifaces)
 	}
+	// An identical configuration keeps the epoch: the no-flap contract says
+	// an unchanged reload never withdraws, re-probes, or re-announces, so
+	// in-flight responder work from the previous generation stays current.
+	identical := a.cfg.equal(cfg)
 	a.prevGen = a.lastGen
 	a.prevCfg = a.cfg
 	a.cfg = cfg
 	a.lastGen = gen
-	a.epoch++
+	if !identical {
+		a.epoch++
+	}
 	a.mu.Unlock()
 	a.kickReconcile()
 	return nil
@@ -318,7 +324,11 @@ func (a *mdnsAdvertiser) generationRetired(gen any) {
 	a.lastGen = a.prevGen
 	a.prevCfg = nil
 	a.prevGen = nil
-	a.epoch++
+	// Restoring an identical configuration keeps the epoch for the same
+	// reason configure does: nothing on the wire needs to change.
+	if !rejected.equal(restored) {
+		a.epoch++
+	}
 	a.mu.Unlock()
 	if !rejected.equal(restored) {
 		a.logger.Warn("janus mdns: rolled back aborted config reload",
@@ -513,8 +523,9 @@ func (a *mdnsAdvertiser) reconcile() {
 		a.mu.Lock()
 		if a.epoch != epoch || a.entries[e.key()] != e {
 			// Withdrawn or reconfigured while probing: the next pass owns it.
-			// Drop a still-current entry so an identical-config handoff cannot
-			// strand it forever in the otherwise-transient probing state.
+			// Drop a still-current entry so a changed-config handoff that
+			// keeps this name cannot strand it forever in the
+			// otherwise-transient probing state.
 			if a.entries[e.key()] == e {
 				delete(a.entries, e.key())
 			}
