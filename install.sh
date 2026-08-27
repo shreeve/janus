@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#
+# install.sh — install janus with one command (macOS and Linux):
+#
+#   curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bash
+#
+# Pin a version by passing a tag (with or without the leading v):
+#
+#   curl -fsSL .../install.sh | bash -s v1.8.1
+#
+# Downloads the release archive for this platform, verifies its sha256
+# against the published checksums, and runs the archive's own installer
+# (janus -> /usr/local/bin; override with BIN=...). sudo is used only if
+# the destination dir is root-owned. Windows support comes later.
+
+set -euo pipefail
+
+REPO=shreeve/janus
+NAME=janus
+
+say()  { printf '%s\n' "$*"; }
+fail() { printf 'install: %s\n' "$*" >&2; exit 1; }
+
+# Everything lives in main() so a truncated `curl | bash` download can
+# never execute a half-delivered script.
+main() {
+  command -v curl >/dev/null || fail "curl is required"
+  command -v tar  >/dev/null || fail "tar is required"
+
+  # --- platform -> release asset suffix ------------------------------------
+  os=$(uname -s) arch=$(uname -m)
+  # A shell running under Rosetta reports x86_64 on Apple Silicon.
+  if [ "$os" = Darwin ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then
+    arch=arm64
+  fi
+  case "$os-$arch" in
+    Darwin-arm64)          plat=osx-arm64    ;;
+    Linux-x86_64)          plat=linux-amd64  ;;
+    Linux-aarch64|Linux-arm64) plat=linux-arm64 ;;
+    Darwin-x86_64)         fail "no Intel macOS build is published (Apple Silicon only)" ;;
+    MINGW*|MSYS*|CYGWIN*)  fail "Windows is not supported by this installer yet" ;;
+    *)                     fail "unsupported platform: $os $arch" ;;
+  esac
+
+  # --- version: argument, or the tag `releases/latest` redirects to --------
+  tag=${1:-}
+  if [ -n "$tag" ]; then
+    case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+  else
+    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+      "https://github.com/$REPO/releases/latest") || fail "cannot reach github.com"
+    tag=${tag##*/}
+    [ "$tag" != latest ] || fail "no releases found for $REPO"
+  fi
+
+  asset="$NAME-$tag-$plat.tar.gz"
+  base="https://github.com/$REPO/releases/download/$tag"
+
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+
+  say "installing $NAME $tag ($plat)"
+  curl -fSL --progress-bar -o "$tmp/$asset" "$base/$asset" \
+    || fail "download failed: $base/$asset"
+
+  # --- verify against the release's published checksums --------------------
+  curl -fsSL -o "$tmp/checksums.txt" "$base/$NAME-$tag-checksums.txt" \
+    || fail "download failed: $NAME-$tag-checksums.txt"
+  if command -v sha256sum >/dev/null; then
+    sum=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
+  else
+    sum=$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)
+  fi
+  want=$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/checksums.txt")
+  [ -n "$want" ]        || fail "no checksum published for $asset"
+  [ "$sum" = "$want" ]  || fail "checksum mismatch for $asset"
+
+  # --- extract and hand off to the archive's own installer ------------------
+  tar -xzf "$tmp/$asset" -C "$tmp"
+  bash "$tmp/$NAME-$tag-$plat/install.sh"
+}
+
+main "$@"

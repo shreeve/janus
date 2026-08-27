@@ -256,6 +256,17 @@ Confirm the modules are linked:
 
 ### Prebuilt releases
 
+On macOS and Linux, one command installs the latest release — it picks the
+right archive for the platform, verifies its sha256 against the published
+checksums, and installs `janus` into `/usr/local/bin` (override with
+`BIN=...`; sudo only if the destination is root-owned):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bash
+```
+
+Pin a version with `... | bash -s v1.8.1`.
+
 The tagged release workflow publishes five self-contained archives:
 
 | Platform | Archive |
