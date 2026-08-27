@@ -389,6 +389,9 @@ func TestStartUnwindsOnPartialFailure(t *testing.T) {
 		hubs:          newHubSet(),
 		ctx:           caddy.Context{Context: context.Background()},
 		accessStreams: make(map[*accessSubscriber]struct{}),
+		// Provision always installs the pooled state; Start's browse and
+		// unix control paths both reach into it.
+		state: &janusState{browse: newBrowseSupervisor(), ctlSockets: &controlSocketPool{}},
 	}
 	bridge, err := newAccessBridge(zap.NewNop())
 	if err != nil {

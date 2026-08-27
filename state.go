@@ -22,13 +22,14 @@ var janusPool = caddy.NewUsagePool()
 const janusStateKey = "janus.process"
 
 type janusState struct {
-	registry *appRegistry
-	hubs     *hubSet
-	dp       *dataPlane
-	mdns     *mdnsAdvertiser
-	auth     *authStore
-	browse   *browseSupervisor
-	logger   *zap.Logger
+	registry   *appRegistry
+	hubs       *hubSet
+	dp         *dataPlane
+	mdns       *mdnsAdvertiser
+	auth       *authStore
+	browse     *browseSupervisor
+	ctlSockets *controlSocketPool
+	logger     *zap.Logger
 }
 
 // newJanusState builds the pooled holder. ttl is the configured heartbeat
@@ -54,13 +55,14 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 		return nil, err
 	}
 	st := &janusState{
-		registry: reg,
-		hubs:     newHubSet(),
-		dp:       newDataPlane(reg, logger.Named("dataplane")),
-		mdns:     newMdnsAdvertiser(reg, logger.Named("mdns")),
-		auth:     auth,
-		browse:   newBrowseSupervisor(),
-		logger:   logger,
+		registry:   reg,
+		hubs:       newHubSet(),
+		dp:         newDataPlane(reg, logger.Named("dataplane")),
+		mdns:       newMdnsAdvertiser(reg, logger.Named("mdns")),
+		auth:       auth,
+		browse:     newBrowseSupervisor(),
+		ctlSockets: &controlSocketPool{},
+		logger:     logger,
 	}
 	reg.browse = st.browse
 	// DELETE and TTL reap tear the app's hub down; PATCH host removal
@@ -94,6 +96,9 @@ func (st *janusState) Destruct() error {
 		st.hubs.teardownApp(h.id)
 	}
 	st.dp.transport.CloseIdleConnections()
+	// Safety net: every generation's Cleanup released its control socket
+	// dup already, so the pool is normally empty by now.
+	st.ctlSockets.closeAll()
 	return nil
 }
 

@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,27 +83,38 @@ func (a *App) startControlListeners() error {
 			}
 		}
 
+		var ln net.Listener
 		if c.network == "unix" {
-			if err := os.MkdirAll(filepath.Dir(c.addr), 0o755); err != nil {
-				return fmt.Errorf("control internal: %w", err)
+			// Janus owns its unix control sockets through the pooled
+			// canonical-listener dance (control_socket_unix.go): every
+			// generation gets a dup of a canonical nobody serves or
+			// closes, so an ABORTED reload's teardown cannot poison the
+			// path for later generations — caddy's own unix reuse map
+			// repoints at the newest listener and one aborted generation
+			// wedged every subsequent reload with "use of closed network
+			// connection" until the process restarted.
+			pooled, err := a.state.ctlSockets.acquire(c.addr)
+			if err != nil {
+				return fmt.Errorf("control %s listen %s: %w", c.Mode, c.Listen, err)
 			}
-		}
-
-		// Bind through Caddy's listener API so sockets pool across config
-		// swaps: on reload the new app shares the old app's socket instead
-		// of failing to bind while the old app still holds it. Caddy also
-		// unlinks unix sockets before binding and after the last close.
-		na, err := caddy.ParseNetworkAddress(c.network + "/" + c.addr)
-		if err != nil {
-			return fmt.Errorf("control %s address %s: %w", c.Mode, c.Listen, err)
-		}
-		lnAny, err := na.Listen(a.ctx, 0, net.ListenConfig{})
-		if err != nil {
-			return fmt.Errorf("control %s listen %s: %w", c.Mode, c.Listen, err)
-		}
-		ln, ok := lnAny.(net.Listener)
-		if !ok {
-			return fmt.Errorf("control %s listen %s: %T is not a stream listener", c.Mode, c.Listen, lnAny)
+			ln = pooled
+		} else {
+			// TCP control listeners ride Caddy's listener API: SO_REUSEPORT
+			// gives each generation its own socket, no shared map, no
+			// poison — reloads overlap correctly there.
+			na, err := caddy.ParseNetworkAddress(c.network + "/" + c.addr)
+			if err != nil {
+				return fmt.Errorf("control %s address %s: %w", c.Mode, c.Listen, err)
+			}
+			lnAny, err := na.Listen(a.ctx, 0, net.ListenConfig{})
+			if err != nil {
+				return fmt.Errorf("control %s listen %s: %w", c.Mode, c.Listen, err)
+			}
+			var ok bool
+			ln, ok = lnAny.(net.Listener)
+			if !ok {
+				return fmt.Errorf("control %s listen %s: %T is not a stream listener", c.Mode, c.Listen, lnAny)
+			}
 		}
 		if c.useTLS {
 			ln = tls.NewListener(ln, srv.TLSConfig)
@@ -155,15 +164,17 @@ func (a *App) stopControlListeners() error {
 	// Close our listener handles before Shutdown. A failed Start can unwind
 	// immediately after launching Serve; closing here prevents that goroutine
 	// from racing past Shutdown's listener bookkeeping and accepting afterward.
-	// Caddy's pooled listener remains live when another generation shares it.
+	// The shared socket stays live when another generation holds a dup of the
+	// pooled canonical (unix) or its own SO_REUSEPORT socket (tcp).
 	for _, s := range a.controlSrvs {
 		s.stopping.Store(true)
 		if err := s.ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) && first == nil {
 			first = err
 		}
 	}
-	// Shutdown now drains active connections. Caddy unlinks a unix socket only
-	// when the last pooled listener closes, so an overlapping app keeps it live.
+	// Shutdown now drains active connections. The pool unlinks a unix socket
+	// only when the last generation releases its dup, so an overlapping app
+	// keeps it live.
 	for _, s := range a.controlSrvs {
 		wg.Add(1)
 		go func(s *controlServer) {
