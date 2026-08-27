@@ -250,7 +250,10 @@ start_caddy() {
 	sleep 0.5
 	# Pin caddy storage so the internal CA root lands at a known path
 	# (used by the tls group to verify on-demand minted chains).
+	# JANUS_ABORT_TOKEN exists so the abort-recovery case's bad candidate
+	# survives provisioning (token resolves) and fails only at Start.
 	XDG_DATA_HOME="$ROOT/.test-caddy-data" \
+	JANUS_ABORT_TOKEN="acceptance-abort-token" \
 		"$CADDY_BIN" run --config "$ROOT/Caddyfile" >"$CADDY_LOG" 2>&1 &
 	CADDY_PID=$!
 	printf '%s\n' "$CADDY_PID" >"$CADDY_PID_FILE"
@@ -454,6 +457,57 @@ case_reload_no_split_brain() {
 	eq "$REPLY_CODE" "409"
 	capi DELETE "/1.0/apps/$old_id"
 	eq "$REPLY_CODE" "204"
+}
+
+case_reload_abort_recovery() {
+	# An ABORTED reload must not poison later reloads. Caddy's unix reuse
+	# map repoints at the newest generation's control listener; when that
+	# generation aborts (janus bound its sockets, then a later control
+	# entry failed inside Start), the map kept a CLOSED listener and every
+	# genuinely-different reload afterward failed with "use of closed
+	# network connection" until the process restarted.
+	local bad_cfg="$TEST_RUN_DIR/abort-bad.caddyfile"
+	local good_cfg="$TEST_RUN_DIR/abort-good.caddyfile"
+	# Bad candidate: a public control entry whose TLS material is missing
+	# fails inside Start, AFTER the unix + local listeners already bound.
+	awk '{print} $1 == "control" && $2 == "local" {print "\t\tcontrol public https://127.0.0.1:7601 token:JANUS_ABORT_TOKEN cert:/nonexistent/janus-abort.crt key:/nonexistent/janus-abort.key"}' \
+		"$ROOT/Caddyfile" >"$bad_cfg"
+	if XDG_DATA_HOME="$ROOT/.test-caddy-data" \
+		"$CADDY_BIN" reload --config "$bad_cfg" --force >>"$CADDY_LOG" 2>&1; then
+		echo "bad config reload unexpectedly succeeded" >&2
+		return 1
+	fi
+	# The surviving generation still serves and its socket file is intact.
+	ok "-S \"$ROOT/run/janus.sock\"" "control socket vanished after aborted reload"
+	capi_unix GET /1.0/health
+	eq "$REPLY_CODE" "200"
+	# A GENUINELY different config must now load. --force does bypass
+	# caddy's identical-bytes short-circuit, but a real content change
+	# (ttl_max is a janus knob — no new listeners) keeps this case honest
+	# even if --force's cache-bypass semantics ever change.
+	sed 's/ttl_max 10s/ttl_max 11s/' "$ROOT/Caddyfile" >"$good_cfg"
+	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
+		"$CADDY_BIN" reload --config "$good_cfg" --force >>"$CADDY_LOG" 2>&1; then
+		echo "good reload after aborted reload failed; see $CADDY_LOG" >&2
+		return 1
+	fi
+	local i ready=""
+	for i in $(seq 1 50); do
+		if curl -sS -o /dev/null --max-time 1 http://127.0.0.1:7600/1.0/health 2>/dev/null &&
+			curl -sS -o /dev/null --max-time 1 --unix-socket "$ROOT/run/janus.sock" http://janus/1.0/health 2>/dev/null; then
+			ready=1
+			break
+		fi
+		sleep 0.1
+	done
+	ok "-n \"$ready\"" "control listeners never answered after post-abort reload"
+	ok "-S \"$ROOT/run/janus.sock\"" "control socket vanished after post-abort reload"
+	# Restore the canonical config for the rest of the suite.
+	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
+		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		echo "restoring canonical config failed; see $CADDY_LOG" >&2
+		return 1
+	fi
 }
 
 # --- cases: apps -----------------------------------------------------------
@@ -4303,6 +4357,7 @@ test "unix GET /1.0 → janus meta" case_control_unix_root
 test "unix GET /1.0/health → ok" case_control_unix_health
 test "unknown /1.0 paths → 404, wrong method → 405" case_control_unknown_paths_404
 test "reload → both listeners serve one live registry" case_reload_no_split_brain
+test "aborted reload → later reloads still work" case_reload_abort_recovery
 
 group "apps"
 test "register shop → 201 shop-xxxxxx" case_apps_register
