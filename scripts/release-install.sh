@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# install.sh — install caddy-janus from this extracted release archive.
+# install.sh — install janus from this extracted release archive.
 #
-#   caddy-janus -> /usr/local/bin   (override: BIN=...)
+#   janus -> /usr/local/bin   (override: BIN=...)
 #
 # The archive is self-contained and also runs in place. This installer only
 # puts the binary on PATH; Caddyfile.minimal and Caddyfile.example remain here
@@ -12,13 +12,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-[[ -f caddy-janus && -x caddy-janus ]] || {
-  echo "install.sh: caddy-janus is missing or not executable" >&2
+[[ -f janus && -x janus ]] || {
+  echo "install.sh: janus is missing or not executable" >&2
   exit 2
 }
 
 BIN=${BIN:-/usr/local/bin}
-SOURCE="$(pwd -P)/caddy-janus"
+SOURCE="$(pwd -P)/janus"
 
 as_owner() {
   if [[ -w "$(dirname "$1")" || -w "$1" ]]; then
@@ -36,9 +36,9 @@ if [[ ! -d "$BIN" ]]; then
   as_owner "$BIN" install -d -m 0755 "$BIN"
 fi
 DEST_DIR="$(cd "$BIN" && pwd -P)"
-DEST="$DEST_DIR/caddy-janus"
+DEST="$DEST_DIR/janus"
 if [[ "$SOURCE" == "$DEST" ]]; then
-  echo "caddy-janus already runs in place at $DEST"
+  echo "janus already runs in place at $DEST"
   exit 0
 fi
 # Stage the complete replacement beside the destination, so a copy failure
@@ -57,7 +57,7 @@ run_as_owner() {
     "$@"
   fi
 }
-STAGE="$(run_as_owner mktemp "$DEST_DIR/.caddy-janus.install.XXXXXX")"
+STAGE="$(run_as_owner mktemp "$DEST_DIR/.janus.install.XXXXXX")"
 cleanup_stage() {
   if [[ -n "${STAGE:-}" ]]; then
     run_as_owner rm -f "$STAGE"
@@ -67,8 +67,10 @@ trap cleanup_stage EXIT
 trap 'exit 1' HUP INT TERM
 run_as_owner install -m 0755 "$SOURCE" "$STAGE"
 run_as_owner mv -f "$STAGE" "$DEST"
+# Exactly one janus binary lives on PATH.
+run_as_owner rm -f "$DEST_DIR/caddy-janus"
 STAGE=""
 trap - EXIT HUP INT TERM
 
-echo "installed caddy-janus -> $DEST_DIR  (on your PATH)"
-echo "try: caddy-janus version"
+echo "installed janus -> $DEST_DIR  (on your PATH)"
+echo "try: janus version"

@@ -1,8 +1,9 @@
 # Release — push a v* tag and five self-contained Janus archives appear on the
 # GitHub Release: osx-arm64, linux-amd64, linux-arm64, windows-amd64, and
-# windows-arm64. Each archive contains the static Caddy+Janus binary, the
-# operator-facing Caddyfile, README, and license. Unix archives also include an
-# install.sh that puts caddy-janus on PATH without touching live configuration.
+# windows-arm64. Each archive contains the static janus binary (Caddy + the
+# Janus module + the Route 53 DNS provider), the operator-facing Caddyfile,
+# README, and license. Unix archives also include an install.sh that puts
+# janus on PATH without touching live configuration.
 name: Release
 
 on:
@@ -45,10 +46,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - name: Build acceptance binary
         working-directory: janus
-        run: |
-          go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          PATH="$(go env GOPATH)/bin:$PATH" make janus
+        run: make janus
       - name: Full acceptance gate
         working-directory: janus
         # The suite intentionally exercises the production HTTPS port (443).
@@ -69,46 +67,32 @@ jobs:
           - { runner: windows-11-arm,   plat: windows-arm64, goos: windows, goarch: arm64 }
     runs-on: ${{ matrix.runner }}
     steps:
+      # Full fetch so the Go toolchain sees the pushed tag and VCS-stamps the
+      # module version that the smoke test asserts via build-info.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Install xcaddy
+      # Tagged builds compile the checked-out tag directly: the ldflags stamp
+      # drives `janus version`, and the Go toolchain VCS-stamps the module
+      # version into build-info. workflow_dispatch builds carry v0.0.0-dev.
+      - name: Build Janus
         shell: bash
         run: |
-          for attempt in 1 2 3; do
-            if go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7; then
-              break
-            fi
-            if (( attempt == 3 )); then
-              exit 1
-            fi
-            sleep "$((attempt * 10))"
-          done
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      # Tagged builds resolve the pushed module tag directly, so Caddy's
-      # build-info records the exact Janus version and module checksum.
-      # workflow_dispatch builds the checked-out tree for pre-release testing.
-      - name: Build Caddy + Janus
-        shell: bash
-        run: |
-          caddy_version=$(awk '$1 == "github.com/caddyserver/caddy/v2" { print $2 }' go.mod)
-          chi_version=v5.3.2
-          module=github.com/shreeve/janus=.
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            module="github.com/shreeve/janus@$GITHUB_REF_NAME"
-            export GOPRIVATE=github.com/shreeve/janus
+          stamp="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            stamp=v0.0.0-dev
           fi
           suffix=
           [[ "${{ matrix.goos }}" == windows ]] && suffix=.exe
           mkdir -p bin
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            xcaddy build "$caddy_version" --with "$module" \
-              --replace "github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@$chi_version" \
-              --output "bin/caddy-janus$suffix"
+            go build -trimpath -ldflags "-X main.version=$stamp" \
+              -o "bin/janus$suffix" ./cmd/janus
 
       - name: Package
         shell: bash
@@ -130,19 +114,23 @@ jobs:
           mkdir -p "$RUNNER_TEMP/janus-smoke"
           if [[ "${{ matrix.goos }}" == windows ]]; then
             7z x "dist/$name.zip" -o"$RUNNER_TEMP/janus-smoke" -y >/dev/null
-            exe="$RUNNER_TEMP/janus-smoke/$name/caddy-janus.exe"
+            exe="$RUNNER_TEMP/janus-smoke/$name/janus.exe"
           else
             tar -C "$RUNNER_TEMP/janus-smoke" -xzf "dist/$name.tar.gz"
-            packaged_exe="$RUNNER_TEMP/janus-smoke/$name/caddy-janus"
+            packaged_exe="$RUNNER_TEMP/janus-smoke/$name/janus"
             install_bin="$RUNNER_TEMP/janus-install"
             mkdir -p "$install_bin"
             chmod 0700 "$install_bin"
+            printf 'stale executable\n' > "$install_bin/janus"
+            chmod 0755 "$install_bin/janus"
+            # The installer also clears the retired binary name.
             printf 'stale executable\n' > "$install_bin/caddy-janus"
             chmod 0755 "$install_bin/caddy-janus"
             BIN="$install_bin" "$RUNNER_TEMP/janus-smoke/$name/install.sh"
-            exe="$install_bin/caddy-janus"
+            exe="$install_bin/janus"
             [[ -x "$exe" ]]
             cmp "$packaged_exe" "$exe"
+            [[ ! -e "$install_bin/caddy-janus" ]]
             if [[ "${{ matrix.goos }}" == darwin ]]; then
               [[ "$(stat -f '%Lp' "$install_bin")" == 700 ]]
             else
@@ -154,18 +142,25 @@ jobs:
               "$RUNNER_TEMP/janus-smoke/$name/install.sh"
             [[ -x "$packaged_exe" ]]
           fi
-          "$exe" version
-          "$exe" list-modules --versions | grep '^janus ' >/dev/null
+          # The janus module registers itself, and the Route 53 provider is
+          # compiled in. Module versions live in build-info: the main module
+          # never appears in list-modules --versions, so the version gates
+          # assert the CLI stamp and the VCS-stamped build-info instead.
+          "$exe" list-modules | grep -qx 'janus'
+          "$exe" list-modules | grep -qx 'dns.providers.route53'
           "$exe" adapt \
             --config "$RUNNER_TEMP/janus-smoke/$name/Caddyfile.minimal" \
             --adapter caddyfile >/dev/null
           "$exe" adapt \
             --config "$RUNNER_TEMP/janus-smoke/$name/Caddyfile.example" \
             --adapter caddyfile >/dev/null
+          caddy_version=$(awk '$1 == "github.com/caddyserver/caddy/v2" { print $2 }' go.mod)
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            "$exe" list-modules --versions | \
-              awk -v version="$GITHUB_REF_NAME" \
-                '$1 == "janus" && $2 == version { found=1 } END { exit !found }'
+            [[ "$("$exe" version)" == "janus ${GITHUB_REF_NAME#v} (caddy ${caddy_version#v})" ]]
+            "$exe" build-info | awk -v version="$GITHUB_REF_NAME" \
+              '$1 == "mod" && $2 == "github.com/shreeve/janus" && $3 == version { found=1 } END { exit !found }'
+          else
+            [[ "$("$exe" version)" == "janus 0.0.0-dev (caddy ${caddy_version#v})" ]]
           fi
 
       - uses: actions/upload-artifact@v7
@@ -198,4 +193,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Janus $GITHUB_REF_NAME" \
             --generate-notes \
-            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes the Caddy+Janus binary, Caddyfile.minimal, Caddyfile.example, README, and license; Unix archives also include install.sh."
+            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. The binary is named janus and bundles the Route 53 DNS provider for DNS-01 wildcard certificates. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes the janus binary, Caddyfile.minimal, Caddyfile.example, README, and license; Unix archives also include install.sh."

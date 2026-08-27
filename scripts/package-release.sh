@@ -3,7 +3,7 @@
 #
 #   TAG=v1.7.2 PLAT=osx-arm64 scripts/package-release.sh
 #
-# The workflow builds bin/caddy-janus[.exe] first. This script packages that
+# The workflow builds bin/janus[.exe] first. This script packages that
 # static binary with an installer, operator-facing configuration, README, and
 # license. Windows archives omit the Unix install.sh and run in place.
 
@@ -33,18 +33,18 @@ rm -rf "$root"
 mkdir -p "$root"
 
 if [[ "$PLAT" == windows-* ]]; then
-  [[ -f bin/caddy-janus.exe ]] || {
-    echo "package-release: bin/caddy-janus.exe not found" >&2
+  [[ -f bin/janus.exe ]] || {
+    echo "package-release: bin/janus.exe not found" >&2
     exit 2
   }
-  cp bin/caddy-janus.exe "$root/caddy-janus.exe"
+  cp bin/janus.exe "$root/janus.exe"
 else
-  [[ -f bin/caddy-janus ]] || {
-    echo "package-release: bin/caddy-janus not found" >&2
+  [[ -f bin/janus ]] || {
+    echo "package-release: bin/janus not found" >&2
     exit 2
   }
-  cp bin/caddy-janus "$root/caddy-janus"
-  chmod 0755 "$root/caddy-janus"
+  cp bin/janus "$root/janus"
+  chmod 0755 "$root/janus"
   install -m 0755 scripts/release-install.sh "$root/install.sh"
 fi
 
