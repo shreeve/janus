@@ -1,10 +1,15 @@
-# Janus — production-shaped example config
+# Janus — production-shaped example config: the guided tour
+#
+# START FROM Caddyfile.minimal — the stripped-down starting point most
+# edges actually need (an app site is just `janus` in a site block).
+# This file is the full walkthrough: every capability, every knob, and
+# why each site below opts in or out. Take what applies; delete freely.
 #
 # Operator-facing companion to the root Caddyfile (the working dev config
 # on *.ripdev.io). Domains here are example.com placeholders; substitute
 # your own. Check it without serving anything:
 #
-#   ./bin/caddy validate --config Caddyfile.example --adapter caddyfile
+#   ./bin/caddy-janus validate --config Caddyfile.example --adapter caddyfile
 #
 # Cold vs hot, in one breath: this file admits CAPABILITIES — what a host
 # may do (ping, cache, hub, auth, files) and where /1.0 listens. The hot /1.0 API wires
@@ -157,6 +162,9 @@
 		files {
 			precompressed
 		}
+
+		# 8) sendfile — always-on final X-Sendfile transformation;
+		# no configuration and no toggle (cascades: no).
 
 		# 9) browse — site-scoped admission with process-wide theme and
 		# renderer definitions. The embedded theme is used here. Renderer

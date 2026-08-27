@@ -1,0 +1,60 @@
+# Janus — starting-point config
+#
+# The smallest useful Janus edge: one app site and one browsable
+# directory. Every capability not mentioned here is simply off; the
+# guided tour of every capability and knob — cache, hub, mdns, auth,
+# and why each site opts in or out — is Caddyfile.example. Domains are
+# example.com placeholders; substitute your own. Check this file
+# without serving anything:
+#
+#   ./bin/caddy-janus validate --config Caddyfile.minimal --adapter caddyfile
+#
+# Sites carry no tls directive on purpose: Caddy manages certificates
+# (ACME) for every named host, which is the production default.
+{
+	janus {
+		# Every site below answers GET /ping with pong — a tiny
+		# data-plane liveness probe for smoke tests and load balancers.
+		ping
+
+		# The hot /1.0 control API. Tenants register their hosts and
+		# worker sockets here; nothing in this file names an app or a
+		# socket. internal = unix socket run/janus.sock (operators on
+		# the box); local = http://127.0.0.1:7600/ (loopback only).
+		control internal
+		control local
+	}
+}
+
+# Durable JSON access log through the Janus encoder; sites import it.
+(janus_access) {
+	log {
+		output stderr
+		format janus
+	}
+}
+
+# An app: the empty janus block admits the host and inherits every
+# global default. The app registers itself over /1.0 and Janus proxies
+# to its worker sockets:
+#
+#   POST /1.0/apps                  {"name":"app","hosts":["app.example.com"]}
+#   PUT  /1.0/apps/{id}/upstreams   {"upstreams":[{"path":"run/app-1.sock"}]}
+#   POST /1.0/apps/{id}/heartbeat     (every few seconds; 15s TTL)
+#
+# The registry is memory-only: the app re-registers after a restart.
+app.example.com {
+	import janus_access
+	janus
+}
+
+# A browsable directory: listings, previews, and downloads straight
+# from disk — no app, no registration, and it survives restarts.
+files.example.com {
+	import janus_access
+	janus {
+		browse {
+			root /srv/files
+		}
+	}
+}

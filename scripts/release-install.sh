@@ -5,8 +5,8 @@
 #   caddy-janus -> /usr/local/bin   (override: BIN=...)
 #
 # The archive is self-contained and also runs in place. This installer only
-# puts the binary on PATH; Caddyfile.example remains here as a reference so it
-# never overwrites an operator's live configuration. sudo is used only when
+# puts the binary on PATH; Caddyfile.minimal and Caddyfile.example remain here
+# as references so they never overwrite an operator's live configuration. sudo is used only when
 # the destination is not writable.
 
 set -euo pipefail

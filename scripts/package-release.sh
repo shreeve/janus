@@ -48,7 +48,7 @@ else
   install -m 0755 scripts/release-install.sh "$root/install.sh"
 fi
 
-cp Caddyfile.example README.md LICENSE "$root/"
+cp Caddyfile.minimal Caddyfile.example README.md LICENSE "$root/"
 
 if [[ "$PLAT" == windows-* ]]; then
   rm -f "$OUT/$name.zip"

@@ -157,6 +157,9 @@ jobs:
           "$exe" version
           "$exe" list-modules --versions | grep '^janus ' >/dev/null
           "$exe" adapt \
+            --config "$RUNNER_TEMP/janus-smoke/$name/Caddyfile.minimal" \
+            --adapter caddyfile >/dev/null
+          "$exe" adapt \
             --config "$RUNNER_TEMP/janus-smoke/$name/Caddyfile.example" \
             --adapter caddyfile >/dev/null
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
@@ -195,4 +198,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Janus $GITHUB_REF_NAME" \
             --generate-notes \
-            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes the Caddy+Janus binary, Caddyfile.example, README, and license; Unix archives also include install.sh."
+            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes the Caddy+Janus binary, Caddyfile.minimal, Caddyfile.example, README, and license; Unix archives also include install.sh."

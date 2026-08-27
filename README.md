@@ -35,7 +35,7 @@ app.example.com {
 }
 ```
 
-Registry, data plane, and hub state live in pooled process state: a Caddy config reload never drops a registration or a WebSocket. Everything is memory-only by contract — a restart empties the registry and tenants re-register. See [`Caddyfile.example`](Caddyfile.example) for the full operator-facing configuration and [`docs/`](docs/) for the contracts.
+Registry, data plane, and hub state live in pooled process state: a Caddy config reload never drops a registration or a WebSocket. Everything is memory-only by contract — a restart empties the registry and tenants re-register. See [`Caddyfile.minimal`](Caddyfile.minimal) for the operator-facing starting point, [`Caddyfile.example`](Caddyfile.example) for the full capability walkthrough, and [`docs/`](docs/) for the contracts.
 
 This repository is a Go module. Caddy is a dependency, not a git submodule. A Janus-enabled binary is produced with [xcaddy](https://github.com/caddyserver/xcaddy), which compiles stock Caddy together with this module into one static `caddy` binary.
 
@@ -298,7 +298,7 @@ On macOS and Linux, run `./install.sh` to install `caddy-janus` into
 `/usr/local/bin`, or choose another destination with
 `BIN="$HOME/bin" ./install.sh`. The extracted binary also runs in place.
 On Windows, run `caddy-janus.exe` directly. Each archive also contains
-`Caddyfile.example`, the README, and the license; the installer deliberately
+`Caddyfile.minimal`, `Caddyfile.example`, the README, and the license; the installer deliberately
 leaves configuration in the archive rather than overwriting a live Caddyfile.
 The release's `janus-<tag>-checksums.txt` verifies every archive.
 
@@ -388,7 +388,8 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `testkit/` | Go test-support program: fixtures + WS driver for `test.sh` |
 | `bench/` | Committed bench harness (baseline, leak probe, hub arm) |
 | `Caddyfile` | Working cold config (multi-site cascade demos) |
-| `Caddyfile.example` | Operator-facing, production-shaped example config (validates standalone) |
+| `Caddyfile.minimal` | Operator-facing starting point: one app site, one browsable root (validates standalone) |
+| `Caddyfile.example` | Production-shaped walkthrough of every capability and knob (validates standalone) |
 | `test.sh` | High-level acceptance suite (self-contained; not a substitute for `go test`) |
 | `docs/` | Contracts, capability pages, measurements (`YYYYMMDD-HHMMSS-` prefixed; see [`docs/README.md`](docs/README.md)) |
 

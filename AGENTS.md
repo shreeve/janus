@@ -120,8 +120,9 @@ down. Memory-only across restarts — tenants re-register.
   syntax, examples, hard errors, non-goals.
 - Design HTML = history. Build SPEC + capability pages = what we
   implement against.
-- Root **`Caddyfile`** is the working cold config; **`Caddyfile.example`**
-  is the operator-facing example (validates standalone).
+- Root **`Caddyfile`** is the working cold config; **`Caddyfile.minimal`**
+  is the operator-facing starting point and **`Caddyfile.example`** the
+  full capability walkthrough (both validate standalone).
 
 ## Local HTTPS
 
@@ -137,7 +138,7 @@ make unit              # developer / unit
 make test              # build + unit + acceptance (foreground!)
 
 make janus
-./bin/caddy-janus validate   # Caddyfile.example: add --config … --adapter caddyfile
+./bin/caddy-janus validate   # Caddyfile.minimal / Caddyfile.example: add --config … --adapter caddyfile
 ./bin/caddy-janus run
 ```
 
