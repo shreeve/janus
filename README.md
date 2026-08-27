@@ -269,7 +269,7 @@ Pin Caddy and Janus versions for reproducible builds (replace versions as approp
 
 ```bash
 xcaddy build v2.11.4 \
-  --with github.com/shreeve/janus@v1.7.1 \
+  --with github.com/shreeve/janus@v1.7.2 \
   --replace github.com/go-chi/chi/v5=github.com/go-chi/chi/v5@v5.3.2 \
   --output ./caddy
 ```

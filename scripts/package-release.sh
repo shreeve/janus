@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # package-release.sh — assemble one platform's self-contained release archive.
 #
-#   TAG=v1.7.1 PLAT=osx-arm64 scripts/package-release.sh
+#   TAG=v1.7.2 PLAT=osx-arm64 scripts/package-release.sh
 #
 # The workflow builds bin/caddy-janus[.exe] first. This script packages that
 # static binary with an installer, operator-facing configuration, README, and
@@ -10,12 +10,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TAG=${TAG:?package-release: set TAG (for example, v1.7.1)}
+TAG=${TAG:?package-release: set TAG (for example, v1.7.2)}
 PLAT=${PLAT:?package-release: set PLAT}
 OUT=${OUT:-dist}
 
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || {
-  echo "package-release: TAG must be a safe semantic version (for example, v1.7.1)" >&2
+  echo "package-release: TAG must be a safe semantic version (for example, v1.7.2)" >&2
   exit 2
 }
 case "$PLAT" in
