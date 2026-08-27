@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -365,27 +367,44 @@ const hubSnapshotMax = 32 << 10
 // mechanics. The rest — Cookie, Authorization, everything the tenant
 // authenticates with — rides along for the connection's lifetime.
 var hubHopHeaders = map[string]bool{
-	"Connection":        true,
-	"Upgrade":           true,
-	"Keep-Alive":        true,
-	"Te":                true,
-	"Trailer":           true,
-	"Transfer-Encoding": true,
+	"Connection":          true,
+	"Upgrade":             true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Proxy-Connection":    true,
+	"Te":                  true,
+	"Trailer":             true,
+	"Transfer-Encoding":   true,
 }
 
 // hubHeaderSnapshot filters and freezes the upgrade request's headers.
 // ok=false means the filtered snapshot serializes over the cap.
 func hubHeaderSnapshot(h http.Header) (http.Header, bool) {
 	out := make(http.Header, len(h))
+	connectionHeaders := map[string]bool{}
+	for field, lines := range h {
+		if strings.EqualFold(field, "Connection") {
+			for _, line := range lines {
+				for _, name := range strings.Split(line, ",") {
+					if name = textproto.TrimString(name); name != "" {
+						connectionHeaders[strings.ToLower(name)] = true
+					}
+				}
+			}
+		}
+	}
 	size := 0
 	for name, vals := range h {
-		if hubHopHeaders[name] || len(name) >= 14 && name[:14] == "Sec-Websocket-" {
+		canonical := textproto.CanonicalMIMEHeaderKey(name)
+		if hubHopHeaders[canonical] || connectionHeaders[strings.ToLower(name)] ||
+			strings.HasPrefix(strings.ToLower(name), "sec-websocket-") {
 			continue
 		}
 		for _, v := range vals {
 			size += len(name) + len(v) + 4 // name: value\r\n
 		}
-		out[name] = vals
+		out[name] = append([]string(nil), vals...)
 	}
 	if size > hubSnapshotMax {
 		return nil, false

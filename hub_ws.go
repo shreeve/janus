@@ -26,19 +26,22 @@ var hubUpgrader = websocket.Upgrader{
 
 // serveHub handles one intercepted upgrade request on a hub-enabled site.
 func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
-	cfg := h.hubCfg
-	app := h.app
-	st := app.state
-
-	// Host resolution runs as always: unknown host → 404, worker untouched.
 	host := normalizeHostHeader(r.Host)
-	rec, ok := st.registry.resolveRequestHost(r.Host)
+	rec, ok := h.app.state.registry.resolveRequestHost(r.Host)
 	if !ok {
 		accessFactsOf(r).clearOwner()
 		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
 	}
 	accessFactsOf(r).setOwner(rec)
 	accessFactsOf(r).setClass("hub")
+	return h.serveHubResolved(w, r, host, rec)
+}
+
+// serveHubResolved handles an upgrade after the main handler's host lookup.
+func (h *Handler) serveHubResolved(w http.ResponseWriter, r *http.Request, host string, rec AppRecord) error {
+	cfg := h.hubCfg
+	app := h.app
+	st := app.state
 
 	// Origin check: fails → 403, no upgrade, no bridge.
 	if !hubOriginAllowed(cfg, r, host) {
@@ -156,36 +159,30 @@ func (h *Handler) serveHub(w http.ResponseWriter, r *http.Request) error {
 		c.pongReceived()
 		return nil
 	})
+	var bridge *hubBridge
+	bridgeAttached := true
 	if cfg.mode == "bridge" {
-		c.bridge = newHubBridge(c, st, app.hubLog, cfg.maxFrame)
+		bridge = newHubBridge(c, st, app.hubLog, cfg.maxFrame)
+		bridgeAttached = c.attachBridge(bridge)
 	}
 
 	go c.writeLoop()
 	go c.pingLoop()
-	if c.bridge != nil {
-		go c.bridge.run()
+	if bridge != nil {
+		go bridge.run()
 	}
 
-	// A close that began after attachWS but before the bridge existed
-	// could not deliver its close notification; recheck now that the
-	// drainer is running, so the drainer always terminates.
-	if c.bridge != nil {
-		select {
-		case <-c.closedCh:
-			c.qmu.Lock()
-			code, reason := c.closeCode, c.closeReason
-			c.qmu.Unlock()
-			c.bridge.notifyClose(code, reason)
-			return nil
-		default:
-		}
+	// A close that won the bridge-publication race has already handed the
+	// close notification to the drainer; no connection work may follow.
+	if !bridgeAttached {
+		return nil
 	}
 
 	// The tenant's open-response directives execute in the new
 	// connection's context before the inbound reader starts: enrollment
 	// and greeting precede all client frames.
-	if c.bridge != nil {
-		c.bridge.processDirectives("open", res)
+	if bridge != nil {
+		bridge.processDirectives("open", res)
 	}
 
 	go h.hubReadLoop(c)

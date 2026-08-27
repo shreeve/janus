@@ -80,6 +80,7 @@ func TestParseHubDirectiveHardErrors(t *testing.T) {
 		`janus { hub { max_conns many } }`,           // not an integer
 		`janus { hub { max_channels 0 } }`,           // not positive
 		`janus { hub { max_frame 512b } }`,           // under 1kb
+		`janus { hub { max_frame 300pb } }`,          // bridge queue byte bound would overflow
 		`janus { hub { max_frame nope } }`,           // not a size
 		`janus { hub { origin } }`,                   // no arguments
 		`janus { hub { origin any same } }`,          // any is total
@@ -159,6 +160,13 @@ func TestHubCascade(t *testing.T) {
 	}
 	if h.hubCfg.originAny || !h.hubCfg.originSame || !h.hubCfg.originHosts["admin.example.com"] {
 		t.Fatalf("origin cascade: %+v", h.hubCfg)
+	}
+
+	// Native JSON gets the same arithmetic bound as the Caddyfile parser.
+	tooLarge := hubMaxMaxFrame + 1
+	h = &Handler{Hub: &HubSettings{Enabled: boolPtr(true), MaxFrame: &tooLarge}, app: &App{}, dp: &dataPlane{}}
+	if err := h.provisionHub(); err == nil {
+		t.Fatal("native max_frame that overflows the bridge queue bound was accepted")
 	}
 }
 

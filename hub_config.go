@@ -2,6 +2,7 @@ package janus
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -24,6 +25,9 @@ const (
 	hubDefaultMaxFrame    = int64(64 << 10)
 	hubDefaultMaxChannels = 128
 	hubMinMaxFrame        = int64(1 << 10)
+	// A bridge queue holds at most hubBridgeQueueMsgCap frames. Keeping the
+	// configured frame cap below this ceiling makes its byte bound representable.
+	hubMaxMaxFrame = int64(math.MaxInt64 / hubBridgeQueueMsgCap)
 )
 
 // HubSettings configures the site-scoped hub: per-app WebSocket fan-out
@@ -147,8 +151,8 @@ func parseHubDirective(d *caddyfile.Dispenser) (*HubSettings, error) {
 				return nil, err
 			}
 			n, perr := humanize.ParseBytes(val)
-			if perr != nil || int64(n) < hubMinMaxFrame {
-				return nil, d.Errf("hub max_frame: want a size of at least 1kb, got %q", val)
+			if perr != nil || n < uint64(hubMinMaxFrame) || n > uint64(hubMaxMaxFrame) {
+				return nil, d.Errf("hub max_frame: want a size from 1kb through %d bytes, got %q", hubMaxMaxFrame, val)
 			}
 			v := int64(n)
 			hs.MaxFrame = &v
@@ -248,8 +252,8 @@ func (h *Handler) provisionHub() error {
 		if hs.MaxChannels != nil && *hs.MaxChannels < 1 {
 			return fmt.Errorf("janus hub: max_channels must be a positive integer, got %d", *hs.MaxChannels)
 		}
-		if hs.MaxFrame != nil && *hs.MaxFrame < hubMinMaxFrame {
-			return fmt.Errorf("janus hub: max_frame must be at least 1kb, got %d", *hs.MaxFrame)
+		if hs.MaxFrame != nil && (*hs.MaxFrame < hubMinMaxFrame || *hs.MaxFrame > hubMaxMaxFrame) {
+			return fmt.Errorf("janus hub: max_frame must be from 1kb through %d bytes, got %d", hubMaxMaxFrame, *hs.MaxFrame)
 		}
 		if len(hs.Origin) > 0 {
 			if err := validateHubOrigin(hs.Origin); err != nil {

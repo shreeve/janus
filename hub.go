@@ -258,6 +258,15 @@ type hubExecOutcome struct {
 	unknownTargets int
 }
 
+// hubDispatch is one object's immutable delivery snapshot. Membership and
+// target resolution happen under appHub.mu; serialization and bounded queue
+// admission happen afterward so a large fan-out never holds the app-wide
+// membership lock while taking every recipient's queue lock.
+type hubDispatch struct {
+	obj        *hubObject
+	recipients []*hubConn
+}
+
 // execute runs the canonical execution order on one validated frame:
 //
 //  1. (already done by parseHubFrame) whole-frame grammar validation; here
@@ -297,25 +306,35 @@ func (h *appHub) execute(objs []hubObject, plane hubPlane, origin *hubConn) (hub
 
 	// Stages 3 and 4 per object: resolve against post-mutation membership,
 	// then deliver.
+	var dispatches []hubDispatch
 	var pongs []json.RawMessage
-	for _, obj := range objs {
-		recipients := h.resolveDeliveryLocked(&obj, plane, origin, &out)
-		if len(obj.events) > 0 {
-			h.deliverLocked(&obj, plane, origin, recipients, &out)
-		}
-		if obj.kick != nil {
-			kickFrame := []byte(`{"*":` + string(mustJSONString(*obj.kick)) + `}`)
-			for _, rc := range recipients {
-				if rc.enqueue(kickFrame) {
-					rc.enqueueClose(hubCloseNormal, *obj.kick)
-				}
-			}
+	for i := range objs {
+		obj := &objs[i]
+		recipients := h.resolveDeliveryLocked(obj, plane, origin, &out)
+		if len(obj.events) > 0 || obj.kick != nil {
+			dispatches = append(dispatches, hubDispatch{obj: obj, recipients: recipients})
 		}
 		if obj.ping != nil {
 			pongs = append(pongs, obj.ping)
 		}
 	}
 	h.mu.Unlock()
+
+	// Cross-connection and cross-plane frames explicitly have no ordering
+	// guarantee. One reader still calls execute serially, so a sender's own
+	// frame order remains FIFO; within this call, object order is retained.
+	for _, dispatch := range dispatches {
+		obj := dispatch.obj
+		if len(obj.events) > 0 {
+			h.deliver(obj, plane, origin, dispatch.recipients, &out)
+		}
+		if obj.kick != nil {
+			kickFrame := []byte(`{"*":` + string(mustJSONString(*obj.kick)) + `}`)
+			for _, rc := range dispatch.recipients {
+				rc.enqueueAndClose(kickFrame, hubCloseNormal, *obj.kick)
+			}
+		}
+	}
 
 	// The pong is sent after the frame executes.
 	if origin != nil {
@@ -501,12 +520,12 @@ func (h *appHub) resolveDeliveryLocked(obj *hubObject, plane hubPlane, origin *h
 	return recipients
 }
 
-// deliverLocked serializes the object's bundle variants once and enqueues
+// deliver serializes the object's bundle variants once and enqueues
 // shared bytes to each recipient. A bare event name excludes the
 // originating connection; the ! suffix includes it (and is stripped on
 // delivery). Publish has no originating connection, so bare and !
 // spellings deliver identically there; exclusion never keys off <.
-func (h *appHub) deliverLocked(obj *hubObject, plane hubPlane, origin *hubConn, recipients []*hubConn, out *hubExecOutcome) {
+func (h *appHub) deliver(obj *hubObject, plane hubPlane, origin *hubConn, recipients []*hubConn, out *hubExecOutcome) {
 	var prov []string
 	hasProv := false
 	if plane == hubPlaneClient {

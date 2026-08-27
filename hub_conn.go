@@ -127,8 +127,8 @@ func (c *hubConn) enqueue(data []byte) bool {
 		c.qbytes = 0
 		c.qmu.Unlock()
 		c.hub.ctr.slowCloses.Add(1)
-		// The enqueuer holds hub.mu (fan-out under the membership lock);
-		// closeWith re-acquires it in removeConn, so close asynchronously.
+		// Close asynchronously: fan-out to the remaining recipients must
+		// never block on one wedged connection's close handshake.
 		go c.closeWith(hubCloseTryLater, "slow consumer")
 		return false
 	}
@@ -142,22 +142,37 @@ func (c *hubConn) enqueue(data []byte) bool {
 	return true
 }
 
-// enqueueClose orders a close behind everything already queued (the kick
-// path: the * frame delivers, then the socket closes 1000). Nothing can
-// be enqueued after it.
-func (c *hubConn) enqueueClose(code int, reason string) {
+// enqueueAndClose atomically orders one final application frame followed by a
+// normal close. Keeping both queue operations under qmu prevents an unrelated
+// racing fan-out from landing between the trusted kick and its close now that
+// appHub dispatch no longer holds the app-wide membership lock while enqueueing.
+func (c *hubConn) enqueueAndClose(data []byte, code int, reason string) bool {
 	c.qmu.Lock()
 	if c.qclosed {
 		c.qmu.Unlock()
-		return
+		return false
+	}
+	if len(c.queue) >= hubQueueMsgCap || c.qbytes+int64(len(data)) > hubQueueByteCap {
+		c.qclosed = true
+		c.queue = nil
+		c.qbytes = 0
+		c.qmu.Unlock()
+		c.hub.ctr.slowCloses.Add(1)
+		go c.closeWith(hubCloseTryLater, "slow consumer")
+		return false
 	}
 	c.qclosed = true
-	c.queue = append(c.queue, hubOutItem{closeCode: code, closeText: reason})
+	c.queue = append(c.queue,
+		hubOutItem{data: data},
+		hubOutItem{closeCode: code, closeText: reason},
+	)
+	c.qbytes += int64(len(data))
 	c.qmu.Unlock()
 	select {
 	case c.wake <- struct{}{}:
 	default:
 	}
+	return true
 }
 
 // writeLoop is the connection's one writer, draining the queue in enqueue
@@ -204,18 +219,29 @@ func (c *hubConn) pingLoop() {
 		case <-c.closedCh:
 			return
 		case <-t.C:
-			c.pmu.Lock()
-			pending := c.pongPending
-			c.pongPending = true
-			c.pmu.Unlock()
-			if pending {
-				c.hub.ctr.pingCloses.Add(1)
-				c.closeWith(hubCloseGoingAway, "ping timeout")
+			if !c.pingOnce() {
 				return
 			}
-			_ = c.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(hubWriteWait))
 		}
 	}
+}
+
+func (c *hubConn) pingOnce() bool {
+	c.pmu.Lock()
+	pending := c.pongPending
+	c.pongPending = true
+	c.pmu.Unlock()
+	if pending {
+		c.hub.ctr.pingCloses.Add(1)
+		c.closeWith(hubCloseGoingAway, "ping timeout")
+		return false
+	}
+	if err := c.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(hubWriteWait)); err != nil {
+		c.hub.ctr.pingCloses.Add(1)
+		c.closeWith(websocket.CloseAbnormalClosure, "ping write failed")
+		return false
+	}
+	return true
 }
 
 func (c *hubConn) pongReceived() {
@@ -240,6 +266,23 @@ func (c *hubConn) attachWS(ws *websocket.Conn) bool {
 	}
 }
 
+// attachBridge publishes the connection's bridge to racing close paths. A
+// close that already began cannot have notified a bridge that did not exist,
+// so this side completes that notification before reporting false. Otherwise
+// closeWith captures the published bridge under the same lock and owns the
+// eventual notification.
+func (c *hubConn) attachBridge(bridge *hubBridge) bool {
+	c.qmu.Lock()
+	c.bridge = bridge
+	code, reason := c.closeCode, c.closeReason
+	c.qmu.Unlock()
+	if code == 0 {
+		return true
+	}
+	bridge.notifyClose(code, reason)
+	return false
+}
+
 // closeWith is the internal close-with-reason mechanism (always present;
 // serves teardown, ping timeout, slow consumers, hard protocol errors,
 // host removal, hub disable, and write failures). It performs local
@@ -261,6 +304,7 @@ func (c *hubConn) closeWith(code int, reason string) {
 		c.queue = nil
 		c.qbytes = 0
 		c.closeCode, c.closeReason = code, reason
+		bridge := c.bridge
 		c.qmu.Unlock()
 		close(c.closedCh)
 
@@ -276,8 +320,8 @@ func (c *hubConn) closeWith(code int, reason string) {
 		}
 
 		c.hub.removeConn(c)
-		if c.bridge != nil {
-			c.bridge.notifyClose(code, reason)
+		if bridge != nil {
+			bridge.notifyClose(code, reason)
 		}
 	})
 }

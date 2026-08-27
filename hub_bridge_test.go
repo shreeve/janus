@@ -413,9 +413,13 @@ func TestHubHeaderSnapshot(t *testing.T) {
 		"Cookie":                   {"sid=1"},
 		"Authorization":            {"Bearer x"},
 		"User-Agent":               {"ua"},
-		"Connection":               {"Upgrade"},
+		"Connection":               {"Upgrade, X-Per-Connection"},
+		"X-Per-Connection":         {"private"},
 		"Upgrade":                  {"websocket"},
 		"Keep-Alive":               {"300"},
+		"Proxy-Authenticate":       {"Basic realm=proxy"},
+		"Proxy-Authorization":      {"Basic c2VjcmV0"},
+		"Proxy-Connection":         {"keep-alive"},
 		"Te":                       {"trailers"},
 		"Trailer":                  {"X-T"},
 		"Transfer-Encoding":        {"chunked"},
@@ -433,9 +437,14 @@ func TestHubHeaderSnapshot(t *testing.T) {
 		}
 	}
 	for name := range out {
-		if hubHopHeaders[name] || strings.HasPrefix(name, "Sec-Websocket-") {
+		if hubHopHeaders[name] || name == "X-Per-Connection" || strings.HasPrefix(name, "Sec-Websocket-") {
 			t.Fatalf("%s must be filtered", name)
 		}
+	}
+	// The snapshot is frozen: later request-header mutation cannot change it.
+	in["Cookie"][0] = "sid=changed"
+	if got := out.Get("Cookie"); got != "sid=1" {
+		t.Fatalf("snapshot mutated with request headers: %q", got)
 	}
 
 	// Over 32 KiB after filtering → rejected, never truncated.

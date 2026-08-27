@@ -660,6 +660,37 @@ func TestHubSlowConsumerOverflowClosesOnce(t *testing.T) {
 	expectWSClose(t, clientWS, hubCloseTryLater, "slow consumer")
 }
 
+func TestHubPingWriteFailureClosesImmediately(t *testing.T) {
+	hub := newTestAppHub()
+	c := newHubConn("pppppppppppppppp", hub, "h", "", http.Header{}, 8, hubDefaultMaxFrame)
+	serverWS, _ := wsPair(t)
+	c.ws = serverWS
+	if !hub.registerConn(c) {
+		t.Fatal("registerConn refused")
+	}
+	if err := serverWS.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if c.pingOnce() {
+		t.Fatal("ping on a closed socket reported success")
+	}
+	select {
+	case <-c.closedCh:
+	default:
+		t.Fatal("ping write failure did not close synchronously")
+	}
+	hub.mu.Lock()
+	remaining := len(hub.conns)
+	hub.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("ping write failure left %d registered connections", remaining)
+	}
+	if got := hub.ctr.pingCloses.Load(); got != 1 {
+		t.Fatalf("ping_closes: want 1, got %d", got)
+	}
+}
+
 // TestHubCloseBeforeUpgrade pins the open/teardown race: a connection
 // registered but not yet upgraded (ws == nil) can be closed by teardown
 // without panicking, cleanup runs, and a late attachWS reports the close
@@ -701,6 +732,39 @@ func TestHubCloseBeforeUpgrade(t *testing.T) {
 	c.qmu.Unlock()
 	if code != hubCloseGoingAway || !strings.Contains(reason, "app deregistered") {
 		t.Fatalf("recorded close: %d %q", code, reason)
+	}
+}
+
+// TestHubBridgeAttachRacingClose pins bridge publication against teardown.
+// Whichever side wins the connection lock must notify the bridge exactly once;
+// in particular, closeWith must never read a partially published bridge.
+func TestHubBridgeAttachRacingClose(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		hub := newTestAppHub()
+		c := newHubConn("bbbbbbbbbbbbbbbb", hub, "h", "", http.Header{}, 8, hubDefaultMaxFrame)
+		if !hub.registerConn(c) {
+			t.Fatal("registerConn refused")
+		}
+		bridge := newHubBridge(c, nil, zap.NewNop(), hubDefaultMaxFrame)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			c.closeWith(hubCloseGoingAway, "race")
+		}()
+		go func() {
+			defer wg.Done()
+			_ = c.attachBridge(bridge)
+		}()
+		wg.Wait()
+
+		bridge.mu.Lock()
+		closed, body := bridge.closed, append([]byte(nil), bridge.closeBody...)
+		bridge.mu.Unlock()
+		if !closed || len(body) == 0 {
+			t.Fatalf("iteration %d: racing close was not delivered to bridge", i)
+		}
 	}
 }
 
@@ -878,6 +942,63 @@ func TestHubFanoutRacingClose(t *testing.T) {
 	}()
 	wg.Wait()
 	checkMirror(t, hub)
+}
+
+// TestHubFanoutReleasesMembershipLockBeforeQueueAdmission pins the contention
+// boundary: target resolution linearizes under appHub.mu, but a recipient's
+// busy queue lock cannot stall unrelated membership work for the whole app.
+func TestHubFanoutReleasesMembershipLockBeforeQueueAdmission(t *testing.T) {
+	hub := newTestAppHub()
+	c := newHubConn("qqqqqqqqqqqqqqqq", hub, "h", "", http.Header{}, 8, hubDefaultMaxFrame)
+	if !hub.registerConn(c) {
+		t.Fatal("registerConn refused")
+	}
+	objs, verr := parseHubFrame([]byte(fmt.Sprintf(
+		`{"@":[%q],"+":["/joined"],"notice":1}`, c.id)), hubPlanePublish)
+	if verr != nil {
+		t.Fatalf("parse: %s", verr.msg)
+	}
+
+	c.qmu.Lock()
+	queueReleased := false
+	defer func() {
+		if !queueReleased {
+			c.qmu.Unlock()
+		}
+	}()
+	executed := make(chan struct{})
+	go func() {
+		_, _ = hub.execute(objs, hubPlanePublish, nil)
+		close(executed)
+	}()
+
+	observed := make(chan struct{})
+	go func() {
+		for {
+			hub.mu.Lock()
+			_, joined := c.channels["/joined"]
+			hub.mu.Unlock()
+			if joined {
+				close(observed)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	select {
+	case <-observed:
+		// The membership mutation is visible while dispatch remains blocked on
+		// qmu, proving appHub.mu is no longer nested around queue admission.
+	case <-time.After(time.Second):
+		t.Fatal("recipient queue lock stalled app-wide membership lock")
+	}
+	c.qmu.Unlock()
+	queueReleased = true
+	select {
+	case <-executed:
+	case <-time.After(time.Second):
+		t.Fatal("fan-out did not finish after recipient queue lock released")
+	}
 }
 
 // --- mint ---------------------------------------------------------------------------
