@@ -9,9 +9,12 @@
 #   curl -fsSL .../install.sh | bash -s v1.8.1
 #
 # Downloads the release archive for this platform, verifies its sha256
-# against the published checksums, and runs the archive's own installer
-# (janus -> /usr/local/bin; override with BIN=...). sudo is used only if
-# the destination dir is root-owned. Windows support comes later.
+# against the published checksums, and runs the archive's own installer.
+# As a user, janus lands in ~/.local/bin — the XDG home for user
+# executables; as root it lands in /usr/local/bin, so a system deploy
+# (systemd unit, setcap) keeps its path. Override either with BIN=...;
+# sudo is used only if the destination dir is root-owned. Windows support
+# comes later.
 
 set -euo pipefail
 
@@ -80,10 +83,17 @@ main() {
   # --- extract and hand off to the archive's own installer ------------------
   tar -xzf "$tmp/$asset" -C "$tmp"
 
+  # The destination: system-wide for root, user-owned for everyone else.
+  # Exported so the archive's installer — including the one inside every
+  # already-published release — uses the same answer.
+  if [ "$(id -u)" = 0 ]; then BIN="${BIN:-/usr/local/bin}"
+  else BIN="${BIN:-$HOME/.local/bin}"; fi
+  export BIN
+
   # Linux binds :80/:443 as non-root only with cap_net_bind_service, and the
   # install writes a fresh inode — which silently drops any capability the
   # old binary carried. Capture before, restore after; hint when absent.
-  dest="${BIN:-/usr/local/bin}/$NAME"
+  dest="$BIN/$NAME"
   had_caps=
   if [ "$os" = Linux ] && command -v getcap >/dev/null; then
     had_caps=$(getcap "$dest" 2>/dev/null || true)

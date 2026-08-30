@@ -2,7 +2,8 @@
 #
 # install.sh — install janus from this extracted release archive.
 #
-#   janus -> /usr/local/bin   (override: BIN=...)
+#   janus -> ~/.local/bin, or /usr/local/bin when run as root
+#   (override: BIN=...)
 #
 # The archive is self-contained and also runs in place. This installer only
 # puts the binary on PATH; Caddyfile.minimal and Caddyfile.example remain here
@@ -17,7 +18,10 @@ cd "$(dirname "$0")"
   exit 2
 }
 
-BIN=${BIN:-/usr/local/bin}
+# System-wide for root (a deploy's systemd unit and setcap keep their path),
+# user-owned for everyone else — the XDG home for user executables.
+if [[ "$(id -u)" == 0 ]]; then BIN=${BIN:-/usr/local/bin}
+else BIN=${BIN:-$HOME/.local/bin}; fi
 SOURCE="$(pwd -P)/janus"
 
 as_owner() {
@@ -92,5 +96,15 @@ if [[ "$(uname -s)" == Linux ]]; then
   fi
 fi
 
-echo "installed janus -> $DEST_DIR  (on your PATH)"
-echo "try: janus version"
+case ":$PATH:" in
+  *":$DEST_DIR:"*)
+    echo "installed janus -> $DEST_DIR"
+    echo "try: janus version"
+    ;;
+  *)
+    echo "installed janus -> $DEST_DIR"
+    echo
+    echo "$DEST_DIR is not on your PATH. Add it:"
+    echo "  echo 'export PATH=\"$DEST_DIR:\$PATH\"' >> ~/.zshrc   # or ~/.bashrc"
+    ;;
+esac

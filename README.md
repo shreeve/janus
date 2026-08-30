@@ -258,7 +258,8 @@ Confirm the modules are linked:
 
 On macOS and Linux, one command installs the latest release — it picks the
 right archive for the platform, verifies its sha256 against the published
-checksums, and installs `janus` into `/usr/local/bin` (override with
+checksums, and installs `janus` into `~/.local/bin` (as root:
+`/usr/local/bin`, so a system deploy keeps its path; override either with
 `BIN=...`; sudo only if the destination is root-owned):
 
 ```bash
@@ -280,8 +281,8 @@ The tagged release workflow publishes five self-contained archives:
 Download the matching archive from the
 [releases page](https://github.com/shreeve/janus/releases) and extract it.
 On macOS and Linux, run `./install.sh` to install `janus` into
-`/usr/local/bin`, or choose another destination with
-`BIN="$HOME/bin" ./install.sh`. The extracted binary also runs in place.
+`~/.local/bin` (as root: `/usr/local/bin`), or choose another destination
+with `BIN="$HOME/bin" ./install.sh`. The extracted binary also runs in place.
 On Windows, run `janus.exe` directly. Each archive also contains
 `Caddyfile.minimal`, `Caddyfile.example`, the README, and the license; the installer deliberately
 leaves configuration in the archive rather than overwriting a live Caddyfile.
