@@ -90,6 +90,11 @@ main() {
   else BIN="${BIN:-$HOME/.local/bin}"; fi
   export BIN
 
+  # Create the destination as ourselves when we can, so the archive's
+  # installer never reaches for sudo to make a directory under $HOME
+  # (a missing ~/.local reads as unwritable to its ownership check).
+  [ -d "$BIN" ] || install -d -m 0755 "$BIN" 2>/dev/null || true
+
   # Linux binds :80/:443 as non-root only with cap_net_bind_service, and the
   # install writes a fresh inode — which silently drops any capability the
   # old binary carried. Capture before, restore after; hint when absent.

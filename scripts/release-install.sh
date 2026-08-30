@@ -37,7 +37,9 @@ if [[ -e "$BIN" && ! -d "$BIN" ]]; then
   exit 2
 fi
 if [[ ! -d "$BIN" ]]; then
-  as_owner "$BIN" install -d -m 0755 "$BIN"
+  # Plain first: a missing parent (a fresh ~/.local) reads as unwritable,
+  # and sudo must never create a user's own home directories as root.
+  install -d -m 0755 "$BIN" 2>/dev/null || as_owner "$BIN" install -d -m 0755 "$BIN"
 fi
 DEST_DIR="$(cd "$BIN" && pwd -P)"
 DEST="$DEST_DIR/janus"
