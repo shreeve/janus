@@ -602,6 +602,13 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 					st.autoGzip = true
 				}
 			}
+			// X-Forwarded-* are the peer WE saw, never what the client
+			// claimed: ReverseProxy's Rewrite hook clears the inbound
+			// values before this runs, so SetXForwarded has nothing to
+			// append to and the app receives one hop — ours. Apps
+			// behind Janus key rate limits and audit trails on that
+			// header, so the guarantee is pinned by
+			// TestInboundXForwardedIsReplacedNotAppended.
 			pr.SetXForwarded()
 		},
 		ModifyResponse: func(resp *http.Response) error {

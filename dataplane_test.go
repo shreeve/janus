@@ -960,3 +960,46 @@ func TestSockHostRoundTrip(t *testing.T) {
 		t.Fatalf("host mangled: %q", host)
 	}
 }
+
+// A client-supplied X-Forwarded-For must never survive the hop.
+//
+// It does not today: ReverseProxy's Rewrite hook clears the inbound
+// X-Forwarded-* from the outbound request, so SetXForwarded has nothing
+// to append to and the app sees exactly one hop — the peer Janus saw.
+// That is a property of the stdlib rather than of this file, which is
+// precisely why it is pinned here: apps behind Janus key rate limits
+// and audit trails on this header, and if a future refactor moved to a
+// Director, or re-added the inbound values, the header would silently
+// start carrying "<client's text>, <real peer>". The conventional read
+// takes the FIRST entry, so such a regression would let an attacker
+// aim any app's throttle at any address they named.
+func TestInboundXForwardedIsReplacedNotAppended(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	seen := make(chan http.Header, 1)
+	up := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	registerApp(t, reg, "app.test", Upstream{Path: up})
+
+	r := httptest.NewRequest("GET", "http://app.test/", nil)
+	r.Header.Set("X-Forwarded-For", "198.51.100.9")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "evil.example")
+	r.RemoteAddr = "203.0.113.4:5555"
+	rr := httptest.NewRecorder()
+	if err := dp.serve(rr, r); err != nil {
+		t.Fatal(err)
+	}
+
+	h := <-seen
+	if got := h.Get("X-Forwarded-For"); got != "203.0.113.4" {
+		t.Fatalf("X-Forwarded-For should be the peer alone, got %q", got)
+	}
+	if got := h.Get("X-Forwarded-Host"); got != "app.test" {
+		t.Fatalf("X-Forwarded-Host should be the request host, got %q", got)
+	}
+	if got := h.Get("X-Forwarded-Proto"); got == "https" {
+		t.Fatalf("X-Forwarded-Proto should reflect our own hop, got %q", got)
+	}
+}
