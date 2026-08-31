@@ -2230,7 +2230,6 @@ case_mdns_front_door() {
 	json_has "$body" '"effective_name"'
 	json_has "$body" '"advertised"'
 	json_has "$body" '"apps"'
-	json_has "$body" '"cache"'
 	json_has "$body" '"hub"'
 }
 

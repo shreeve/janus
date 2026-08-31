@@ -119,7 +119,7 @@ cd ~/src/janus
 export PATH="$(go env GOPATH)/bin:$PATH"
 mkdir -p bin
 xcaddy build --with github.com/shreeve/janus=. --output ./bin/caddy
-# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.9.0 --output ./caddy)
+# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.9.1 --output ./caddy)
 ```
 
 **The demo Caddyfile.** It ships next to this page as

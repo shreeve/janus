@@ -249,7 +249,7 @@ checksums, and installs `janus` into `~/.local/bin` (as root:
 curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bash
 ```
 
-Pin a version with `... | bash -s v1.9.0`.
+Pin a version with `... | bash -s v1.9.1`.
 
 The tagged release workflow publishes five self-contained archives:
 
