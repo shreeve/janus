@@ -17,7 +17,7 @@ import (
 	_ "github.com/shreeve/janus"
 )
 
-// version is stamped by release builds (-ldflags "-X main.version=v1.8.0");
+// version is stamped by release builds (-ldflags "-X main.version=$tag");
 // source builds fall back to the VCS-stamped module version.
 var version string
 

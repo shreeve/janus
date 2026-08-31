@@ -6,7 +6,7 @@
 #
 # Pin a version by passing a tag (with or without the leading v):
 #
-#   curl -fsSL .../install.sh | bash -s v1.8.1
+#   curl -fsSL .../install.sh | bash -s v1.10.0
 #
 # Downloads the release archive for this platform, verifies its sha256
 # against the published checksums, and runs the archive's own installer.
