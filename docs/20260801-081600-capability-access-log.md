@@ -137,7 +137,6 @@ Owning request paths update only their own facts:
   tenant-site identity, and `*accessState` together;
 - auth, files, browse, sendfile, Hub, proxy, and Janus errors set the response
   class;
-- cache handling sets the cache verdict;
 - each worker attempt updates attempt count;
 - only the final selected worker attempt sets the opaque upstream identity;
 - only the final accepted worker response captures `Rip-Mark`, before scrub;
@@ -510,8 +509,8 @@ and trailers:
    repeated values, header-plus-trailer ambiguity, invalid UTF-8, or oversize;
 6. use `mark: null` with no omission declaration when no value exists.
 
-No header, trailer declaration, or actual trailer value reaches the client,
-cache entry, or durable `resp_headers`. A final non-replayable marked 503 may
+No header, trailer declaration, or actual trailer value reaches the client or
+durable `resp_headers`. A final non-replayable marked 503 may
 contribute its own mark because that response is the client-visible final
 attempt. Retried responses never contribute.
 
@@ -847,8 +846,8 @@ re-resolution behavior:
 7. final publication uses only the last complete tuple and its tombstone.
 
 The atomic tuple prevents mixed identity and access-state fields. It preserves
-host re-resolution after cache waits, doorbell rings, and every other current
-registry refresh. DELETE plus same-host re-registration between auth
+host re-resolution after doorbell rings and every other current registry
+refresh. DELETE plus same-host re-registration between auth
 attribution and routing can therefore route to the new record; facts switch to
 that new record as one operation. A late completion publishes only when the
 final owner's access state remains live.
@@ -856,8 +855,8 @@ final owner's access state remains live.
 Owner replacement runs under the facts mutex. Re-resolution to the same
 `*accessState` refreshes the record/site snapshot and retains attempt facts.
 Replacement with a different access-state pointer clears response class,
-cache verdict, selected upstream, retry count, mark candidates, and
-owner-specific outcome facts before installing the new tuple; subsequent
+selected upstream, retry count, mark candidates, and owner-specific outcome
+facts before installing the new tuple; subsequent
 owning seams repopulate them. No fact from the displaced registration
 contaminates the final owner's event.
 
@@ -952,8 +951,8 @@ redact or redefine the durable log.
 
 `Rip-Mark` is untrusted application text. Bounds and UTF-8 validation apply
 before publication, and the value is JSON-escaped. Header values, trailer
-declarations, and actual trailer values are removed before client forwarding,
-cache storage, and durable response-header logging.
+declarations, and actual trailer values are removed before client forwarding
+and durable response-header logging.
 
 ## Hard errors
 
@@ -970,7 +969,7 @@ Janus rejects or reports loudly:
 - a line that cannot satisfy the fixed encoded bound;
 - invalid UTF-8 in a field whose policy requires omission or failure;
 - a sequence increment beyond uint64;
-- an event with an unknown response class, cache verdict, or outcome;
+- an event with an unknown response class or outcome;
 - a duplicate or malformed reserved facts sentinel;
 - a duplicate publication attempt that carries conflicting completion facts.
 

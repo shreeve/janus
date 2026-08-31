@@ -154,7 +154,7 @@ under load and contradicts the protocol as implemented:
    table" and "Measured results" below.
 2. **Boot storm vs the 15s ring hold.** `w` simultaneous cold boots
    contend for cores; a heavy app can push first-readiness past the
-   hold cap. Mitigation: prebuild-once (#3) mostly dissolves this;
+   hold cap. Mitigation: prebuild-once (#2) mostly dissolves this;
    staggered spawn (boot one, publish at `readyWhen:1`, boot the rest)
    is the cheap fallback.
 3. **Hung handler at `c:1` is lost capacity that reports healthy.**
@@ -182,7 +182,7 @@ under load and contradicts the protocol as implemented:
   `GC.compact` saga). Fork-COW's durable value was load-once, which
   prebuild-once recovers without fork. The memory multiplier is
   **RSS ≈ w × (JSC baseline ~30–50MB + app retained heap)**; the
-  honest levers are keeping the compiler out of workers (#3), small
+  honest levers are keeping the compiler out of workers (#2), small
   `w` with higher `c` (#1), and maxRequests/maxSeconds recycling.
 - **worker_threads as the default pool**: each Bun Worker is its own
   JSC isolate (shared scaffolding, not heap), and it trades away the
@@ -692,14 +692,13 @@ latency or delivery.
 
 ### Next-best lever
 
-The ranked list is closed: #1, #2, #3, #4, and #5 are shipped with
-measurements above. What remains is deferred-for-cause — #6 (static
-bypass) and #8 (hand-rolled proxy) want a real production tenant's
-traffic shape, #7 (GOMAXPROCS split) wants a profile showing scheduler
-pressure, #9 (kTLS) waits on golang/go#44506. Operationally, the
-biggest available wins are now configuration, not code: enable `cache`
-on public anonymous routes (10–100x+ where it applies) and raise `c`
-on I/O-bound apps (capacity-exact, measured 7x).
+The ranked list is closed: #1, #2, #3, and #4 are shipped with
+measurements above. What remains is deferred-for-cause — #5 (static
+bypass) and #7 (hand-rolled proxy) want a real production tenant's
+traffic shape, #6 (GOMAXPROCS split) wants a profile showing scheduler
+pressure, #8 (kTLS) waits on golang/go#44506. Operationally, the
+biggest available win is now configuration, not code: raise `c` on
+I/O-bound apps (capacity-exact, measured 7x).
 
 ## Pointers
 

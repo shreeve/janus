@@ -3753,7 +3753,7 @@ case_browse_cold_restart_and_conflict() {
 	[[ "$REPLY_BODY" != *'coldbrowse.ripdev.io'* ]]
 }
 
-# --- capability 10: access log -------------------------------------------
+# --- capability 9: access log --------------------------------------------
 
 ACCESS_APP_FILE="$ROOT/.test-access-app-id"
 ACCESS_STREAM_FILE="$ROOT/.test-access-stream.ndjson"

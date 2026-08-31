@@ -1,7 +1,7 @@
-Janus Capability 10 corrected access benchmark raw provenance
+Janus Capability 9 corrected access benchmark raw provenance
 timestamp: 2026-08-01T10:23:58-06:00
 commit: 2df7393ca004840fc61018a9dfd9d09763a512be
-working_tree: uncommitted Capability 9/10 certification and cold-review remediation present
+working_tree: uncommitted Capability 9 certification and cold-review remediation present
 go version go1.26.5 darwin/arm64
 ProductName:		macOS
 ProductVersion:		26.5.2
