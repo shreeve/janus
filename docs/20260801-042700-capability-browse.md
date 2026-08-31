@@ -1,4 +1,4 @@
-# Capability 9: browse
+# Capability 8: browse
 
 `browse` turns explicitly selected filesystem roots into navigable web
 spaces. Janus owns directory discovery, listing presentation, ordinary file
@@ -10,7 +10,7 @@ keeping bytes, validators, ranges, and MIME handling at the edge.
 
 ## Scope and ownership
 
-- Capability order: **9**, after sendfile.
+- Capability order: **8**, after sendfile.
 - Cold gate: **required**. Browse behavior is inactive unless cold Caddy
   configuration enables it.
 - Cascade: **yes** for site browse admission; global default → site override.
@@ -117,7 +117,7 @@ process-wide settings.
 Effective browse on implies effective files on for browsable roots. An
 explicit `files off` at the same site with effective browse on rejects during
 provisioning. At global scope, explicit `files off` with browse enabled also
-rejects. Browse off with files on keeps ordinary Capability 7 delivery and
+rejects. Browse off with files on keeps ordinary Capability 6 delivery and
 disables listings and renderers.
 
 The complete cascade rule is: browse on makes files effective on only when
@@ -175,7 +175,7 @@ Aborted reloads leave the serving generation and its claims unchanged.
 
 ## Hot registration
 
-Capability 7's file root gains one optional Boolean:
+Capability 6's file root gains one optional Boolean:
 
 ```json
 {
@@ -201,15 +201,15 @@ decides whether it is active.
 `files.shell` may be omitted only when every root has `browse: true`,
 `proxy_first` is empty, and the registration's `upstreams` is empty. This is
 a terminal browse-only registration. Publishing nonempty upstreams later
-rejects. All other files policies retain Capability 7's required shell.
+rejects. All other files policies retain Capability 6's required shell.
 
-Files policy remains immutable for one registration. Changing a root, cache,
+Files policy remains immutable for one registration. Changing a root's HTTP cache policy,
 browse flag, proxy-first prefix, or shell uses DELETE followed by POST.
 
 ## Request decision table
 
 Browse runs after request-path validation and auth, inside the files branch,
-before SPA shell fallback and before proxy/cache handling:
+before SPA shell fallback and before proxy handling:
 
 After ping, site auth runs first. This table applies only after auth permits
 the request:
@@ -217,7 +217,7 @@ the request:
 1. malformed request target → **400**;
 2. unknown or directory-gate-failed hot host → **404**;
 3. a reserved theme asset path → immutable theme asset;
-4. `proxy_first` match → existing cache/doorbell/worker path;
+4. `proxy_first` match → existing doorbell/worker path;
 5. method other than GET or HEAD → **404**, preserving files behavior;
 6. for each ordered root:
    1. a regular-file hit wins;
@@ -243,7 +243,7 @@ a directory in a later root. A browsable directory in an earlier root wins
 over every later object. A non-browsable directory is not a match and does not
 shadow later roots.
 
-A cold claim skips Hub, `proxy_first`, SPA shell, app cache, doorbell, and
+A cold claim skips Hub, `proxy_first`, SPA shell, doorbell, and
 worker routing. It applies its ordered cold roots after auth and path
 validation; a miss is terminal 404.
 
@@ -252,7 +252,7 @@ validation; a miss is terminal 404.
 Janus opens each root with `os.OpenRoot`, opens the request-relative directory
 through that root, and reads entries from the opened descriptor. URL decoding,
 encoded slash/backslash rejection, dot-segment rejection, and root confinement
-are exactly Capability 7's rules.
+are exactly Capability 6's rules.
 
 The listing:
 
@@ -292,8 +292,8 @@ Sockets, FIFOs, devices, and other non-file entries use kind `other`, icon
 `binary`, and their `Lstat` metadata; URL, RawURL, and PreviewURL are empty.
 
 Listing responses are `text/html; charset=utf-8`,
-`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and never enter
-the micro-cache. GET returns the page; HEAD computes the same headers and
+`Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. GET returns
+the page; HEAD computes the same headers and
 Content-Length without writing the body.
 
 ## Theme
@@ -355,7 +355,7 @@ any additional regular assets are addressed beneath:
 ```
 
 This prefix is reserved on browse-enabled sites and is handled before app
-roots, shells, cache, or upstreams. Asset paths are descriptor-confined,
+roots, shells, or upstreams. Asset paths are descriptor-confined,
 dot-segment-free, and content-addressed. Theme assets receive
 `Cache-Control: public, max-age=31536000, immutable`, a content hash ETag,
 correct MIME metadata, and GET/HEAD semantics. A matching `If-None-Match`
@@ -363,7 +363,7 @@ returns **304** with the immutable cache and validator headers and no body.
 
 The entire reserved prefix is terminal. Unknown hashes, assets, malformed
 asset paths, and methods other than GET or HEAD return 404 and never fall
-through to roots, shell, cache, or upstream.
+through to roots, shell, or upstream.
 
 A custom theme directory replaces the embedded theme wholesale. Janus walks
 it during provisioning, rejects symlinks and non-regular assets, requires the
@@ -411,7 +411,7 @@ CSS, JavaScript, JSON, and SVG; unknown assets are
 The ordinary URL is the best configured browser representation:
 
 - if the winning browsable root's extension has a renderer, plain GET runs it;
-- otherwise Janus serves the ordinary file using Capability 7;
+- otherwise Janus serves the ordinary file using Capability 6;
 - `RawQuery`, split on `&`, containing a component exactly equal to `raw`
   bypasses a renderer and serves ordinary bytes;
 - `raw` with a nonempty value and every other query parameter do not change
@@ -465,7 +465,7 @@ variable it defines.
 
 GET captures stdout and returns it only after a successful exit. HEAD never
 spawns; it returns the configured content type, no Content-Length, and no body.
-Raw GET/HEAD retains Capability 7 validators, ranges, MIME detection, cache
+Raw GET/HEAD retains Capability 6 validators, ranges, MIME detection, cache
 policy, and streaming.
 
 ## Renderer bounds and failures
@@ -507,7 +507,7 @@ above. Start failure has no exit status.
 
 Rendered success is status 200 with the configured Content-Type,
 `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. It has no
-ETag, Last-Modified, ranges, compression promise, or micro-cache entry.
+ETag, Last-Modified, ranges, or compression promise.
 
 One pooled renderer supervisor owns the total running-child count across
 overlapping Caddy generations. Admission under one mutex applies the proposed
@@ -638,7 +638,7 @@ Caddy site admission
    → directory index
    → listing
 → SPA shell
-→ cache / upstream
+→ upstream
 → 404
 ```
 

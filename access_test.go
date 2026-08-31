@@ -87,7 +87,7 @@ func TestAccessEncoderDurableJSONParityAndPublication(t *testing.T) {
 	facts := &accessFacts{
 		start: time.Now().Add(-time.Millisecond), requestID: "7a37ea98-38c6-4e23-bdc6-601590d43f04",
 		owner:         accessOwner{id: "cart-a1b2c3", name: "cart", state: state},
-		responseClass: "proxy", cacheVerdict: "off", outcome: "complete",
+		responseClass: "proxy", outcome: "complete",
 	}
 	fields := []zapcore.Field{
 		zap.Int("status", http.StatusOK),
@@ -345,7 +345,7 @@ func TestAccessEventBoundsAndAdjustments(t *testing.T) {
 		RequestID: "7a37ea98-38c6-4e23-bdc6-601590d43f04", AppID: "cart-a1b2c3",
 		AppName: "cart", RequestHost: "cart.example", ClientIP: "127.0.0.1",
 		Method: "GET", Path: "/" + strings.Repeat(`"`, 4095), DurationSeconds: .1,
-		ResponseBytes: "0", ResponseClass: "proxy", CacheVerdict: "off", Outcome: "complete",
+		ResponseBytes: "0", ResponseClass: "proxy", Outcome: "complete",
 	}
 	line, err := encodeAccessEvent(event)
 	if err != nil {
@@ -502,7 +502,7 @@ func accessOutcomeFacts(t *testing.T) *accessFacts {
 	return &accessFacts{
 		start: time.Now(), requestID: "7a37ea98-38c6-4e23-bdc6-601590d43f04",
 		owner:         accessOwner{id: "cart-a1b2c3", name: "cart", state: state},
-		responseClass: "proxy", cacheVerdict: "off", outcome: "complete",
+		responseClass: "proxy", outcome: "complete",
 	}
 }
 
@@ -832,7 +832,7 @@ func TestAccessEncoderNoOwnerAndPublicationFailurePolicy(t *testing.T) {
 
 	state := bridge.newState()
 	facts.owner = accessOwner{id: "cart-a1b2c3", name: "cart", state: state}
-	facts.responseClass, facts.cacheVerdict, facts.outcome = "proxy", "off", "complete"
+	facts.responseClass, facts.outcome = "proxy", "complete"
 	facts.start = time.Now()
 	facts.published.Store(false)
 	facts.requestID = "not-a-uuid"
@@ -1179,7 +1179,7 @@ func accessBenchmarkFacts(state *accessState, class string, upgraded bool) *acce
 	return &accessFacts{
 		start: time.Now(), requestID: "7a37ea98-38c6-4e23-bdc6-601590d43f04",
 		owner:         accessOwner{id: "cart-a1b2c3", name: "cart", site: "alice", state: state},
-		responseClass: class, cacheVerdict: "off", outcome: "complete", upgraded: upgraded,
+		responseClass: class, outcome: "complete", upgraded: upgraded,
 	}
 }
 

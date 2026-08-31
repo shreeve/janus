@@ -1162,17 +1162,6 @@ type mdnsStatusWorkers struct {
 	Healthy int `json:"healthy"`
 }
 
-type mdnsStatusCache struct {
-	Hits      int64 `json:"hits"`
-	Misses    int64 `json:"misses"`
-	Coalesced int64 `json:"coalesced"`
-}
-
-type mdnsStatusCacheTotals struct {
-	mdnsStatusCache
-	Bypass int64 `json:"bypass"`
-}
-
 type mdnsStatusHub struct {
 	Conns    int `json:"conns"`
 	Channels int `json:"channels"`
@@ -1202,23 +1191,21 @@ type mdnsStatusApp struct {
 	Admission      string             `json:"admission"`
 	Workers        mdnsStatusWorkers  `json:"workers"`
 	HeartbeatAgeMS int64              `json:"heartbeat_age_ms"`
-	Cache          mdnsStatusCache    `json:"cache"`
 	Hub            mdnsStatusHub      `json:"hub"`
 	Launch         []mdnsStatusLaunch `json:"launch"`
 }
 
 type mdnsStatusSnapshot struct {
-	Name          string                `json:"name"`
-	EffectiveName string                `json:"effective_name"`
-	Canonical     string                `json:"canonical,omitempty"`
-	Advertised    []string              `json:"advertised"`
-	SkippedHosts  int                   `json:"skipped_hosts"`
-	Apps          []mdnsStatusApp       `json:"apps"`
-	Cache         mdnsStatusCacheTotals `json:"cache"`
-	Hub           mdnsStatusHub         `json:"hub"`
+	Name          string          `json:"name"`
+	EffectiveName string          `json:"effective_name"`
+	Canonical     string          `json:"canonical,omitempty"`
+	Advertised    []string        `json:"advertised"`
+	SkippedHosts  int             `json:"skipped_hosts"`
+	Apps          []mdnsStatusApp `json:"apps"`
+	Hub           mdnsStatusHub   `json:"hub"`
 }
 
-// mdnsStatusSnapshot reads registry, data plane, cache, and hub state
+// mdnsStatusSnapshot reads registry, data plane, and hub state
 // in-process — never a /1.0 proxy — into the redacted status shape.
 func (a *App) mdnsStatusSnapshot() mdnsStatusSnapshot {
 	ms := a.Mdns
@@ -1250,16 +1237,7 @@ func (a *App) mdnsStatusSnapshot() mdnsStatusSnapshot {
 	}
 
 	ages := a.appsReg.heartbeatAges()
-	cacheStats := a.cache.snapshot()
 	hubStats := a.hubs.stats()
-	out.Cache = mdnsStatusCacheTotals{
-		mdnsStatusCache: mdnsStatusCache{
-			Hits:      cacheStats.Hits,
-			Misses:    cacheStats.Misses,
-			Coalesced: cacheStats.Coalesced,
-		},
-		Bypass: cacheStats.Bypass,
-	}
 	out.Hub = mdnsStatusHub{Conns: hubStats.Conns, Channels: hubStats.Channels}
 
 	for _, rec := range a.appsReg.list() { // sorted by id
@@ -1307,9 +1285,6 @@ func (a *App) mdnsStatusSnapshot() mdnsStatusSnapshot {
 				}
 			}
 			app.Workers.Total, app.Workers.Healthy = a.dp.upstreamHealth(workers)
-		}
-		if b := cacheStats.Apps[rec.ID]; b != nil {
-			app.Cache = mdnsStatusCache{Hits: b.Hits, Misses: b.Misses, Coalesced: b.Coalesced}
 		}
 		if b := hubStats.Apps[rec.ID]; b != nil {
 			app.Hub = mdnsStatusHub{Conns: b.Conns, Channels: b.Channels}

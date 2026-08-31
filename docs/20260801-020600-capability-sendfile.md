@@ -1,4 +1,4 @@
-# Capability 8: sendfile
+# Capability 7: sendfile
 
 `sendfile` lets a proxied application authorize a filesystem object and ask
 Janus to deliver it to the original HTTP client. The application makes the
@@ -15,15 +15,15 @@ semantics.
 
 ## Scope and configuration
 
-- Capability order: **8**, after files.
+- Capability order: **7**, after files.
 - Configuration: **none**.
 - Default: **always active**.
 - Cascade: **none**.
 - Scope: every final response from a registered application upstream that
   would otherwise become the response to the original HTTP client.
 
-The scope includes API and other proxy-first requests, every request method,
-and cache fills. It excludes control-plane calls, doorbell rings, Hub bridge
+The scope includes API and other proxy-first requests and every request method.
+It excludes control-plane calls, doorbell rings, Hub bridge
 exchanges, heartbeats, health probes, Janus-generated responses, and files
 Janus chose without proxying.
 
@@ -164,16 +164,7 @@ When the application supplies `Content-Encoding`, the opened file contains
 the already content-coded representation. Ranges and lengths describe those
 exact file bytes, and downstream encoders do not encode the response again.
 
-## Cache and encoding
-
-The micro-cache sees the transformed file response, never the empty
-instruction body. Existing cache rules apply without a sendfile exception:
-
-- only a final storable 200 may be retained;
-- range and conditional statuses are not stored;
-- oversized bodies abandon buffering and continue streaming;
-- application `Cache-Control`, cookies, `Vary`, and the existing safety table
-  decide reuse.
+## Encoding
 
 Response encoding runs after the transformation. The encoder sees the final
 file metadata and bytes. Existing behavior for an application-supplied
@@ -186,13 +177,12 @@ describes the selected file rather than the discarded upstream body.
 
 ```text
 client request
-→ Janus admission, routing, and cache decision
+→ Janus admission and routing
 → upstream selection and retries
 → final accepted upstream response
 → inspect and remove X-Sendfile
 → open and validate the file
 → apply validators, ranges, and final headers
-→ micro-cache recording
 → response encoding
 → client
 ```
@@ -217,8 +207,6 @@ Go tests pin:
 - body-forbidden and upstream range-selection statuses reject; other
   body-capable non-200 statuses retain their status;
 - sendfile failures do not mark an upstream unhealthy;
-- cache fills record the final file response and obey the existing
-  never-store and body-size rules;
 - an upstream instruction body is never read and is closed immediately;
 - an unconnected FIFO returns under a hard deadline;
 - canceled full and multipart responses close their descriptor without
@@ -249,7 +237,7 @@ only instruction parsing. The retained raw run compares:
 - ordinary proxied file bytes.
 
 Construction, metadata, and streaming costs all count. The benchmark uses a
-file larger than the proxy and cache buffers so it measures the streaming
+file larger than the proxy buffers so it measures the streaming
 path rather than an in-memory special case.
 
 The five-run 1 MiB benchmark measured median delivery at **50.1 µs** for

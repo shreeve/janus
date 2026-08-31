@@ -1,4 +1,4 @@
-# Capability 10: access log
+# Capability 9: access log
 
 `access log` publishes one bounded, app-scoped, live NDJSON record for each
 registered-app request that reaches Caddy's access-log encoder. The same seam
@@ -11,7 +11,7 @@ tenant authorization boundary, a durable queue, or a request middleware.
 
 ## Scope and ownership
 
-- Capability order: **10**, after browse.
+- Capability order: **9**, after browse.
 - Surface: Caddy access-log encoder plus hot control-plane observation.
 - Configuration: Caddy's site `log` directive with `format janus`.
 - Cascade: **no**. Logging configuration belongs to each Caddy site.
@@ -22,7 +22,7 @@ tenant authorization boundary, a durable queue, or a request middleware.
   listener check. An app id filters records; it is not an authorization
   secret.
 
-Registered-app scope includes proxy, cache, auth, files, sendfile, browse, and
+Registered-app scope includes proxy, auth, files, sendfile, browse, and
 Hub responses once the request host resolves to a registration. Resolution
 for logging happens early enough to attribute an auth denial, without changing
 auth or routing decisions.
@@ -43,7 +43,7 @@ service diagnostics remain on the service logger.
 
 ### Publication boundary
 
-The encoder is the sole publication source. Capability 10 publishes exactly
+The encoder is the sole publication source. Capability 9 publishes exactly
 the access entries Caddy actually invokes through `format janus`. Caddy policy
 decides whether an entry reaches the encoder before Janus can observe it.
 Entries excluded by disabled logging, unmapped or skipped hosts, logger level,
@@ -59,7 +59,7 @@ The repository root and operator-facing example configure every Janus site
 with a real file or stderr sink, no sampling, no filtering/discard core, no
 discard writer, and host mapping that invokes `format janus` for managed-app
 traffic. Under that policy, every managed-app access entry not excluded by
-runtime `log_skip` reaches Capability 10.
+runtime `log_skip` reaches Capability 9.
 
 ## Completion-seam architecture
 
@@ -374,7 +374,6 @@ Field validation and bounds are exact:
 | `response_bytes` | string | 1–20 canonical ASCII decimal bytes |
 | `mime_type` | string or null | one valid UTF-8 logged header value, at most 256 bytes; absent, repeated, invalid, or oversized values omit and declare except ordinary absence |
 | `response_class` | string | fixed ASCII enum, at most 32 bytes |
-| `cache_verdict` | string | fixed ASCII enum, at most 16 bytes |
 | `selected_upstream` | string or null | fixed `worker-` plus 16 lowercase hex digits |
 | `retry_count` | integer | 0 through 4,294,967,295 |
 | `outcome` | string | fixed ASCII enum, at most 32 bytes |
@@ -424,7 +423,6 @@ An access record has this schema:
   "response_bytes": "1842",
   "mime_type": "text/html; charset=utf-8",
   "response_class": "proxy",
-  "cache_verdict": "miss",
   "selected_upstream": "worker-9f31e205bf82c630",
   "retry_count": 1,
   "outcome": "complete",
@@ -458,7 +456,6 @@ Field rules:
   removed. It is not guaranteed to equal a wire-sniffed MIME type.
 - `response_class` is one of `auth`, `browse_asset`, `browse_listing`,
   `browse_render`, `file`, `hub`, `janus`, `proxy`, or `sendfile`.
-- `cache_verdict` is one of `off`, `bypass`, `miss`, `hit`, or `coalesced`.
 - `selected_upstream` is `null` when no worker is selected. Otherwise it is
   `worker-` plus the first 16 lowercase hexadecimal digits of
   HMAC-SHA-256(process-random-key, socket-path). It reveals neither a
@@ -479,14 +476,8 @@ Rejected present input is explicit:
 Ordinary absence has the same null fields and no `omitted_fields`.
 
 Response-class ownership is final-response ownership. A sendfile
-transformation is `sendfile`, including its Janus-generated error. A cache hit
-retains the class of the cached representation. A Hub 101 is `hub`. A generic
-Janus routing or availability response is `janus`.
-
-Cache `miss` describes the request that leads the fill, whether admission
-stores the completed representation or not. `coalesced` describes a waiter
-served from that fill. Sites with cache disabled use `off`; cache-enabled
-requests that do not enter lookup use `bypass`.
+transformation is `sendfile`, including its Janus-generated error. A Hub 101
+is `hub`. A generic Janus routing or availability response is `janus`.
 
 ## Final attempt, retries, and `Rip-Mark`
 
@@ -727,7 +718,7 @@ hello without a gap.
 Normal events follow:
 
 ```json
-{"v":1,"type":"access","sequence":"43","timestamp":"2026-08-01T14:16:01.100Z","request_id":"10d21165-2701-4c37-b948-c93d891da3b1","app_id":"cart-a1b2c3","app_name":"cart","tenant_site":null,"request_host":"cart.ripdev.io","client_ip":"127.0.0.1","method":"GET","path":"/","status":200,"duration_seconds":0.0021,"response_bytes":"918","mime_type":"text/html; charset=utf-8","response_class":"file","cache_verdict":"off","selected_upstream":null,"retry_count":0,"outcome":"complete","mark":null}
+{"v":1,"type":"access","sequence":"43","timestamp":"2026-08-01T14:16:01.100Z","request_id":"10d21165-2701-4c37-b948-c93d891da3b1","app_id":"cart-a1b2c3","app_name":"cart","tenant_site":null,"request_host":"cart.ripdev.io","client_ip":"127.0.0.1","method":"GET","path":"/","status":200,"duration_seconds":0.0021,"response_bytes":"918","mime_type":"text/html; charset=utf-8","response_class":"file","selected_upstream":null,"retry_count":0,"outcome":"complete","mark":null}
 ```
 
 Each subscriber tracks `accounted` and `droppedThrough`. Publication changes
@@ -903,7 +894,7 @@ request enters Caddy server
 → auth completes with provisional owner, or passes and clears it
 → path validation
 → ordinary routing resolves at its existing seam and atomically sets owner
-→ Hub, files, browse, cache, doorbell, or worker re-resolution may replace it
+→ Hub, files, browse, doorbell, or worker re-resolution may replace it
 → retries; each rejected attempt is discarded from final facts
 → final response transformation and Rip-Mark header/declaration scrub
 → body EOF Rip-Mark trailer capture and scrub
@@ -1025,11 +1016,10 @@ Go tests pin:
 | Caddy policy boundary | direct invocation for an eligible Janus entry publishes; disabled logging, unmapped/skipped host, excluding level, sampling, filtering/discard core, discard writer, and runtime `log_skip` prevent invocation or publication without consuming sequence or producing gap; none is rejected by Janus encoder config |
 | Completion seam | custom error route status/body and Janus duration; implicit 200; logged-map MIME mutations and absent wire-sniff MIME; identity/gzip/zstd recorder bytes; HEAD override; 304; ranges; partial writes |
 | Request facts | UUID materializes once; exact SkipType extraction; provisional owner exists only for auth; every routing resolution atomically replaces or clears the complete owner tuple; same-owner refresh preserves and cross-owner replacement clears owner-specific facts |
-| Registered scope | exact host, `{site}`, auth denial, delete/re-register between attribution and routing, cache refresh, doorbell re-resolution, unknown host, cold root, ping, control, ACME, and pre-handler errors |
+| Registered scope | exact host, `{site}`, auth denial, delete/re-register between attribution and routing, doorbell re-resolution, unknown host, cold root, ping, control, ACME, and pre-handler errors |
 | Response classes | auth, ordinary file, browse asset/listing/renderer, sendfile success/failure, proxy, Hub, and Janus-generated response |
-| Cache | off, bypass, miss stored, miss not stored, hit, and coalesced |
 | Retries | dial failure, marked busy/draining retry, all busy, final accepted attempt, non-replayable final 503, and no cross-attempt mark contamination |
-| Rip-Mark | absent; one empty/nonempty header; one trailer; repeated; header plus trailer; invalid UTF-8; exact bound; oversized; declaration/header/trailer scrub against real chunked upstream, client, cache, durable log, and stream |
+| Rip-Mark | absent; one empty/nonempty header; one trailer; repeated; header plus trailer; invalid UTF-8; exact bound; oversized; declaration/header/trailer scrub against real chunked upstream, client, durable log, and stream |
 | Outcomes | complete, Hub 101 handshake-duration override, HEAD zero-byte override, client cancellation before/after headers, upstream body abort, and non-cancellation write error |
 | Schema bounds | every table boundary and JSON type; invalid UTF-8 without replacement; simultaneous worst-case escaping; exact adjustment arrays; response bytes at 2^53−1, 2^53, and recorder maximum; 8,192-byte final line |
 | Sequence | first event; concurrent completion order; values beyond JavaScript safe integer; uint64 maximum; no wrap; forced post-reservation encoding failure followed by later event and heartbeat-only report |
@@ -1054,7 +1044,7 @@ The foreground Caddy suite proves:
   access sequence, and no invariant failure;
 - an error route changes final status and bytes observed by the event;
 - identity, gzip, and zstd responses report Caddy recorder body sizes;
-- registered files, browse, sendfile, cache, auth, proxy, and Hub 101 produce
+- registered files, browse, sendfile, auth, proxy, and Hub 101 produce
   their documented classes;
 - a busy worker retry contributes only the final attempt's mark and metadata;
 - a blocked stream overflows without delaying unrelated requests;
@@ -1111,7 +1101,7 @@ route-plus-access times are:
 - real Janus WebSocket 101 handshake: 84.637 µs → 89.657 µs (+5.020 µs,
   +5.9%), +5,068 B/op and +47 allocs/op.
 
-These paired deltas include all Capability 10 request and completion machinery
+These paired deltas include all Capability 9 request and completion machinery
 exactly once in the route-plus-access arm. They are not transport
 acknowledgments and do not measure upgraded-connection lifetime. The synthetic
 completion-corpus cases for file, sendfile, gzip, zstd, and WebSocket measure
@@ -1313,7 +1303,7 @@ Legal raw scalar fields are:
 ```text
 sequence timestamp request_id app_id app_name tenant_site request_host
 client_ip method path status duration_seconds response_bytes mime_type
-response_class cache_verdict selected_upstream retry_count outcome mark
+response_class selected_upstream retry_count outcome mark
 ```
 
 `truncated_fields` and `omitted_fields` are arrays and are not picture fields.

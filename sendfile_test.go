@@ -464,66 +464,6 @@ func TestSendfileFailureDoesNotMarkUpstreamUnhealthy(t *testing.T) {
 	}
 }
 
-func TestSendfileCacheStoresFinalFileResponse(t *testing.T) {
-	name := filepath.Join(t.TempDir(), "cached.txt")
-	if err := os.WriteFile(name, []byte("final file bytes"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ch := newCacheHarness(t)
-	upstream := &countingUpstream{
-		header: map[string]string{
-			sendfileHeader:  name,
-			"Cache-Control": "public, max-age=10",
-		},
-		body: "instruction body",
-	}
-	ch.register(t, "app.test", upstream)
-
-	for i := range 3 {
-		rr := ch.get(t, "app.test", "/download")
-		if rr.Code != http.StatusOK || rr.Body.String() != "final file bytes" {
-			t.Fatalf("request %d: status=%d body=%q", i+1, rr.Code, rr.Body.String())
-		}
-		if rr.Header().Get(sendfileHeader) != "" {
-			t.Fatalf("request %d leaked X-Sendfile", i+1)
-		}
-	}
-	if got := upstream.hits.Load(); got != 2 {
-		t.Fatalf("cache must store transformed file response; upstream hits=%d, want 2", got)
-	}
-	if stats := ch.stats(); stats.Stores != 1 || stats.Hits != 1 {
-		t.Fatalf("cache stats after sendfile = %+v", stats.cacheStatsBucket)
-	}
-}
-
-func TestSendfileCacheAbandonsOversizeFinalBody(t *testing.T) {
-	name := filepath.Join(t.TempDir(), "oversize.txt")
-	if err := os.WriteFile(name, []byte("larger than four"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ch := newCacheHarness(t)
-	ch.h.cacheCfg.maxBody = 4
-	upstream := &countingUpstream{
-		header: map[string]string{
-			sendfileHeader:  name,
-			"Cache-Control": "public, max-age=10",
-		},
-	}
-	ch.register(t, "app.test", upstream)
-	for range 3 {
-		rr := ch.get(t, "app.test", "/oversize")
-		if rr.Body.String() != "larger than four" {
-			t.Fatalf("body = %q", rr.Body.String())
-		}
-	}
-	if got := upstream.hits.Load(); got != 3 {
-		t.Fatalf("oversize sendfile was cached; upstream hits=%d", got)
-	}
-	if stats := ch.stats(); stats.Stores != 0 {
-		t.Fatalf("oversize sendfile stores=%d", stats.Stores)
-	}
-}
-
 func TestClientSendfileRequestHeaderHasNoEffect(t *testing.T) {
 	dp, reg := newTestDataPlane(t)
 	sock := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

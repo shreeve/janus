@@ -228,12 +228,6 @@ func (a *App) controlMuxAt(base string) *http.ServeMux {
 
 	mux.HandleFunc("GET "+base+"/1.0/tls/ask", a.handleTLSAsk)
 
-	// Cache counters, always on: a non-blocking snapshot of per-shard
-	// atomics (monotonic, not mutually atomic). A tight scrape loop
-	// can never degrade the data plane.
-	mux.HandleFunc("GET "+base+"/1.0/cache", a.handleCacheStats)
-	mux.HandleFunc("GET "+base+"/1.0/cache/{$}", a.handleCacheStats)
-
 	// Hub: publish plane, membership snapshot, and counters (always on).
 	mux.HandleFunc("POST "+apps+"/{id}/hub/publish", a.handleHubPublish)
 	mux.HandleFunc("GET "+apps+"/{id}/hub", a.handleHubSnapshot)
@@ -257,10 +251,6 @@ func (a *App) controlMuxAt(base string) *http.ServeMux {
 	mux.HandleFunc("GET "+base+"/1.0/browse", a.handleBrowseState)
 	mux.HandleFunc("GET "+base+"/1.0/browse/{$}", a.handleBrowseState)
 	return mux
-}
-
-func (a *App) handleCacheStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, a.cache.snapshot())
 }
 
 // handleTLSAsk answers Caddy's on_demand_tls ask: may a certificate be

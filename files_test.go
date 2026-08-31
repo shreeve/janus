@@ -625,24 +625,6 @@ func TestFilesMissingAssetNeverRingsDoorbell(t *testing.T) {
 	}
 }
 
-func TestHostPatchBumpsGenerationAndPurges(t *testing.T) {
-	reg := newAppRegistry()
-	rec, err := reg.create("app", []string{"a.test"}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	purged := 0
-	reg.setPurge(func(string) { purged++ })
-	before := rec.gen.Load()
-	hosts := []string{"b.test"}
-	if _, err := reg.patch(rec.ID, nil, &hosts, nil); err != nil {
-		t.Fatal(err)
-	}
-	if rec.gen.Load() != before+1 || purged != 1 {
-		t.Fatalf("generation=%d want %d, purges=%d", rec.gen.Load(), before+1, purged)
-	}
-}
-
 func TestSiteClaimsReleaseOnHeartbeatReapAndClonesAreDeep(t *testing.T) {
 	reg, clock := newClockedRegistry(t, 10*time.Second)
 	dir := t.TempDir()
@@ -710,15 +692,7 @@ func TestHandlerStripsAndInjectsTrustedRipSite(t *testing.T) {
 	if _, err := reg.setUpstreams(exact.ID, []Upstream{{Path: sock}}); err != nil {
 		t.Fatal(err)
 	}
-	handler := &Handler{
-		dp: dp,
-		cacheCfg: &cacheSite{
-			store:   newCacheStore(defaultCacheMaxBytes, defaultCacheAppShare),
-			ttl:     defaultCacheTTL,
-			ttlMax:  defaultCacheTTLMax,
-			maxBody: defaultCacheMaxBody,
-		},
-	}
+	handler := &Handler{dp: dp}
 	next := caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
 		t.Fatal("unexpected next handler")
 		return nil

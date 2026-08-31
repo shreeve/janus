@@ -117,11 +117,6 @@
   </div>
 
   <div class="card">
-    <h2>Cache</h2>
-    <div class="stats" id="cache-stats"></div>
-  </div>
-
-  <div class="card">
     <h2>Hub</h2>
     <div class="stats" id="hub-stats"></div>
   </div>
@@ -216,13 +211,6 @@ function renderApps(apps) {
 }
 
 function renderCounters(data) {
-  var c = document.getElementById("cache-stats");
-  clearChildren(c);
-  var cache = data.cache || {};
-  c.appendChild(stat(cache.hits || 0, "hits"));
-  c.appendChild(stat(cache.misses || 0, "misses"));
-  c.appendChild(stat(cache.coalesced || 0, "coalesced"));
-  c.appendChild(stat(cache.bypass || 0, "bypass"));
   var h = document.getElementById("hub-stats");
   clearChildren(h);
   var hub = data.hub || {};

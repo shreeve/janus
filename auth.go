@@ -137,8 +137,8 @@ type authStore struct {
 	// abandoned store growing forever.
 	reapTTL atomic.Int64 // nanoseconds
 
-	// Monotonic counters (the /1.0/cache discipline: monotonic, not
-	// mutually atomic).
+	// Monotonic counters are observed independently, not as one atomic
+	// snapshot.
 	logins        atomic.Int64
 	loginFailures atomic.Int64
 	throttled     atomic.Int64
@@ -697,23 +697,10 @@ func safeTo(raw, gatePrefix string) string {
 
 // --- the wall ---------------------------------------------------------------------
 
-// authIdentityKey carries the authenticated username on the request
-// context: the EXPLICIT auth→cache bypass signal. The cache must never
-// infer authentication from Cookie-header residue — the wall strips its
-// own cookies before the request proceeds, and a stripped request whose
-// response is per-identity must still bypass.
-type authIdentityKey struct{}
-
 // authWallActiveKey marks requests which passed through an enabled auth wall.
 // The data-plane response hook uses it to scrub reserved cookies before even
 // an upgraded or streaming upstream response can commit its headers.
 type authWallActiveKey struct{}
-
-// authIdentityOf reports the authenticated user, or "" pre-wall/off.
-func authIdentityOf(ctx context.Context) string {
-	user, _ := ctx.Value(authIdentityKey{}).(string)
-	return user
-}
 
 func authWallActive(ctx context.Context) bool {
 	active, _ := ctx.Value(authWallActiveKey{}).(bool)
@@ -723,7 +710,7 @@ func authWallActive(ctx context.Context) bool {
 // serveAuthWall runs the wall for a site with effective auth on.
 // handled=true means the wall wrote the response (login door, 302/401,
 // or plain-HTTP 421); otherwise the returned request — cookies stripped,
-// Remote-User cleared or injected — proceeds to hub / cache / data plane.
+// Remote-User cleared or injected — proceeds to hub or the data plane.
 func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.Request, bool, error) {
 	if r.TLS == nil {
 		return r, true, h.authRejectPlainHTTP(w, r)
@@ -763,7 +750,6 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	ctx := context.WithValue(r.Context(), authWallActiveKey{}, true)
 	if authorized {
 		r.Header.Set("Remote-User", user)
-		ctx = context.WithValue(ctx, authIdentityKey{}, user)
 	}
 	r = r.WithContext(ctx)
 	return r, false, nil

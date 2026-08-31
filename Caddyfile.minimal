@@ -2,7 +2,7 @@
 #
 # The smallest useful Janus edge: one app site and one browsable
 # directory. Every capability not mentioned here is simply off; the
-# guided tour of every capability and knob — cache, hub, mdns, auth,
+# guided tour of every capability and knob — hub, mdns, auth,
 # and why each site opts in or out — is Caddyfile.example. Domains are
 # example.com placeholders; substitute your own. Check this file
 # without serving anything:

@@ -1,6 +1,6 @@
 # A realtime counter: Janus + Rip Server, end to end
 
-A guided tour of Janus v1.6.5 in one page and one `app.rip`. You will build
+A guided tour of Janus in one page and one `app.rip`. You will build
 a normal web app served over HTTPS that also has WSS support, where the
 browser's secure WebSocket frames are proxied **by Janus as plain HTTP** to
 the Rip server — the Janus↔Rip WS/HTTP bridge is the star. One page, one
@@ -8,12 +8,11 @@ the Rip server — the Janus↔Rip WS/HTTP bridge is the star. One page, one
 make each capability visible.
 
 The page you will build shows a shared tally (+/− buttons), a live viewer
-count, a WS round-trip badge, a "server time (cached 1s)" button, an admin
+count, a WS round-trip badge, an admin
 kick button, and a collapsible plumbing panel. Along the way you exercise
-all four Janus capabilities — **ping** (the edge answers `/ping` itself,
+three Janus capabilities — **ping** (the edge answers `/ping` itself,
 proving site admission before any tenant exists), **control** (`/1.0`
-registration, snapshot, counters), **cache** (the 1s micro-cache blip),
-**hub** (every realtime act) — and Rip Server's strengths as the tenant:
+registration, snapshot, counters), and **hub** (every realtime act) — and Rip Server's strengths as the tenant:
 the Sinatra-style DSL (the whole tenant is a handful of routes that read
 naturally), watch-mode hot reload (the finale), the manager's
 registration/heartbeat lifecycle (visible in `/1.0/apps`), and worker
@@ -21,8 +20,6 @@ disposability against socket permanence.
 
 Everything below is exact and verified against the shipped contracts: the
 hub contract ([`../20260720-162350-hub-design.md`](../20260720-162350-hub-design.md)),
-the micro-cache contract
-([`../20260720-033201-capability-microcache.md`](../20260720-033201-capability-microcache.md)),
 the pool protocol
 ([`../20260719-002000-pool-protocol.md`](../20260719-002000-pool-protocol.md)),
 and the `@rip-lang/server` sources. Where the demo makes a judgment call,
@@ -35,9 +32,8 @@ Open two browser windows side by side and this is the show, as acts:
 | 1 — realtime tally | Browser 1 clicks **+** ×4, **−** ×1 | 1, 2, 3, 4, then 3 | WSS frame → text bridge (HTTP) → response directives → WSS fan-out |
 | 2 — presence | Open a third window; close it | viewers 2 → 3 → 2 | open/close bridge lifecycle + the membership snapshot |
 | 3 — liveness badge | Watch the corner badge | `~1 ms` RTT, refreshed every 5s | `?`/`!` answered at the edge; worker never touched |
-| 4 — cache blip | Click "server time" fast in both windows | identical timestamp, `X-Janus-Cache: HIT`, `Age` | micro-cache riding the same site, zero tenant code |
-| 5 — hot reload (finale) | Edit `STEP = 1` → `2`, save; browser 2 clicks **+** ×2 | 3 → 5 → 7; sockets never drop | doorbell reload invisible to hub clients |
-| 6 — kick + reconnect (encore) | Click "admin: disconnect everyone" | "kicked: admin kick", then auto-reconnect, tally restored | trusted `*` kick, close bridges, reconnection as recovery, late-joiner state sync |
+| 4 — hot reload (finale) | Edit `STEP = 1` → `2`, save; browser 2 clicks **+** ×2 | 3 → 5 → 7; sockets never drop | doorbell reload invisible to hub clients |
+| 5 — kick + reconnect (encore) | Click "admin: disconnect everyone" | "kicked: admin kick", then auto-reconnect, tally restored | trusted `*` kick, close bridges, reconnection as recovery, late-joiner state sync |
 
 ## 1. The layout
 
@@ -60,13 +56,12 @@ byte-identical to the listings.
 
 ```text
   Browser 1            Browser 2            Browser 3 (act 2)
-     │  HTTPS: GET /, /now, /plumbing   +   WSS: /hub
+     │  HTTPS: GET /, /plumbing         +   WSS: /hub
      └───────────────────┬───────────────────┘
                          ▼  TLS :443 (certs/ripdev.io.*, *.ripdev.io → 127.0.0.1)
         ┌──────────────────────────────────────────────────┐
         │  Janus  (./bin/caddy, one process)               │
-        │   ├── data plane   GET / /now /plumbing → worker │
-        │   ├── cache        1s micro-cache on this site   │
+        │   ├── data plane   GET / /plumbing → worker      │
         │   ├── hub          WS terminates HERE; ?/! pong, │
         │   │                membership, fan-out, * kick   │
         │   └── control /1.0 http://127.0.0.1:7600         │
@@ -84,8 +79,8 @@ Three named flows you will see over and over:
 
 1. **Page load (HTTPS → data plane → worker).** `GET https://demo.ripdev.io/`
    resolves the host in the registry and proxies to the worker's unix
-   socket. `/now` and `/plumbing` ride the same path — `/now` through the
-   micro-cache, `/plumbing` declaring `no-store` so it never caches.
+   socket. `/plumbing` rides the same path and declares `no-store` for
+   browsers and intermediary caches.
 2. **Interaction (WSS frame → text bridge HTTP POST → response directives →
    WSS fan-out).** A click sends `{"increment": {}}` on the socket. Janus
    validates and executes it at the edge, then POSTs the frame verbatim to
@@ -124,14 +119,13 @@ cd ~/src/janus
 export PATH="$(go env GOPATH)/bin:$PATH"
 mkdir -p bin
 xcaddy build --with github.com/shreeve/janus=. --output ./bin/caddy
-# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.6.5 --output ./caddy)
+# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.9.0 --output ./caddy)
 ```
 
 **The demo Caddyfile.** It ships next to this page as
 `docs/counter/Caddyfile.demo`. One site; hub on with `origin same` (the
 page and the socket share `demo.ripdev.io`, so the default posture
-passes); cache on with its 1s default TTL plus the `debug` knob so act 4's
-`X-Janus-Cache` verdict is visible; control on loopback `:7600`.
+passes); control on loopback `:7600`.
 
 ```caddyfile
 {
@@ -141,9 +135,6 @@ passes); cache on with its 1s default TTL plus the `debug` knob so act 4's
 	janus {
 		ping # GET /ping → pong at the edge; default is off, and the rip app has no /ping route to fall through to
 		control local # http://127.0.0.1:7600 — the manager registers here; the tenant reads snapshots/counters
-		cache {
-			debug # X-Janus-Cache: HIT|MISS|COALESCED|BYPASS on every response; ttl stays the 1s default
-		}
 		hub # path /hub, origin same, max_conns 4096 — the defaults
 	}
 }
@@ -153,11 +144,6 @@ demo.ripdev.io {
 	janus
 }
 ```
-
-With cache on, `GET /` is an anonymous GET and may serve from memory for
-1s — the inlined tally can be one second stale on a fresh window. That is
-harmless here by design: act 6's open-bridge greeting pushes the current
-tally over the socket the moment the window enrolls.
 
 **Launch Janus.** Run caddy from the janus checkout root — the cert paths
 in `Caddyfile.demo` are relative to where caddy runs (binding :443 may
@@ -214,7 +200,6 @@ curl -s https://demo.ripdev.io/ping           # → pong, answered at the edge: 
 curl -s http://127.0.0.1:7600/1.0/apps        # the demo app: id, hosts, upstreams (the manager's lifecycle, visible), "bridge":"/rt/bridge"
 curl -s https://demo.ripdev.io/               # the HTML page (first hit may ride the initial boot)
 curl -s http://127.0.0.1:7600/1.0/hub         # hub counters, all zeros before the first socket
-curl -s http://127.0.0.1:7600/1.0/cache       # cache counters
 ```
 
 ## 4. The rip app
@@ -239,7 +224,7 @@ id).
 import { get, post, read, start } from '@rip-lang/server'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 
-# The hot-reload act (act 5) edits this constant to 2 and saves.
+# The hot-reload act (act 4) edits this constant to 2 and saves.
 STEP = 1
 
 CHANNEL = '/stats/tally'
@@ -281,12 +266,8 @@ members = ->
 
 get '/' -> PAGE   # PAGE is the HTML constant at the bottom of this file
 
-# Act 4: the micro-cache blip. Anonymous GET, storable response; Janus
-# caches it for 1s. Zero cache code here — the capability rides the site.
-get '/now' -> { now: new Date().toISOString() }
-
 # Plumbing panel: the tenant reading its own reflection off the control
-# plane. no-store keeps this poll out of the micro-cache by contract.
+# plane. no-store keeps browser and intermediary storage out of the way.
 get '/plumbing' ->
   @header 'Cache-Control', 'no-store'
   resolveAppId!() unless appId?
@@ -333,7 +314,7 @@ post '/rt/bridge' ->
     # context — the "!" suffix is REQUIRED. See the callout below.
     return { '@': [CHANNEL], 'tally!': { value: tally } }
 
-  # Act 6: the kick. Trusted-plane "*": every resolved member — including
+  # Act 5: the kick. Trusted-plane "*": every resolved member — including
   # the clicker — receives {"*":"admin kick"} then close 1000.
   if read('kickall')?
     return { '@': [CHANNEL], '*': 'admin kick' }
@@ -352,14 +333,12 @@ PAGE = """
   <button onclick="send('decrement')">-</button>
   <p id="viewers"></p>
   <p id="rtt" style="position:fixed;top:8px;right:8px"></p>
-  <p><button onclick="now()">server time (cached 1s)</button> <span id="now"></span></p>
   <p><button onclick="send('kickall')">admin: disconnect everyone</button> <span id="kick"></span></p>
   <details><summary>plumbing</summary><pre id="plumbing"></pre></details>
   <script>
     var tallyEl = document.getElementById('tally');
     var viewersEl = document.getElementById('viewers');
     var rttEl = document.getElementById('rtt');
-    var nowEl = document.getElementById('now');
     var kickEl = document.getElementById('kick');
     var plumbingEl = document.getElementById('plumbing');
     var ws, backoff = 500;
@@ -385,15 +364,6 @@ PAGE = """
       var frame = {};
       frame[name] = {};
       ws.send(JSON.stringify(frame));
-    }
-
-    function now() {
-      fetch('/now').then(function (r) {
-        var v = r.headers.get('x-janus-cache'), age = r.headers.get('age');
-        r.json().then(function (j) {
-          nowEl.textContent = j.now + ' [' + v + (age !== null ? ', Age ' + age : '') + ']';
-        });
-      });
     }
 
     setInterval(function () {              // act 3: in-band liveness
@@ -551,19 +521,7 @@ anything that is not increment/decrement/kickall. Watch `frames_in` and
 `bridge_sent` tick every 5s per window in the plumbing panel while the
 worker's route does nothing but 204.
 
-**Act 4 — the micro-cache blip.** Click "server time (cached 1s)" rapidly
-in both windows. The route is one line server-side; the caching is
-entirely Janus. The doorkeeper admits a key on its **second** sighting, so
-the pattern within one second is: first click `X-Janus-Cache: MISS`,
-second `MISS` (now stored), third and later `HIT` with an `Age` header —
-and the clicks land in *either* window, because both share the cache key.
-Identical timestamp across windows until the 1s TTL lapses, then a fresh
-`MISS` refills. The page displays the verdict and `Age` next to the
-timestamp. Meanwhile the plumbing poll shows `MISS` forever on its own
-route: `/plumbing` declares `Cache-Control: no-store`, and no-store
-responses are never stored, by contract.
-
-## 6. Act 5 — the hot-reload finale
+## 6. Act 4 — the hot-reload finale
 
 Edit one line in `~/counter-demo/app.rip` and save:
 
@@ -606,7 +564,7 @@ teardown keys off registration lifecycle (DELETE / TTL reap), never off
 upstreams PUTs. The doorbell cut that scraps the pool cannot touch a
 socket. Worker disposability and socket permanence, on one screen.
 
-## 7. Act 6 — kick + reconnect, the encore
+## 7. Act 5 — kick + reconnect, the encore
 
 Click "admin: disconnect everyone" in either window. The button sends
 `{"kickall": {}}` — like the counter frames, it delivers to nobody and
@@ -649,8 +607,7 @@ per-app breakdown under `"apps"`, keyed by app id):
 
 **Membership snapshot** —
 `curl -s http://127.0.0.1:7600/1.0/apps/$APP_ID/hub` shows
-`"channels": {"/stats/tally": 2}` and opaque handles. **Cache counters** —
-`curl -s http://127.0.0.1:7600/1.0/cache` moves during act 4.
+`"channels": {"/stats/tally": 2}` and opaque handles.
 
 **Common failures:**
 
@@ -731,17 +688,11 @@ Choices this demo makes, and why — adjust with eyes open:
    self-consistent sequence that lands the 3 → 5 → 7 finale.
 8. **Host `demo.ripdev.io`** rides the janus repo's committed trusted
    wildcard certs (`certs/ripdev.io.*`, `*.ripdev.io` → 127.0.0.1).
-9. **Cache is on with `debug`** so act 4's verdict is visible; the
-   1s-stale inlined tally on `GET /` is accepted because the open-bridge
-   greeting corrects it immediately; `/plumbing` opts out with
-   `Cache-Control: no-store`. The doorkeeper means the first HIT appears
-   on the **third** rapid request (verified in `cache_test.go`) — the act
-   4 walkthrough says so.
-10. **`tally!` / `viewers!` (include-sender) on every bridge response** —
+9. **`tally!` / `viewers!` (include-sender) on every bridge response** —
     required, not stylistic: bridge responses execute in the originating
     connection's exclusion context. On the publish plane the spelling
     would not matter.
-11. **Every act is verified against shipped code; none is aspirational.**
+10. **Every act is verified against shipped code; none is aspirational.**
     Kick-reaches-the-clicker is confirmed in `hub.go` (kick recipients
     resolve from `@`; sender exclusion applies to events only). The
     snapshot shape is confirmed in `control_hub.go`/`hub.go`.

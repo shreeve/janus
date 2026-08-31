@@ -141,8 +141,7 @@ func (dp *dataPlane) serve(w http.ResponseWriter, r *http.Request) error {
 }
 
 // serveResolved continues the decision table from an already-resolved
-// record (the cache resolves once and reuses the record; the ring loop
-// still re-resolves after every wake).
+// record; the ring loop still re-resolves after every wake.
 func (dp *dataPlane) serveResolved(w http.ResponseWriter, r *http.Request, host string, rec AppRecord) error {
 	accessFactsOf(r).setOwner(rec)
 	rings := 0

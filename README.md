@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, a generation-fenced micro-cache with request coalescing, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, an edge authentication wall, registered static files, X-Sendfile offload, and bounded app-scoped access observation, driven by a JSON control API.</strong>
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, an edge authentication wall, registered static files, X-Sendfile offload, and bounded app-scoped access observation, driven by a JSON control API.</strong>
 </p>
 
 ---
@@ -17,7 +17,6 @@ Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Ja
 	janus {
 		ping
 		control local
-		cache
 		hub
 		mdns
 		files {
@@ -48,8 +47,8 @@ novel contract is admission itself: **the app announces itself to its
 own edge.** A tenant POSTs its name and hosts to `/1.0/apps`,
 heartbeats, and publishes worker unix sockets — and with that one
 registration it has TLS and ACME, HTTP/1–3, host routing, health-aware
-least-conn balancing, an app-steerable micro-cache, edge-terminated
-WebSocket fan-out, and LAN presence, with zero per-app edge
+least-conn balancing, edge-terminated WebSocket fan-out, and LAN
+presence, with zero per-app edge
 configuration. That is the router contract of a PaaS — the shape of
 Fly's proxy or Heroku's router — in one self-hosted binary, with the
 running app as the source of truth and heartbeat reaping as the
@@ -65,17 +64,13 @@ Each neighbor is better at being itself. The honest comparison:
 | Neighbor | What it does better | What Janus does instead |
 | --- | --- | --- |
 | **Traefik** | Provider ecosystem — routing derived from Docker labels, Kubernetes Ingress/CRD/Gateway API, Consul, Nomad, ECS — plus a deep middleware catalog and a community that dwarfs this module | Apps register themselves over plain HTTP; no container runtime, orchestrator, or label convention required — a bare process on a unix socket is a first-class tenant |
-| **Varnish** | Cache policy as a product: VCL compiled to native code, grace mode, ESI, bans, now native TLS | A deliberately small micro-cache — 1s default TTL, request coalescing, generation-fenced purge on every upstream swap, hard bypass on `Cookie`/`Authorization` — honest speed for dynamic anonymous GETs, not a policy engine |
 | **Pushpin** | Protocol range for realtime: HTTP streaming, long-polling, SSE, SockJS, WebSocket-over-HTTP against a stateless backend | The same architectural instinct — connections held at the proxy, tenant on plain HTTP — plus registry integration (an app's hub lives and dies with its registration) and a validated per-frame directive grammar executed at the edge |
 | **Caddy** | Everything it already is: listeners, ACME, HTTP/1–3, the Caddyfile, the admin API, the module ecosystem — all of it remains available beside Janus in the same process | A second axis of dynamism: Caddy's admin API pushes operator config; the Janus registry pulls state from running apps, and a registration never touches the config |
 
 Traefik answers "what is my orchestrator running?"; Janus answers
 "what is announcing itself to me right now?" — the second question
-needs no infrastructure underneath the app. Varnish is the right tool
-when cache policy is the point; the Janus cache exists to make a
-stampede on a dynamic page cost the worker ~1 request per second, and
-it measures ~410x on capacity-bound routes and 1.6–1.8x on trivial
-ones (the [performance ledger](docs/20260719-165500-rip-server-performance.md)
+needs no infrastructure underneath the app. The
+[performance ledger](docs/20260719-165500-rip-server-performance.md)
 holds every number with raw provenance — sustained hub fan-out is
 ~0.4M deliveries/s, roughly independent of room size, with zero socket
 drops across a config reload). Pushpin proved the edge-held-connection
@@ -93,9 +88,6 @@ module, and every stock directive works unchanged next to it.
 - **a container orchestrator.** Janus never starts, stops, or
   supervises a process. Tenants run themselves; Janus routes to what
   is alive.
-- **a CDN or cache appliance.** The micro-cache shields workers from
-  request volume; it does not do cache hierarchies, edge networks, or
-  operator-authored policy.
 - **a service mesh.** One edge, inward-facing unix sockets — no
   sidecars, no inter-service mTLS fabric, no traffic policy between
   tenants.
@@ -132,14 +124,13 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | --- | --- | --- | --- |
 | 1 | **ping** | Proves module load, TLS, site admission, cascade | [`capability-ping`](docs/20260718-204255-capability-ping.md) |
 | 2 | **control** | Opens the `/1.0` listeners (internal/local/public) | [`capability-control`](docs/20260718-203749-capability-control.md) |
-| 3 | **cache** | Site-scoped micro-cache + request coalescing on the data plane | [`capability-microcache`](docs/20260720-033201-capability-microcache.md) |
-| 4 | **hub** | Per-app WebSocket fan-out terminated at the edge; tenants observe and steer over HTTP | [`capability-hub`](docs/20260720-162350-hub-design.md) |
-| 5 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS, and the read-only status front door | [`capability-mdns`](docs/20260722-034619-capability-mdns.md) |
-| 6 | **auth** | URL-prefix gates for auth-less apps: shared users, per-gate allow lists, host-wide session, `Remote-User` strip-and-inject | [`capability-auth`](docs/20260728-160734-capability-auth.md) |
-| 7 | **files** | Registered ordered roots, transparent precompressed sidecars, SPA shells, and directory-gated site hosts | [`capability-files`](docs/20260730-202700-capability-files.md), [`precompressed extension`](docs/20260805-020944-capability-files-precompressed.md) |
-| 8 | **sendfile** | Always-on final upstream `X-Sendfile` transformation with validators, ranges, cache recording, and streaming | [`capability-sendfile`](docs/20260801-020600-capability-sendfile.md) |
-| 9 | **browse** | Navigable hot and cold roots, content-addressed themes, bounded extension renderers, and process leases | [`capability-browse`](docs/20260801-042700-capability-browse.md) |
-| 10 | **access log** | JSON-compatible durable access log plus bounded app-scoped NDJSON streams on `/1.0` | [`capability-access-log`](docs/20260801-081600-capability-access-log.md) |
+| 3 | **hub** | Per-app WebSocket fan-out terminated at the edge; tenants observe and steer over HTTP | [`capability-hub`](docs/20260720-162350-hub-design.md) |
+| 4 | **mdns** | LAN presence: `janus.local` + per-app `.local` names over multicast DNS, and the read-only status front door | [`capability-mdns`](docs/20260722-034619-capability-mdns.md) |
+| 5 | **auth** | URL-prefix gates for auth-less apps: shared users, per-gate allow lists, host-wide session, `Remote-User` strip-and-inject | [`capability-auth`](docs/20260728-160734-capability-auth.md) |
+| 6 | **files** | Registered ordered roots, transparent precompressed sidecars, SPA shells, and directory-gated site hosts | [`capability-files`](docs/20260730-202700-capability-files.md), [`precompressed extension`](docs/20260805-020944-capability-files-precompressed.md) |
+| 7 | **sendfile** | Always-on final upstream `X-Sendfile` transformation with validators, ranges, and streaming | [`capability-sendfile`](docs/20260801-020600-capability-sendfile.md) |
+| 8 | **browse** | Navigable hot and cold roots, content-addressed themes, bounded extension renderers, and process leases | [`capability-browse`](docs/20260801-042700-capability-browse.md) |
+| 9 | **access log** | JSON-compatible durable access log plus bounded app-scoped NDJSON streams on `/1.0` | [`capability-access-log`](docs/20260801-081600-capability-access-log.md) |
 
 ```bash
 make janus   # go build ./cmd/janus -> bin/janus
@@ -182,15 +173,7 @@ curl -s http://127.0.0.1:7600/1.0/health
 curl -s --unix-socket run/janus.sock http://janus/1.0
 ```
 
-### 3. cache
-
-Anonymous GETs on registered hosts answer from memory for one TTL; concurrent misses coalesce into one worker request; every upstream swap purges.
-
-```bash
-curl -s http://127.0.0.1:7600/1.0/cache     # hit/miss/coalesce counters
-```
-
-### 4. hub
+### 3. hub
 
 WebSocket upgrades on hub-enabled sites terminate at Janus; JSON directive frames fan out per app at the edge, so app reloads never drop a socket. The tenant registers a `bridge` to observe frames and steer, and publishes through the control plane.
 
@@ -201,16 +184,16 @@ curl -s -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:7600/1.0/apps/$APP_ID/hub/publish
 ```
 
-### 5. mdns
+### 4. mdns
 
-Opt-in LAN presence: `janus.local` (and every registered single-label `.local` host) answers over multicast DNS with no DNS server or client install, and a plain-HTTP front door serves a read-only, self-contained status page — registry, worker health, heartbeat freshness, cache and hub counters, socket paths redacted. An optional `canonical` origin turns the page into a hand-off ramp to real HTTPS, with a built-in diagnostic for router DNS-rebinding filters.
+Opt-in LAN presence: `janus.local` (and every registered single-label `.local` host) answers over multicast DNS with no DNS server or client install, and a plain-HTTP front door serves a read-only, self-contained status page — registry, worker health, heartbeat freshness, and hub counters, with socket paths redacted. An optional `canonical` origin turns the page into a hand-off ramp to real HTTPS, with a built-in diagnostic for router DNS-rebinding filters.
 
 ```bash
 curl -s http://127.0.0.1:7600/1.0/mdns      # advertiser state (names, states, counters)
 curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 ```
 
-### 6. auth
+### 5. auth
 
 URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `caddy janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: unchanged reloads keep eligible sessions, removing a user or host revokes its sessions after commit, and a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
 
@@ -220,7 +203,7 @@ curl -s http://127.0.0.1:7600/1.0/auth      # wall counters + session count
 curl -s http://127.0.0.1:7600/1.0/auth/sessions
 ```
 
-### 10. access log
+### 9. access log
 
 Each Janus site opts into Caddy access logging with `format janus`. Durable output is byte-equivalent to Caddy's JSON encoder with the same options. Registered-app requests also publish bounded NDJSON to operator streams; Caddy policy remains authoritative, so entries excluded before encoder invocation publish nothing.
 
@@ -266,7 +249,7 @@ checksums, and installs `janus` into `~/.local/bin` (as root:
 curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bash
 ```
 
-Pin a version with `... | bash -s v1.8.1`.
+Pin a version with `... | bash -s v1.9.0`.
 
 The tagged release workflow publishes five self-contained archives:
 
@@ -315,7 +298,6 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
     "janus": {
       "control": [{ "mode": "local" }],
       "ping": true,
-      "cache": { "enabled": true, "ttl": "1s" },
       "hub": { "enabled": true, "path": "/hub", "max_conns": 4096 },
       "mdns": { "name": "janus.local" },
       "auth": { "enabled": true, "replace": true, "users": [{ "name": "alice", "credential": "a…" }], "gates": [{ "prefix": "/", "allow": ["alice"] }], "ttl": "8h" },
@@ -352,9 +334,6 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `apps.go` | Hot apps registry (CRUD, upstreams, bridge, heartbeats, TTL sweep) |
 | `dataplane.go` | Host → worker-socket proxying (least-conn, health, marked 503s) |
 | `ring.go` | Doorbell ring: single-flight wake-up for dirty apps |
-| `cache.go` | Micro-cache store: shards, doorkeeper, LRU, purge, counters |
-| `cache_serve.go` | Cache request path: decision table, coalescing, the fill |
-| `cache_config.go` | `cache` directive: parse, cascade, provision |
 | `hub.go` | Hub state and executor (membership, delivery, counters) |
 | `hub_frame.go` | Hub wire grammar (sigils, events, whole-frame validation) |
 | `hub_conn.go` | Hub connection lifecycle (writer, backpressure, close paths) |

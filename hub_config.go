@@ -12,7 +12,7 @@ import (
 )
 
 // Cold hub configuration (docs/20260720-162350-hub-design.md "Cold
-// config"). Site-scoped capability, the ping/cache pattern: global
+// config"). Site-scoped capability: global
 // default → site override; tuning subdirectives cascade per key; built-in
 // default off. There are no process-wide-only keys — every hub knob is
 // per-site admission policy.

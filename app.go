@@ -30,11 +30,6 @@ type App struct {
 	// Default: off. Sites may override.
 	Ping *bool `json:"ping,omitempty"`
 
-	// Cache is the global default and process-wide pool configuration
-	// for the site-scoped micro-cache. Default: off. Sites may override
-	// the per-site keys.
-	Cache *CacheSettings `json:"cache,omitempty"`
-
 	// Hub is the global default for the site-scoped hub capability
 	// (per-app WebSocket fan-out). Default: off. Sites may override.
 	Hub *HubSettings `json:"hub,omitempty"`
@@ -100,13 +95,6 @@ type App struct {
 	// hubSites pairs compiled site routes with effective hub configs, per
 	// server; built at Start for max_conns floor resolution.
 	hubSites [][]hubSiteEntry
-
-	// cache is the one process-wide micro-cache pool. Always constructed
-	// (the /1.0/cache counters are always on); sites opt in via cascade.
-	cache *cacheStore
-	// purgeOwner identifies this generation's cache hook without exposing the
-	// registry to arbitrary, potentially non-comparable map keys.
-	purgeOwner *purgeOwner
 
 	// mdnsSrv is this config generation's front-door HTTP server
 	// (dedicated mode only); the pooled advertiser itself lives in
@@ -183,9 +171,6 @@ func (a *App) Provision(ctx caddy.Context) error {
 		return err
 	}
 	if err := a.provisionBrowse(); err != nil {
-		return err
-	}
-	if err := a.provisionCacheStore(); err != nil {
 		return err
 	}
 	if err := a.provisionMdns(); err != nil {
@@ -279,9 +264,6 @@ func (a *App) Cleanup() error {
 	}
 	var stateErr error
 	if a.state != nil {
-		if a.purgeOwner != nil {
-			a.state.registry.unbindPurge(a.purgeOwner)
-		}
 		deleted, err := janusPool.Delete(janusStateKey)
 		if !deleted {
 			a.state.mdns.generationRetired(a)

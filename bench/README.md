@@ -14,13 +14,12 @@ Raw result files land flat under `docs/` as
 
 | File | Role |
 | --- | --- |
-| `baseline.sh` | The canonical four-section sweep: A) w sweep, B) c sweep on `/io`, C) cache off/on pairs, D) direct-UDS attribution. Owns the manager lifecycle; every leg tees to `$RAW`. |
+| `baseline.sh` | The canonical three-section sweep: A) w sweep, B) c sweep on `/io`, C) direct-UDS attribution. Owns the manager lifecycle; every leg tees to `$RAW`. |
 | `hub.sh` | The hub arm: the six Phase 7 measurements from the hub contract's "Bench plan" (fan-out throughput, delivery latency, connection ceiling + idle cost, slow-consumer isolation, reload under fan-out, text-bridge tax). Needs no rip manager — it registers its own app and runs `hubbench` as both fixture tenant and load client. Every leg tees to `$RAW`. |
 | `hubbench/` | Go bench client behind `hub.sh` (own tiny module; `hub.sh` builds it). Modes: `tenant` (bridge fixture on a unix socket, 204 answers, optional text delay, 5s heartbeats), `subs` (N wss subscribers: delivery counts, publish→receive latency percentiles, max inter-delivery gap, close codes, optional wedged conns), `pub` (paced publisher through `POST /1.0/apps/{id}/hub/publish` with embedded timestamps), `send` (client-send throughput via no-delivery bare events), `ramp` (admitted conns/s, then idle hold for RSS reads). WSS with `InsecureSkipVerify` — bench client only; the acceptance suite proves real trust. |
 | `leakprobe.sh` | RSS slope-vs-plateau probe: hammers one worker direct-UDS in batches, snapshots its RSS after each. Reads a running pool; starts nothing. |
-| `app.rip` | The bench tenant: ping-class `/` returns `{ok:true}`; `/io` sleeps 5ms. Claims `bench.ripdev.io` (cache on) and `api.ripdev.io` (cache off). |
+| `app.rip` | The bench tenant: ping-class `/` returns `{ok:true}`; `/io` sleeps 5ms. Claims `bench.ripdev.io`. |
 | `parse.rip` | oha JSON (stdin) → one summary line: `LABEL: rps N 200s/s N non200 N p50 X.XXms p99 X.XXms`. The format is stable — raw files are diffed across sessions. |
-| `delta.rip` | Two `/1.0/cache` snapshots → one counter-delta line. |
 | `sock.rip` | Prints the first worker socket path from `/1.0/apps`. |
 | `count.rip` | oha JSON (stdin) → total request count. |
 
@@ -38,7 +37,7 @@ Raw result files land flat under `docs/` as
 
 ```bash
 ./bench/baseline.sh                       # full canonical sweep, 15s legs
-BENCH_SECTIONS="C D" DUR=3 ./bench/baseline.sh   # subset, short legs
+BENCH_SECTIONS="B C" DUR=3 ./bench/baseline.sh   # subset, short legs
 ./bench/leakprobe.sh                      # against an already-running pool
 
 ./bench/hub.sh                            # all six hub measurements, 15s legs

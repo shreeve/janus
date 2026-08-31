@@ -1,4 +1,4 @@
-# Capability 7: files
+# Capability 6: files
 
 `files` lets Janus serve registered app files before selecting a worker.
 Rip Server remains the single writer: an app registration declares its
@@ -8,7 +8,7 @@ bags, routes, or application semantics.
 
 ## Scope and cascade
 
-- Capability order: **7**, after auth.
+- Capability order: **6**, after auth.
 - Scope: site-scoped.
 - Cascades: **yes** — site override → global default → built-in `off`.
 - Cold Caddyfile decides whether file service is active on a site.
@@ -112,9 +112,8 @@ at request time are misses, not registration failures.
 `site` and `files` are immutable for one registration. Changing either
 uses DELETE followed by POST. PATCH retains its exact-app surface:
 name, exact hosts, and bridge path. A site-pattern app rejects a hosts
-PATCH. Every routing-changing PATCH bumps the generation and purges the
-app cache under the registry transaction; a failed PATCH changes no
-index or record.
+PATCH. Every routing-changing PATCH bumps the generation under the registry
+transaction; a failed PATCH changes no index or record.
 
 ## Admission
 
@@ -127,7 +126,7 @@ For host `cheetos.medlabs.health`, Janus:
 4. admits only a real directory that is not a symlink.
 
 The same lowercase, trailing-dot-free host normalization gates TLS ask,
-HTTP, cache, and hub lookup. Registration accepts ASCII DNS names only;
+HTTP and hub lookup. Registration accepts ASCII DNS names only;
 HTTP ports are removed, malformed authorities and IP literals do not
 match a site pattern. The same resolution gates TLS ask and the HTTP data plane. Wildcard DNS
 alone never authorizes a tenant. Creating the direct child admits it;
@@ -149,13 +148,13 @@ site context. With effective `files on`, the data-plane order is:
 
 1. malformed request target → **400**; unknown or
    directory-gate-failed host → **404**;
-2. `proxy_first` prefix → existing cache/doorbell/worker path;
+2. `proxy_first` prefix → existing doorbell/worker path;
 3. GET or HEAD regular-file hit in the first ordered root → serve it;
 4. GET or HEAD HTML navigation miss → serve `shell`;
 5. every other miss or method → **404**.
 
 The files decision is terminal outside `proxy_first`. Only configured API
-prefixes reach cache, a doorbell, or workers. A missing asset never rings
+prefixes reach a doorbell or workers. A missing asset never rings
 the manager, and an empty-upstream App-only registration still serves its
 files and shell while API prefixes answer 503. Methods other than GET and
 HEAD outside `proxy_first` answer 404.
@@ -173,7 +172,7 @@ time and size, then use Go `http.ServeContent` conditional and
 single-range semantics. GET and HEAD carry the same headers; HEAD emits
 no body. The file descriptor supplies both metadata and bytes, so a
 path replacement cannot change the served object mid-response. Janus
-does not list directories. Static responses bypass the micro-cache.
+does not list directories.
 
 Response policy is deliberately finite:
 
@@ -221,17 +220,15 @@ Rip exposes this request-local value as `req.site` / `@req.site`.
 There is no process environment variable: one worker may concurrently
 serve requests for different sites.
 
-## Lifecycle and cache
+## Lifecycle
 
 App clone/list/get deep-copy `site`, alias maps, roots, and prefixes.
 Resolved records are immutable snapshots; filesystem work never holds
 the registry lock. DELETE and
-TTL reap release exact, alias, and suffix claims. Registration and any
-admission-changing patch bump the app cache generation and purge its
-cache. A request resolved before a concurrent DELETE may complete from
+TTL reap release exact, alias, and suffix claims. A request resolved before
+a concurrent DELETE may complete from
 its immutable snapshot, matching the existing in-flight worker rule;
-no later request resolves the retired claim. Static responses are keyed by the resolved host naturally and
-never enter the micro-cache.
+no later request resolves the retired claim.
 
 A Janus restart empties all declarations. Rip Server re-registers the
 same normalized policy and resumes heartbeats.

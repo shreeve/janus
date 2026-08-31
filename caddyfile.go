@@ -60,15 +60,6 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("ping: %v", err)
 				}
 				a.Ping = &on
-			case "cache":
-				if a.Cache != nil {
-					return d.Err("duplicate cache directive in the same block")
-				}
-				cs, err := parseCacheDirective(d, true)
-				if err != nil {
-					return err
-				}
-				a.Cache = cs
 			case "hub":
 				if a.Hub != nil {
 					return d.Err("duplicate hub directive in the same block")

@@ -12,22 +12,21 @@
 // invisible to clients.
 //
 // Capabilities land in order: ping (1) proves the chassis, control (2)
-// serves /1.0, cache (3) is a site-scoped micro-cache with request
-// coalescing, hub (4) terminates WebSockets at the edge and fans JSON
+// serves /1.0, hub (3) terminates WebSockets at the edge and fans JSON
 // directive frames out per app while the tenant observes and steers
-// over plain HTTP, mdns (5) advertises janus.local plus registered
+// over plain HTTP, mdns (4) advertises janus.local plus registered
 // .local app hosts over multicast DNS and serves the read-only status
-// front door, auth (6) is URL-prefix gates for auth-less apps:
+// front door, auth (5) is URL-prefix gates for auth-less apps:
 // shared users, per-gate allow lists, one host-wide session, and
-// Remote-User strip-and-inject on fall-through, and files (7) serves
+// Remote-User strip-and-inject on fall-through, and files (6) serves
 // registered ordered roots and SPA shells with directory-gated site host
-// patterns and trusted Rip-Site context. Sendfile (8) is an always-on
+// patterns and trusted Rip-Site context. Sendfile (7) is an always-on
 // reverse-proxy response protocol: a final application X-Sendfile
 // instruction selects any regular file Janus can open, and Janus applies
-// validators, ranges, cache recording, and streaming at the edge. Browse
-// (9) turns selected hot and cold roots into navigable spaces with a
+// validators, ranges, and streaming at the edge. Browse
+// (8) turns selected hot and cold roots into navigable spaces with a
 // content-addressed theme and bounded extension renderers. Access log
-// (10) wraps Caddy's JSON encoder without changing durable bytes and
+// (9) wraps Caddy's JSON encoder without changing durable bytes and
 // publishes bounded app-scoped NDJSON through the control plane.
 //
 // The registry, data plane, and hub state live in pooled process state

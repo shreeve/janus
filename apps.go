@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -82,21 +81,6 @@ type AppRecord struct {
 	// (heartbeats begin immediately after registration, so a slow cold
 	// boot is never mistaken for dead); each POST …/heartbeat re-stamps.
 	heartbeatAt time.Time
-
-	// gen is the app's cache generation counter
-	// (docs/20260720-033201-capability-microcache.md "purge on swap,
-	// generation-fenced"). Every purge event — upstreams PUT, DELETE,
-	// heartbeat reap, host claim — bumps it inside the registry's
-	// critical section; cache fills snapshot it with host resolution and
-	// the store is rejected on mismatch. Pointer, so registry snapshots
-	// share the live counter.
-	gen *atomic.Uint64
-
-	// genSnap is the generation observed by resolveHost, read under the
-	// same RLock as the Upstreams snapshot so the two are mutually
-	// consistent — a fill's snapshot can never pair a post-swap
-	// generation with pre-swap sockets.
-	genSnap uint64
 
 	// selectMu serializes least-connections selection only for this app.
 	// Registry snapshots share the pointer, so unrelated tenants never
@@ -319,13 +303,6 @@ type appRegistry struct {
 	browse *browseSupervisor
 	access *accessBridge
 
-	// purgeHooks fan purge events out to every live config generation's
-	// cache. Reload generations overlap, and a rejected generation must be
-	// removable without orphaning the surviving generation's purge hook.
-	// The separate lock keeps callbacks outside the registry mutation lock.
-	purgeMu    sync.RWMutex
-	purgeHooks map[*purgeOwner]func(appID string)
-
 	// hubTeardown tears the app's hub down on DELETE and TTL reap — the
 	// only events that kill a registration. Upstreams PUTs never touch
 	// hub state. Wired once by the pooled state holder.
@@ -360,12 +337,11 @@ type appRegistry struct {
 
 func newAppRegistry() *appRegistry {
 	return &appRegistry{
-		apps:       map[string]*AppRecord{},
-		hosts:      map[string]string{},
-		sites:      map[string]string{},
-		purgeHooks: map[*purgeOwner]func(string){},
-		now:        time.Now,
-		ttl:        defaultHeartbeatTTL,
+		apps:  map[string]*AppRecord{},
+		hosts: map[string]string{},
+		sites: map[string]string{},
+		now:   time.Now,
+		ttl:   defaultHeartbeatTTL,
 	}
 }
 
@@ -380,41 +356,6 @@ func (r *appRegistry) bindAccess(bridge *accessBridge) error {
 	}
 	r.access = bridge
 	return nil
-}
-
-// purgeOwner is deliberately typed and comparable: accepting arbitrary any
-// keys here would let an accidental slice/map owner panic the registry.
-type purgeOwner struct{ _ byte }
-
-var testPurgeOwner = new(purgeOwner)
-
-// setPurge is the test seam for installing one replaceable hook.
-func (r *appRegistry) setPurge(fn func(appID string)) {
-	r.bindPurge(testPurgeOwner, fn)
-}
-
-func (r *appRegistry) bindPurge(owner *purgeOwner, fn func(appID string)) {
-	r.purgeMu.Lock()
-	r.purgeHooks[owner] = fn
-	r.purgeMu.Unlock()
-}
-
-func (r *appRegistry) unbindPurge(owner *purgeOwner) {
-	r.purgeMu.Lock()
-	delete(r.purgeHooks, owner)
-	r.purgeMu.Unlock()
-}
-
-func (r *appRegistry) purgeApp(id string) {
-	r.purgeMu.RLock()
-	hooks := make([]func(string), 0, len(r.purgeHooks))
-	for _, fn := range r.purgeHooks {
-		hooks = append(hooks, fn)
-	}
-	r.purgeMu.RUnlock()
-	for _, fn := range hooks {
-		fn(id)
-	}
 }
 
 func (r *appRegistry) create(name string, hosts []string, bridgeVal string) (AppRecord, error) {
@@ -523,7 +464,7 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 	rec := &AppRecord{
 		ID: id, Name: name, Hosts: hosts, Upstreams: append([]Upstream{}, upstreams...),
 		Site: site, Files: files, Bridge: bridgeVal, Lease: lease,
-		gen: new(atomic.Uint64), selectMu: new(sync.Mutex), siteSuffix: suffix,
+		selectMu: new(sync.Mutex), siteSuffix: suffix,
 	}
 	if r.access != nil {
 		rec.access = r.access.newState()
@@ -531,10 +472,6 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 	if lease == "heartbeat" {
 		rec.heartbeatAt = r.now()
 	}
-	// Host claim is a purge event (docs/20260720-033201-capability-microcache.md
-	// O5): bump the (fresh) generation in the same critical section as the
-	// registry write; the entry drop below runs after the lock releases.
-	rec.gen.Add(1)
 	r.apps[id] = rec
 	for _, h := range hosts {
 		r.hosts[h] = id
@@ -547,7 +484,6 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 	}
 	out := rec.clone()
 	r.mu.Unlock()
-	r.purgeApp(id)
 	if r.mdnsNotify != nil {
 		r.mdnsNotify()
 	}
@@ -624,7 +560,6 @@ func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
 			site = rec.Site.Aliases[host]
 		}
 		out := *rec
-		out.genSnap = out.gen.Load()
 		out.siteValue = site
 		r.mu.RUnlock()
 		if site != "" && !siteDirectoryExists(out.Site.Dir, site) {
@@ -654,7 +589,6 @@ func (r *appRegistry) resolveHost(host string) (AppRecord, bool) {
 		return AppRecord{}, false
 	}
 	out := *rec
-	out.genSnap = out.gen.Load()
 	out.siteValue = site
 	r.mu.RUnlock()
 	if !siteDirectoryExists(out.Site.Dir, site) {
@@ -804,15 +738,8 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgeVal 
 	if bridgeVal != nil {
 		rec.Bridge = *bridgeVal
 	}
-	routingChanged := hosts != nil || bridgeVal != nil
-	if routingChanged {
-		rec.gen.Add(1)
-	}
 	out := rec.clone()
 	r.mu.Unlock()
-	if routingChanged {
-		r.purgeApp(id)
-	}
 	// Removed hosts stop resolving to the app: their hub connections
 	// close through the internal mechanism (all other membership stays).
 	if len(removed) > 0 && r.hubHostsRemoved != nil {
@@ -826,13 +753,6 @@ func (r *appRegistry) patch(id string, name *string, hosts *[]string, bridgeVal 
 
 // setUpstreams replaces the entire upstream list atomically.
 // Empty list is legal: registered but not routable.
-//
-// Every upstreams PUT is a cache purge event: the generation bump shares
-// the registry write's critical section (the admission cut also cuts the
-// cache), and the entry drop follows outside the lock. With staggered
-// publishes a w:16 boot is 16 purges — the cache stays cold through
-// warmup, by design; any future scheme that diffs socket lists to skip
-// "redundant" purges must re-derive the spec's race analysis first.
 func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error) {
 	if err := validateUpstreams(ups); err != nil {
 		return AppRecord{}, err
@@ -848,10 +768,8 @@ func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error)
 		return AppRecord{}, errBadRequest("terminal browse-only registration cannot publish upstreams")
 	}
 	rec.Upstreams = append([]Upstream{}, ups...)
-	rec.gen.Add(1)
 	out := rec.clone()
 	r.mu.Unlock()
-	r.purgeApp(id)
 	if r.pruneUpstreams != nil {
 		r.pruneUpstreams()
 	}
@@ -897,7 +815,6 @@ func (r *appRegistry) sweepExpired() []string {
 		close(sub.done)
 	}
 	for _, id := range reaped {
-		r.purgeApp(id)
 		// Reap kills the registration itself: the hub dies with it.
 		if r.hubTeardown != nil {
 			r.hubTeardown(id)
@@ -965,7 +882,6 @@ func (r *appRegistry) delete(id string) error {
 	for _, sub := range detached {
 		close(sub.done)
 	}
-	r.purgeApp(id)
 	// DELETE kills the registration itself: the hub dies with it.
 	if r.hubTeardown != nil {
 		r.hubTeardown(id)
@@ -992,7 +908,6 @@ func (r *appRegistry) removeLocked(rec *AppRecord, reason string) []*accessSubsc
 		}
 	}
 	delete(r.apps, rec.ID)
-	rec.gen.Add(1)
 	if rec.access == nil {
 		return nil
 	}

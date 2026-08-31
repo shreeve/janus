@@ -42,9 +42,6 @@ var (
 		"auth": true, "browse_asset": true, "browse_listing": true, "browse_render": true,
 		"file": true, "hub": true, "janus": true, "proxy": true, "sendfile": true,
 	}
-	accessCacheVerdicts = map[string]bool{
-		"off": true, "bypass": true, "miss": true, "hit": true, "coalesced": true,
-	}
 	accessOutcomes = map[string]bool{
 		"upgraded": true, "upstream_aborted": true, "client_canceled": true,
 		"write_error": true, "complete": true,
@@ -273,7 +270,6 @@ type accessFacts struct {
 	owner     accessOwner
 
 	responseClass    string
-	cacheVerdict     string
 	selected         string
 	attempts         uint64
 	outcome          string
@@ -287,7 +283,7 @@ type accessFacts struct {
 }
 
 func newAccessFacts(r *http.Request) *accessFacts {
-	f := &accessFacts{start: time.Now(), cacheVerdict: "off", outcome: "complete"}
+	f := &accessFacts{start: time.Now(), outcome: "complete"}
 	if repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer); ok {
 		f.requestID, _ = repl.GetString("http.request.uuid")
 	}
@@ -335,7 +331,7 @@ func (f *accessFacts) setOwner(rec AppRecord) {
 	f.mu.Lock()
 	next := accessOwner{id: rec.ID, name: rec.Name, site: rec.siteValue, state: rec.access}
 	if f.owner.state != nil && f.owner.state != next.state {
-		f.responseClass, f.cacheVerdict, f.selected, f.outcome = "", "off", "", "complete"
+		f.responseClass, f.selected, f.outcome = "", "", "complete"
 		f.attempts, f.mark, f.markRejected, f.upgraded = 0, nil, false, false
 	}
 	f.owner = next
@@ -348,7 +344,7 @@ func (f *accessFacts) clearOwner() {
 	}
 	f.mu.Lock()
 	f.owner = accessOwner{}
-	f.responseClass, f.cacheVerdict, f.selected, f.outcome = "", "off", "", "complete"
+	f.responseClass, f.selected, f.outcome = "", "", "complete"
 	f.attempts, f.mark, f.markRejected, f.upgraded = 0, nil, false, false
 	f.mu.Unlock()
 }
@@ -359,15 +355,6 @@ func (f *accessFacts) setClass(class string) {
 	}
 	f.mu.Lock()
 	f.responseClass = class
-	f.mu.Unlock()
-}
-
-func (f *accessFacts) setCache(verdict string) {
-	if f == nil {
-		return
-	}
-	f.mu.Lock()
-	f.cacheVerdict = verdict
 	f.mu.Unlock()
 }
 
@@ -425,7 +412,6 @@ type accessEvent struct {
 	ResponseBytes    string   `json:"response_bytes"`
 	MIMEType         *string  `json:"mime_type"`
 	ResponseClass    string   `json:"response_class"`
-	CacheVerdict     string   `json:"cache_verdict"`
 	SelectedUpstream *string  `json:"selected_upstream"`
 	RetryCount       uint32   `json:"retry_count"`
 	Outcome          string   `json:"outcome"`
@@ -603,7 +589,7 @@ func buildAccessEvent(f *accessFacts, r *http.Request, entry zapcore.Entry, fiel
 		RequestHost: normalizeHostHeader(r.Host), ClientIP: clientIPOf(r),
 		Method: method, Path: path, Status: statusPtr, DurationSeconds: duration,
 		ResponseBytes: strconv.FormatInt(max(size, 0), 10), MIMEType: mimeType,
-		ResponseClass: class, CacheVerdict: f.cacheVerdict, SelectedUpstream: selected,
+		ResponseClass: class, SelectedUpstream: selected,
 		RetryCount: uint32(retries), Outcome: outcome, Mark: f.mark,
 		TruncatedFields: truncated, OmittedFields: omitted,
 	}, nil
@@ -645,9 +631,6 @@ func validateAccessEventLocked(f *accessFacts, r *http.Request, fields []zapcore
 	}
 	if !accessResponseClasses[class] {
 		return errors.New("access event has unknown response class")
-	}
-	if !accessCacheVerdicts[f.cacheVerdict] {
-		return errors.New("access event has unknown cache verdict")
 	}
 	duration := time.Since(f.start).Seconds()
 	if duration < 0 || math.IsInf(duration, 0) || math.IsNaN(duration) {

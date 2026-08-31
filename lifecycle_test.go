@@ -6,59 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 )
-
-func TestRegistryPurgeHooksSurviveAbortedGeneration(t *testing.T) {
-	reg := newAppRegistry()
-	oldOwner, rejectedOwner := new(purgeOwner), new(purgeOwner)
-	var oldCalls, rejectedCalls atomic.Int32
-	reg.bindPurge(oldOwner, func(string) { oldCalls.Add(1) })
-	reg.bindPurge(rejectedOwner, func(string) { rejectedCalls.Add(1) })
-
-	reg.purgeApp("app-test")
-	if oldCalls.Load() != 1 || rejectedCalls.Load() != 1 {
-		t.Fatalf("overlap purge calls old=%d rejected=%d, want 1 each", oldCalls.Load(), rejectedCalls.Load())
-	}
-
-	// Cleanup of a rejected reload removes only that generation. The old
-	// generation remains wired for every later registry mutation.
-	reg.unbindPurge(rejectedOwner)
-	reg.purgeApp("app-test")
-	if oldCalls.Load() != 2 || rejectedCalls.Load() != 1 {
-		t.Fatalf("post-abort purge calls old=%d rejected=%d, want 2/1", oldCalls.Load(), rejectedCalls.Load())
-	}
-}
-
-func TestRegistryPurgeHookReloadOverlapIsRaceSafe(t *testing.T) {
-	reg := newAppRegistry()
-	stable := new(purgeOwner)
-	var stableCalls atomic.Int32
-	reg.bindPurge(stable, func(string) { stableCalls.Add(1) })
-
-	var wg sync.WaitGroup
-	for worker := 0; worker < 8; worker++ {
-		owner := new(purgeOwner)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 200; i++ {
-				reg.bindPurge(owner, func(string) {})
-				reg.purgeApp("app-test")
-				reg.unbindPurge(owner)
-			}
-		}()
-	}
-	wg.Wait()
-	reg.purgeApp("app-test")
-	if stableCalls.Load() == 0 {
-		t.Fatal("stable generation's purge hook was lost")
-	}
-}
 
 func TestReconciliationWaitsForCommit(t *testing.T) {
 	auth, err := newAuthStore()

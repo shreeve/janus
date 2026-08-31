@@ -1,7 +1,6 @@
 package janus
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -617,9 +616,6 @@ func TestAuthWallFork(t *testing.T) {
 		if strings.Contains(out.Header.Get("Cookie"), authCookieName) {
 			t.Fatal("session cookie rode through")
 		}
-		if authIdentityOf(out.Context()) != "alice" {
-			t.Fatal("cache bypass signal missing")
-		}
 	})
 }
 
@@ -1053,69 +1049,6 @@ func TestAuthWildcardStillRequiresHotClaim(t *testing.T) {
 	var he caddyhttp.HandlerError
 	if !errors.As(err, &he) || he.StatusCode != http.StatusNotFound {
 		t.Fatalf("wildcard unknown auth host: want HandlerError 404, got %v", err)
-	}
-}
-
-func TestAuthCacheBypassSignalExplicit(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "https://app.test/x", nil)
-	if cacheBypassRequest(r) {
-		t.Fatal("anonymous GET must not bypass")
-	}
-	r = r.WithContext(context.WithValue(r.Context(), authIdentityKey{}, "alice"))
-	if !cacheBypassRequest(r) {
-		t.Fatal("authenticated GET must bypass")
-	}
-}
-
-func TestAuthenticatedTrafficNeverCached(t *testing.T) {
-	reg := newAppRegistry()
-	dp := newDataPlane(reg, nil)
-	store := newCacheStore(defaultCacheMaxBytes, defaultCacheAppShare)
-	reg.setPurge(store.purgeApp)
-	st, err := newAuthStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mu sync.Mutex
-	var seen []http.Header
-	sock := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		seen = append(seen, r.Header.Clone())
-		mu.Unlock()
-		w.Write([]byte("per-identity"))
-	}))
-	registerApp(t, reg, "app.test", Upstream{Path: sock})
-	users := aliceUsers(t)
-	cfg, err := compileAuthSite(usersToSlice(users), []AuthGate{{Prefix: "/", Allow: []string{"alice"}}}, authDefaultTTL, st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := &Handler{
-		logger: zap.NewNop(),
-		dp:     dp,
-		cacheCfg: &cacheSite{
-			store: store, ttl: time.Minute, ttlMax: 10 * time.Minute,
-			maxBody: defaultCacheMaxBody, debug: true,
-		},
-		authCfg: cfg,
-	}
-	ah := &authHarness{h: h, st: st}
-	session := ah.login(t, "app.test", "alice", "open-sesame")
-	for i := 0; i < 3; i++ {
-		r := authReq(http.MethodGet, "app.test", "/private", nil)
-		r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
-		rr := httptest.NewRecorder()
-		if err := h.ServeHTTP(rr, r, nil); err != nil {
-			t.Fatal(err)
-		}
-		if v := rr.Header().Get(cacheDebugHeader); v != "BYPASS" {
-			t.Fatalf("cache verdict %q, want BYPASS", v)
-		}
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(seen) != 3 {
-		t.Fatalf("upstream saw %d, want 3", len(seen))
 	}
 }
 

@@ -4,7 +4,6 @@
 //
 //	testkit upstream  --sock S --name N --hits F
 //	testkit doorbell  --sock S --app ID --newsock S2 --ring F
-//	testkit cacheup   --sock S --hits F
 //	testkit authup    --sock S --hits F
 //	testkit hubtenant --sock S --hits F --playbook F ID…
 //	testkit sendfile  --sock S --path F
@@ -38,8 +37,6 @@ func main() {
 		cmdUpstream(args)
 	case "doorbell":
 		cmdDoorbell(args)
-	case "cacheup":
-		cmdCacheUpstream(args)
 	case "authup":
 		cmdAuthUpstream(args)
 	case "hubtenant":

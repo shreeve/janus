@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,8 +49,7 @@ func flagValues(args []string, spec map[string]*string) []string {
 	return rest
 }
 
-// sendText answers with an explicit Content-Length (never chunked — the
-// cache group's max_body case depends on a declared 300KiB body).
+// sendText answers with an explicit Content-Length.
 func sendText(w http.ResponseWriter, code int, body string) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
@@ -187,99 +185,6 @@ func cmdAuthUpstream(args []string) {
 		appendLine(hits, fmt.Sprintf("%s %s remote-user=%s cookie=%s", r.Method, r.URL.RequestURI(), ru, ck))
 		io.Copy(io.Discard, r.Body)
 		sendText(w, 200, "remote-user:"+ru+"\n")
-	}))
-}
-
-// cmdCacheUpstream: the cache group's scripted origin — per-path sleeps,
-// cookies, cache-control vetoes, Vary variants, gzip, a truncated body
-// with a real mid-stream FIN, and an oversized body.
-func cmdCacheUpstream(args []string) {
-	var sock, hits string
-	flagValues(args, map[string]*string{"--sock": &sock, "--hits": &hits})
-	if sock == "" || hits == "" {
-		die("usage: testkit cacheup --sock S --hits F")
-	}
-	var gz bytes.Buffer
-	zw := gzip.NewWriter(&gz)
-	zw.Write([]byte("compressed-body\n"))
-	zw.Close()
-
-	send := func(w http.ResponseWriter, code int, body string, headers map[string]string) {
-		for k, v := range headers {
-			w.Header().Set(k, v)
-		}
-		sendText(w, code, body)
-	}
-	serveUnix(sock, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		appendLine(hits, r.URL.RequestURI())
-		if r.Method == "POST" {
-			io.Copy(io.Discard, r.Body)
-			send(w, 200, "posted\n", nil)
-			return
-		}
-		switch r.URL.Path {
-		case "/slow":
-			time.Sleep(500 * time.Millisecond)
-			send(w, 200, "slow-body\n", nil)
-		case "/slower":
-			time.Sleep(1500 * time.Millisecond)
-			send(w, 200, "slower-body\n", nil)
-		case "/slowcookie":
-			time.Sleep(500 * time.Millisecond)
-			send(w, 200, "personal\n", map[string]string{"Set-Cookie": "sid=1"})
-		case "/setcookie":
-			send(w, 200, "cookie\n", map[string]string{"Set-Cookie": "sid=1"})
-		case "/nostore":
-			send(w, 200, "nostore\n", map[string]string{"Cache-Control": "no-store"})
-		case "/private":
-			send(w, 200, "private\n", map[string]string{"Cache-Control": "private"})
-		case "/badcc":
-			send(w, 200, "badcc\n", map[string]string{"Cache-Control": "max-age=="})
-		case "/expires":
-			send(w, 200, "expires\n", map[string]string{"Expires": "Fri, 01 Jan 2100 00:00:00 GMT"})
-		case "/ce":
-			send(w, 200, gz.String(), map[string]string{"Content-Encoding": "gzip"})
-		case "/cevary":
-			send(w, 200, gz.String(), map[string]string{
-				"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
-		case "/acao-echo":
-			origin := r.Header.Get("Origin")
-			if origin == "" {
-				origin = "none"
-			}
-			send(w, 200, "acao\n", map[string]string{"Access-Control-Allow-Origin": origin})
-		case "/acao-star":
-			send(w, 200, "acao\n", map[string]string{"Access-Control-Allow-Origin": "*"})
-		case "/vary-lang":
-			lang := r.Header.Get("Accept-Language")
-			if lang == "" {
-				lang = "none"
-			}
-			send(w, 200, "lang:"+lang+"\n", map[string]string{"Vary": "Accept-Language"})
-		case "/vary-star":
-			send(w, 200, "varystar\n", map[string]string{"Vary": "*"})
-		case "/404":
-			send(w, 404, "nope\n", nil)
-		case "/500":
-			send(w, 500, "boom\n", nil)
-		case "/busy":
-			send(w, 503, "busy\n", map[string]string{"Rip-Worker-Busy": "1", "Retry-After": "0"})
-		case "/truncate":
-			// Declare 1000 bytes, deliver 500, then a real FIN mid-body:
-			// hijack for full control of the connection lifetime.
-			conn, buf, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				return
-			}
-			buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1000\r\n\r\n")
-			buf.WriteString(strings.Repeat("x", 500))
-			buf.Flush()
-			conn.Close()
-		case "/big":
-			send(w, 200, strings.Repeat("B", 300*1024), nil)
-		default:
-			send(w, 200, "plain:"+r.URL.RequestURI()+"\n", nil)
-		}
 	}))
 }
 

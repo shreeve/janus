@@ -1,4 +1,4 @@
-# Capability 7 extension: precompressed file sidecars
+# Capability 6 extension: precompressed file sidecars
 
 `files` transparently selects precompressed representations for canonical
 files in dynamically registered roots. A client requests `/bundle.json`;
@@ -7,7 +7,7 @@ without changing the URL.
 
 ## Scope and cascade
 
-- Capability order: **7**, extending files without creating a new
+- Capability order: **6**, extending files without creating a new
   capability number.
 - Files admission remains site-scoped and cascades: site override → global
   default → built-in `off`.
@@ -114,7 +114,7 @@ are case-insensitive.
 
 ## Representation response
 
-The canonical root supplies the existing Janus `Cache-Control` policy and the
+The canonical root supplies the configured `Cache-Control` policy and the
 canonical filename supplies `Content-Type`. A selected sidecar supplies its
 bytes, size, modification time, and representation ETag. Encoded ETags carry
 the coding name in addition to descriptor modification time and size, so a

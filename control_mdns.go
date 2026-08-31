@@ -12,7 +12,7 @@ import (
 // is) and the operator's view of the advertiser.
 
 // handleMdnsState is GET /1.0/mdns. Disabled answers {"enabled": false}
-// — present and honest, like /1.0/cache with no cache-enabled sites.
+// — present and honest even when mDNS is disabled.
 // Enabled answers the advertiser view: configured and effective names,
 // the front door's mode and address (shared mode names the HTTP port
 // the door rides inside; dedicated mode names its own listener), every

@@ -12,15 +12,14 @@ index says which is which.
 | [`20260719-002000-pool-protocol.md`](20260719-002000-pool-protocol.md) | THE Janus↔tenant pool protocol: doorbell, ring, never-stale |
 | [`20260718-204255-capability-ping.md`](20260718-204255-capability-ping.md) | Capability 1: ping (and the cascade rules every capability follows) |
 | [`20260718-203749-capability-control.md`](20260718-203749-capability-control.md) | Capability 2: control (`/1.0` listeners) |
-| [`20260720-033201-capability-microcache.md`](20260720-033201-capability-microcache.md) | Capability 3: micro-cache + request coalescing |
-| [`20260720-162350-hub-design.md`](20260720-162350-hub-design.md) | Capability 4: hub (per-app WebSocket fan-out) |
-| [`20260722-034619-capability-mdns.md`](20260722-034619-capability-mdns.md) | Capability 5: mdns (LAN presence — `janus.local`, per-app `.local` names, the status front door) |
-| [`20260728-160734-capability-auth.md`](20260728-160734-capability-auth.md) | Capability 6: auth (URL-prefix gates for auth-less apps) |
-| [`20260730-202700-capability-files.md`](20260730-202700-capability-files.md) | Capability 7: files (registered static roots, SPA shell, and directory-gated site hosts) |
-| [`20260805-020944-capability-files-precompressed.md`](20260805-020944-capability-files-precompressed.md) | Capability 7 extension: transparent precompressed representations from same-root sidecars |
-| [`20260801-020600-capability-sendfile.md`](20260801-020600-capability-sendfile.md) | Capability 8: sendfile (always-on final upstream response transformation) |
-| [`20260801-042700-capability-browse.md`](20260801-042700-capability-browse.md) | Capability 9: browse (navigable hot and cold roots with themes and bounded renderers) |
-| [`20260801-081600-capability-access-log.md`](20260801-081600-capability-access-log.md) | Capability 10: access log (durable JSON encoder plus bounded app-scoped live NDJSON) |
+| [`20260720-162350-hub-design.md`](20260720-162350-hub-design.md) | Capability 3: hub (per-app WebSocket fan-out) |
+| [`20260722-034619-capability-mdns.md`](20260722-034619-capability-mdns.md) | Capability 4: mdns (LAN presence — `janus.local`, per-app `.local` names, the status front door) |
+| [`20260728-160734-capability-auth.md`](20260728-160734-capability-auth.md) | Capability 5: auth (URL-prefix gates for auth-less apps) |
+| [`20260730-202700-capability-files.md`](20260730-202700-capability-files.md) | Capability 6: files (registered static roots, SPA shell, and directory-gated site hosts) |
+| [`20260805-020944-capability-files-precompressed.md`](20260805-020944-capability-files-precompressed.md) | Capability 6 extension: transparent precompressed representations from same-root sidecars |
+| [`20260801-020600-capability-sendfile.md`](20260801-020600-capability-sendfile.md) | Capability 7: sendfile (always-on final upstream response transformation) |
+| [`20260801-042700-capability-browse.md`](20260801-042700-capability-browse.md) | Capability 8: browse (navigable hot and cold roots with themes and bounded renderers) |
+| [`20260801-081600-capability-access-log.md`](20260801-081600-capability-access-log.md) | Capability 9: access log (durable JSON encoder plus bounded app-scoped live NDJSON) |
 | [`20260826-184613-v1.7-hardening.md`](20260826-184613-v1.7-hardening.md) | v1.7 authoritative addendum: throughput, reload lifecycle, security, and release hardening across the ten capabilities |
 | [`20260719-141200-tls-ask.md`](20260719-141200-tls-ask.md) | On-demand TLS gating via `/1.0/tls/ask` |
 
@@ -31,10 +30,10 @@ index says which is which.
 | [`20260719-165500-rip-server-performance.md`](20260719-165500-rip-server-performance.md) | The performance ledger: grounding facts, closed doors, every measured result |
 | [`20260720-143705-bench-harness.md`](20260720-143705-bench-harness.md) | Bench rig runbook (the runnable harness is `../bench/`) |
 | `20260720-*-bench-raw-*.txt` | Raw provenance for the ledger's entries — never edited |
-| [`20260801-030843-bench-raw-sendfile.txt`](20260801-030843-bench-raw-sendfile.txt) | Five-run Capability 8 file-delivery comparison |
-| [`20260801-054042-bench-raw-browse.txt`](20260801-054042-bench-raw-browse.txt) | Five-run Capability 9 files, listings, assets, renderers, and theme-provisioning matrix |
-| [`20260801-102358-bench-raw-access-log.txt`](20260801-102358-bench-raw-access-log.txt) | Five-run Capability 10 encoder, subscriber, and honest file/sendfile/gzip/zstd/WebSocket path matrix |
-| [`20260805-022544-files-precompressed-measurement.md`](20260805-022544-files-precompressed-measurement.md) | Capability 7 precompressed-sidecar hit and fallback cost, with five-run raw provenance |
+| [`20260801-030843-bench-raw-sendfile.txt`](20260801-030843-bench-raw-sendfile.txt) | Five-run Capability 7 file-delivery comparison |
+| [`20260801-054042-bench-raw-browse.txt`](20260801-054042-bench-raw-browse.txt) | Five-run Capability 8 files, listings, assets, renderers, and theme-provisioning matrix |
+| [`20260801-102358-bench-raw-access-log.txt`](20260801-102358-bench-raw-access-log.txt) | Five-run Capability 9 encoder, subscriber, and honest file/sendfile/gzip/zstd/WebSocket path matrix |
+| [`20260805-022544-files-precompressed-measurement.md`](20260805-022544-files-precompressed-measurement.md) | Capability 6 precompressed-sidecar hit and fallback cost, with five-run raw provenance |
 | [`20260826-184613-bench-raw-v1.7-access.txt`](20260826-184613-bench-raw-v1.7-access.txt) | v1.7 access no-subscriber fast-path benchmark provenance |
 
 ## Tutorials (runnable, living)

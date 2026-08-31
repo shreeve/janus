@@ -1085,9 +1085,6 @@ func newTestMdnsApp(t *testing.T, ms *MdnsSettings) *App {
 	app.appsReg = st.registry
 	app.dp = st.dp
 	app.hubs = st.hubs
-	if err := app.provisionCacheStore(); err != nil {
-		t.Fatal(err)
-	}
 	return app
 }
 

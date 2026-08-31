@@ -12,7 +12,7 @@
 #   ./bin/janus validate --config Caddyfile.example --adapter caddyfile
 #
 # Cold vs hot, in one breath: this file admits CAPABILITIES — what a host
-# may do (ping, cache, hub, auth, files) and where /1.0 listens. The hot /1.0 API wires
+# may do (ping, hub, auth, files) and where /1.0 listens. The hot /1.0 API wires
 # TENANTS — which hosts map to which worker sockets, heartbeats, the hub
 # bridge, and publish. Nothing here names an app or a socket; a
 # tenant registers itself against the control plane:
@@ -74,26 +74,8 @@
 		#	control public token:JANUS_TOKEN cert:/etc/janus/tls.crt key:/etc/janus/tls.key
 		#	control local http://127.0.0.1:7600/ token:JANUS_TOKEN
 
-		# 3) cache — micro-cache + request coalescing. Site-scoped and
-		# cascades exactly like ping — except max_bytes and
-		# max_app_share, which name the one process-wide memory pool and
-		# are legal only in this global block. Enabling cache declares:
-		# this site's anonymous GETs may be shared for one ttl. Requests
-		# carrying Cookie or Authorization bypass; responses that set
-		# cookies, declare no-store/private, or Vary outside
-		# Accept/Accept-Encoding/Accept-Language are never stored.
-		# Concurrent misses on one key coalesce into a single worker
-		# request. Counters: GET /1.0/cache.
-		cache {
-			ttl 1s # freshness when the response declares no max-age; 1s is enough to flatten a stampede
-			ttl_max 10s # cap on response-declared max-age/s-maxage — no tenant pins an entry for an hour
-			max_body 256kb # largest storable body; anything bigger streams through uncached
-			max_bytes 64mb # process-wide pool (GLOBAL ONLY); an accounting bound, not an RSS promise — expect ~1.5–2x under churn
-			max_app_share 50 # % of max_bytes one app may hold (GLOBAL ONLY) — one hot tenant cannot zero everyone else's hit rate
-		}
-
-		# 4) hub — per-app WebSocket fan-out. Site-scoped, cascades like
-		# ping and cache; every knob here is per-site admission policy
+		# 3) hub — per-app WebSocket fan-out. Site-scoped, cascades like
+		# ping; every knob here is per-site admission policy
 		# (no process-wide-only keys). Sockets terminate at Janus and
 		# survive app reloads; the tenant observes frames through its
 		# hot-registered bridge and steers via
@@ -108,7 +90,7 @@
 			origin same # browsers must present an Origin matching the request Host — closes cross-site WebSocket hijacking by default
 		}
 
-		# 5) mdns — LAN presence. Process-wide, like control; never legal
+		# 4) mdns — LAN presence. Process-wide, like control; never legal
 		# in a site block. ENABLING IS AN ANNOUNCEMENT: this machine and
 		# its app list become visible over multicast DNS, and the
 		# read-only status front door serves on EVERY interface of this
@@ -129,8 +111,8 @@
 			# interface en0                # optional pinning; default: every multicast-capable interface, live
 		}
 
-		# 6) auth — URL-prefix gates for auth-less apps. Site-scoped,
-		# cascades like ping/cache/hub: this global block is the process
+		# 5) auth — URL-prefix gates for auth-less apps. Site-scoped,
+		# cascades like ping and hub: this global block is the process
 		# default; sites opt out with `auth off` or replace the whole
 		# config with their own `auth { … }` (users + gates — no merge).
 		# Bare `auth` / `auth on` inherits. Each gate is a path prefix
@@ -152,7 +134,7 @@
 			}
 		}
 
-		# 7) files — site-scoped, cascades, built-in off. Hot app
+		# 6) files — site-scoped, cascades, built-in off. Hot app
 		# registration supplies ordered roots, worker-first prefixes, and
 		# the SPA shell. Patterned registrations additionally supply
 		# `{site}.suffix`, aliases, and the direct-child directory gate.
@@ -163,10 +145,10 @@
 			precompressed
 		}
 
-		# 8) sendfile — always-on final X-Sendfile transformation;
+		# 7) sendfile — always-on final X-Sendfile transformation;
 		# no configuration and no toggle (cascades: no).
 
-		# 9) browse — site-scoped admission with process-wide theme and
+		# 8) browse — site-scoped admission with process-wide theme and
 		# renderer definitions. The embedded theme is used here. Renderer
 		# commands are argv, never shell text; exactly one token is
 		# `{file}`. GET /1.0/browse reports redacted state and counters.
@@ -184,7 +166,7 @@
 }
 
 (janus_access) {
-	# Capability 10 publishes only access entries that Caddy invokes through
+	# Capability 9 publishes only access entries that Caddy invokes through
 	# this encoder. This durable JSON sink remains authoritative.
 	log {
 		output stderr
@@ -210,7 +192,7 @@ http://*.local {
 }
 
 # The main site — the empty janus block admits the host and inherits
-# every global default: ping on, cache on at 1s, hub on at /hub, auth on
+# every global default: ping on, hub on at /hub, auth on
 # with the global users. An unmentioned capability is an inherited one;
 # that is the cascade's common case, and most sites should look exactly
 # like this.
@@ -219,17 +201,13 @@ example.com, www.example.com {
 	janus
 }
 
-# API — explicit off beats inherited on. WHY: auth carried in custom
-# headers (X-API-Key, …) is invisible to the cache's bypass rules — it
-# can only enumerate Cookie, Authorization, and Proxy-Authorization — so
-# custom-header auth and a shared cache must never meet. A plain HTTP
-# API speaks no hub; leaving it on would let anyone open sockets against
+# API — explicit off beats inherited on. A plain HTTP API speaks no hub;
+# leaving it on would let anyone open sockets against
 # a tenant that never bridges. And this API authenticates itself (the
 # custom headers above), so the cookie wall opts out too.
 api.example.com {
 	import janus_access
 	janus {
-		cache off
 		hub off
 		auth off
 		files off
@@ -292,8 +270,7 @@ notes.example.com {
 # the launcher should re-register on start rather than treating this as
 # one-time setup.
 #
-# Everything else is off on purpose. cache: query answers are per-user
-# and must never be shared. hub: the UI speaks its own SSE, not Janus's
+# Everything else is off on purpose. hub: the UI speaks its own SSE, not Janus's
 # WebSocket. files/browse: nothing static is served from here.
 #
 # The UI also keeps its own cross-site check, and it has to be told the
@@ -314,25 +291,9 @@ duckui.example.com {
 				dave
 			}
 		}
-		cache off
 		hub off
 		files off
 		browse off
-	}
-}
-
-# Pages — per-key override. A site block overrides only the keys it
-# names: ttl becomes 5s here, while ttl_max, max_body, and the pool
-# knobs keep their global values. debug emits X-Janus-Cache
-# (HIT|MISS|COALESCED|BYPASS) on this site's responses — dev-visible,
-# prod-quiet; drop it once the hit rate is proven.
-pages.example.com {
-	import janus_access
-	janus {
-		cache {
-			ttl 5s
-			debug
-		}
 	}
 }
 
@@ -395,8 +356,8 @@ ws-large.example.com {
 }
 
 # Persistent cold browse roots are configuration, not app records. Every
-# such handler requires finite exact host matchers; cache omission means
-# revalidate. This site has no worker, heartbeat, shell, or DELETE endpoint.
+# such handler requires finite exact host matchers; an omitted root policy
+# means revalidate. This site has no worker, heartbeat, shell, or DELETE endpoint.
 downloads.example.com {
 	import janus_access
 	janus {
@@ -415,8 +376,7 @@ downloads.example.com {
 # host: leaving hub on here would make every on-demand name
 # hub-enabled, defeating per-host hub admission. auth off for the same
 # reason: an inherited global wall would demand a Janus login on every
-# customer domain. Cache stays inherited — an anonymous GET on a
-# registered host is the cache's home turf.
+# customer domain.
 https:// {
 	import janus_access
 	tls {

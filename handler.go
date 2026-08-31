@@ -22,10 +22,6 @@ type Handler struct {
 	// Ping overrides the global ping default for this site when non-nil.
 	Ping *bool `json:"ping,omitempty"`
 
-	// Cache overrides the global cache default/tuning for this site when
-	// non-nil (process-wide keys are illegal here).
-	Cache *CacheSettings `json:"cache,omitempty"`
-
 	// Hub overrides the global hub default/tuning for this site when
 	// non-nil.
 	Hub *HubSettings `json:"hub,omitempty"`
@@ -45,10 +41,6 @@ type Handler struct {
 	app    *App
 	dp     *dataPlane
 	logger *zap.Logger
-
-	// cacheCfg is the site's effective cache configuration; nil when the
-	// effective cache is off, so the bypass path costs one nil check.
-	cacheCfg *cacheSite
 
 	// hubCfg is the site's effective hub configuration; nil when the
 	// effective hub is off, so the bypass path costs one nil check.
@@ -88,9 +80,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		h.app = app
 		h.dp = app.dp
 	}
-	if err := h.provisionCache(); err != nil {
-		return err
-	}
 	if err := h.provisionHub(); err != nil {
 		return err
 	}
@@ -102,7 +91,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	h.logger.Info("janus handler ready",
 		zap.Bool("ping", h.pingEnabled()),
-		zap.Bool("cache", h.cacheCfg != nil),
 		zap.Bool("hub", h.hubCfg != nil),
 		zap.Bool("auth", h.authCfg != nil),
 		zap.Bool("files", h.filesEnabled()),
@@ -275,7 +263,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		h.serveBrowseAsset(w, r)
 		return nil
 	}
-	// Hub interception (before cache and upstream selection, after ping):
+	// Hub interception (before upstream selection, after ping):
 	// the hub claims upgrades to its path only — a non-upgrade request to
 	// the same path flows through the data plane like any other.
 	if h.hubCfg != nil && r.URL.Path == h.hubCfg.path && websocket.IsWebSocketUpgrade(r) {
@@ -287,9 +275,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		if handled || err != nil {
 			return err
 		}
-	}
-	if h.cacheCfg != nil {
-		return h.serveCacheResolved(w, r, host, rec)
 	}
 	facts.setClass("proxy")
 	return h.dp.serveResolved(w, r, host, rec)
@@ -309,8 +294,6 @@ func (h *Handler) authExactHostClaim(host string) bool {
 //	janus {
 //	    ping
 //	    ping off
-//	    cache off
-//	    cache { ttl 5s; debug }
 //	}
 func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume "janus"
@@ -328,15 +311,6 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("ping: %v", err)
 			}
 			h.Ping = &on
-		case "cache":
-			if h.Cache != nil {
-				return d.Err("duplicate cache directive in the same block")
-			}
-			cs, err := parseCacheDirective(d, false)
-			if err != nil {
-				return err
-			}
-			h.Cache = cs
 		case "hub":
 			if h.Hub != nil {
 				return d.Err("duplicate hub directive in the same block")

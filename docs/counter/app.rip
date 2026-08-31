@@ -1,7 +1,7 @@
 import { get, post, read, start } from '@rip-lang/server'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 
-# The hot-reload act (act 5) edits this constant to 2 and saves.
+# The hot-reload act (act 4) edits this constant to 2 and saves.
 STEP = 1
 
 CHANNEL = '/stats/tally'
@@ -43,12 +43,8 @@ members = ->
 
 get '/' -> PAGE   # PAGE is the HTML constant at the bottom of this file
 
-# Act 4: the micro-cache blip. Anonymous GET, storable response; Janus
-# caches it for 1s. Zero cache code here — the capability rides the site.
-get '/now' -> { now: Date.new().toISOString() }
-
 # Plumbing panel: the tenant reading its own reflection off the control
-# plane. no-store keeps this poll out of the micro-cache by contract.
+# plane. no-store keeps browser and intermediary storage out of the way.
 get '/plumbing' ->
   @header 'Cache-Control', 'no-store'
   resolveAppId!() unless appId?
@@ -95,7 +91,7 @@ post '/rt/bridge' ->
     # context — the "!" suffix is REQUIRED. See the callout below.
     return { '@': [CHANNEL], 'tally!': { value: tally } }
 
-  # Act 6: the kick. Trusted-plane "*": every resolved member — including
+  # Act 5: the kick. Trusted-plane "*": every resolved member — including
   # the clicker — receives {"*":"admin kick"} then close 1000.
   if read('kickall')?
     return { '@': [CHANNEL], '*': 'admin kick' }
@@ -114,14 +110,12 @@ PAGE = """
   <button onclick="send('decrement')">-</button>
   <p id="viewers"></p>
   <p id="rtt" style="position:fixed;top:8px;right:8px"></p>
-  <p><button onclick="now()">server time (cached 1s)</button> <span id="now"></span></p>
   <p><button onclick="send('kickall')">admin: disconnect everyone</button> <span id="kick"></span></p>
   <details><summary>plumbing</summary><pre id="plumbing"></pre></details>
   <script>
     var tallyEl = document.getElementById('tally');
     var viewersEl = document.getElementById('viewers');
     var rttEl = document.getElementById('rtt');
-    var nowEl = document.getElementById('now');
     var kickEl = document.getElementById('kick');
     var plumbingEl = document.getElementById('plumbing');
     var ws, backoff = 500;
@@ -147,15 +141,6 @@ PAGE = """
       var frame = {};
       frame[name] = {};
       ws.send(JSON.stringify(frame));
-    }
-
-    function now() {
-      fetch('/now').then(function (r) {
-        var v = r.headers.get('x-janus-cache'), age = r.headers.get('age');
-        r.json().then(function (j) {
-          nowEl.textContent = j.now + ' [' + v + (age !== null ? ', Age ' + age : '') + ']';
-        });
-      });
     }
 
     setInterval(function () {              // act 3: in-band liveness
