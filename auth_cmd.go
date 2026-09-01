@@ -11,12 +11,12 @@ import (
 	"golang.org/x/term"
 )
 
-// The credential minter: `caddy janus-auth-hash` (namespaced — a
+// The credential minter: `janus janus-auth-hash` (namespaced — a
 // top-level `auth` command would risk colliding with upstream or other
 // modules' command names). The password never rides argv (shell history
 // is not a credential store): on a terminal it is prompted without echo
 // and confirmed; with stdin redirected, exactly one line is read — so
-// `printf 'pw\n' | caddy janus-auth-hash` works in scripts and test
+// `printf 'pw\n' | janus janus-auth-hash` works in scripts and test
 // fixtures. Output is the one a… passhash line the operator pastes
 // after `user <name>`; the command runs the same constants the verifier
 // runs.
@@ -36,7 +36,7 @@ as one a<base62> line (32 chars) for a Caddyfile users entry:
 On a terminal the password is prompted without echo and confirmed.
 With stdin redirected, exactly one line is read as the password:
 
-	printf 'secret\n' | caddy janus-auth-hash
+	printf 'secret\n' | janus janus-auth-hash
 `,
 		Func: cmdJanusAuthHash,
 	})

@@ -1,6 +1,6 @@
 // Package janus is a Caddy module that fronts disposable worker pools:
-// cold Caddyfile capabilities on the data plane, a hot /1.0 control API
-// on the control plane, and nothing durable in between.
+// cold Caddyfile capabilities on the data plane and a hot /1.0 control
+// API on the control plane. Its runtime coordination state is memory-only.
 //
 // Janus registers two Caddy modules: the app "janus" (process-wide
 // control listeners and capability defaults, configured in the global
@@ -32,8 +32,8 @@
 // The registry, data plane, and hub state live in pooled process state
 // (caddy.UsagePool), so a Caddy config reload never drops a registration
 // or a hub socket; only registry DELETE, heartbeat TTL reap, or process
-// exit tears them down. Everything is memory-only by contract — a
-// restart empties the registry and tenants re-register.
+// exit tears them down. A restart empties the registry and tenants
+// re-register.
 //
 // The authoritative contracts live under docs/: the phased build spec,
 // one page per capability, the Janus↔tenant pool protocol, and the

@@ -27,15 +27,14 @@ test: janus unit
 
 # Match Harbor's local install behavior. Removing the destination first is
 # load-bearing on macOS: replacing the inode avoids a stale kernel signature
-# cache after installing a newly linked executable. Both names are removed so
-# exactly one janus binary lives on PATH.
+# cache after installing a newly linked executable.
 install: janus
 	@sudo= ; \
 	  if [ ! -d "$(BIN)" ]; then install -d -m 0755 "$(BIN)" 2>/dev/null || sudo=sudo; fi; \
 	  [ -w "$(BIN)" ] || sudo=sudo; \
 	  [ -z "$$sudo" ] || echo "  $(BIN) needs elevated access — using sudo"; \
 	  $$sudo install -d -m 0755 "$(BIN)"; \
-	  $$sudo rm -f "$(BIN)/janus" "$(BIN)/caddy-janus"; \
+	  $$sudo rm -f "$(BIN)/janus"; \
 	  $$sudo install -m 0755 "$(OUT)" "$(BIN)/janus"; \
 	  echo "installed janus -> $(BIN)  (on your PATH)"
 

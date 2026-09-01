@@ -8,7 +8,7 @@
 #   5) reload under fan-out — doorbell cut + republish mid-traffic: no drops
 #   6) text-bridge tax      — client-send throughput, tenant 204 instant vs +5ms
 #
-# Needs only: Janus caddy running (root Caddyfile), Go (builds bench/hubbench),
+# Needs only: Janus running (root Caddyfile), Go (builds bench/hubbench),
 # curl. NO rip manager — the tenant is hubbench's own bridge fixture.
 #
 # Env knobs (all optional):
@@ -61,7 +61,7 @@ say() { echo "$@" | tee -a $RAW }
 wants() { [[ " $HUB_SECTIONS " == *" $1 "* ]] }
 
 curl -sf --max-time 2 $CONTROL/1.0/health >/dev/null 2>&1 \
-  || die "Janus control plane not answering at $CONTROL/1.0/health — start it: cd $JANUS_DIR && ulimit -n 1048575 && ./bin/caddy run"
+  || die "Janus control plane not answering at $CONTROL/1.0/health — start it: cd $JANUS_DIR && ulimit -n 1048575 && ./bin/janus run"
 
 mkdir -p $BENCH_SCRATCH
 echo "building $HB from $BENCH/hubbench"
@@ -174,7 +174,7 @@ say "=== hub bench sweep $(date) ==="
 say "sections: $HUB_SECTIONS; legs ${DUR}s; host $HUB_HOST; channel $CHANNEL"
 say "load: $(uptime)"
 say "rig: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model), $(sysctl -n hw.ncpu) cores, $(($(sysctl -n hw.memsize)/1073741824))GB, $(sw_vers -productVersion)"
-say "$(go version), caddy $($JANUS_DIR/bin/caddy version | head -1 | cut -d' ' -f1)"
+say "$(go version), $($JANUS_DIR/bin/janus version | head -1)"
 say "janus commit: $(git -C $JANUS_DIR rev-parse --short HEAD 2>/dev/null || echo unknown)"
 say "ulimit -n $(ulimit -n)"
 say ""
@@ -218,7 +218,7 @@ fi
 if wants 3; then
   say "== 3) connection ceiling + idle cost: ramp to $HUB3_N, RSS per idle conn =="
   rss0=$(caddy_rss_mb)
-  say "3 caddy rss before: ${rss0}MB"
+  say "3 Janus rss before: ${rss0}MB"
   out=$BENCH_SCRATCH/ramp.out
   rm -f $out
   $HB -mode ramp -host $HUB_HOST -channel $CHANNEL -n $HUB3_N -hold 30s >$out 2>>$BENCH_SCRATCH/subs.err &
@@ -229,7 +229,7 @@ if wants 3; then
   sleep 5
   rss1=$(caddy_rss_mb)
   nconns=$(hub_stat conns)
-  say "3 caddy rss at $nconns idle conns: ${rss1}MB"
+  say "3 Janus rss at $nconns idle conns: ${rss1}MB"
   say "3 rss per idle conn: $(awk -v a=$rss0 -v b=$rss1 -v n=$nconns 'BEGIN{printf "%.1fKB", (b-a)*1024/(n>0?n:1)}')"
   say "3 upgrade past the cap: $(upgrade_code $HUB_HOST) (want 503)"
   kill $rp 2>/dev/null

@@ -60,7 +60,7 @@ byte-identical to the listings.
      └───────────────────┬───────────────────┘
                          ▼  TLS :443 (certs/ripdev.io.*, *.ripdev.io → 127.0.0.1)
         ┌──────────────────────────────────────────────────┐
-        │  Janus  (./bin/caddy, one process)               │
+        │  Janus  (./bin/janus, one process)               │
         │   ├── data plane   GET / /plumbing → worker      │
         │   ├── hub          WS terminates HERE; ?/! pong, │
         │   │                membership, fan-out, * kick   │
@@ -104,22 +104,20 @@ identically — unlike the bridge-response plane used throughout below.
 
 ## 3. Prerequisites and launch
 
-You need Go (current stable), `xcaddy`, `bun`, and the two checkouts from
-section 1. DNS for `*.ripdev.io` resolves to `127.0.0.1` and the trusted
+You need Go (current stable), `bun`, and the two checkouts from section 1.
+DNS for `*.ripdev.io` resolves to `127.0.0.1` and the trusted
 wildcard cert is committed in the janus repo's `certs/` — HTTPS on
 localhost works out of the box.
 
 Every command below spells the checkouts as `~/src/janus` and `~/src/rip`;
 substitute your own paths if they live elsewhere.
 
-**Build the Janus caddy binary** (from `~/src/janus`):
+**Build Janus** (from `~/src/janus`):
 
 ```bash
 cd ~/src/janus
 export PATH="$(go env GOPATH)/bin:$PATH"
-mkdir -p bin
-xcaddy build --with github.com/shreeve/janus=. --output ./bin/caddy
-# (without a checkout, pin instead: xcaddy build --with github.com/shreeve/janus@v1.10.0 --output ./caddy)
+make janus
 ```
 
 **The demo Caddyfile.** It ships next to this page as
@@ -145,13 +143,13 @@ demo.ripdev.io {
 }
 ```
 
-**Launch Janus.** Run caddy from the janus checkout root — the cert paths
-in `Caddyfile.demo` are relative to where caddy runs (binding :443 may
+**Launch Janus.** Run it from the Janus checkout root — the cert paths
+in `Caddyfile.demo` are relative to that directory (binding :443 may
 need sudo on some systems):
 
 ```bash
 cd ~/src/janus
-./bin/caddy run --config docs/counter/Caddyfile.demo
+./bin/janus run --config docs/counter/Caddyfile.demo
 ```
 
 **Create and launch the rip app.** The app directory needs
@@ -501,7 +499,7 @@ worker fetches `GET http://127.0.0.1:7600/1.0/apps/demo-x7k2p9/hub` —
 — counts and opaque handles, never raw connection ids. It answers the
 open with count 2 + 1 = 3; all three windows render "3 viewer(s) online",
 and the newcomer also receives the `tally!` greeting (3, the current
-value — not the possibly 1s-stale inlined number). Close the third
+value rather than an older value inlined into the page). Close the third
 window: Janus cleans up locally (channel membership drops to 2), then
 fires the **close bridge** (`Sec-WebSocket-Frame: close`, body
 `{"code": 1001, "reason": "…"}`); the worker snapshots again — now exact,

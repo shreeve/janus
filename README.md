@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, an edge authentication wall, registered static files, X-Sendfile offload, and bounded app-scoped access observation, driven by a JSON control API.</strong>
+  <strong>Caddy module: long-lived edge server — TLS admission, dynamic host routing, registry-driven upstreams, heartbeats, on-demand TLS asks, edge-terminated WebSocket fan-out, zero-config LAN presence over mDNS, an edge authentication wall, registered static files and directory browsing, X-Sendfile offload, and bounded app-scoped access observation, driven by a JSON control API.</strong>
 </p>
 
 ---
@@ -34,7 +34,7 @@ app.example.com {
 }
 ```
 
-Registry, data plane, and hub state live in pooled process state: a Caddy config reload never drops a registration or a WebSocket. Everything is memory-only by contract — a restart empties the registry and tenants re-register. See [`Caddyfile.minimal`](Caddyfile.minimal) for the operator-facing starting point, [`Caddyfile.example`](Caddyfile.example) for the full capability walkthrough, and [`docs/`](docs/) for the contracts.
+Registry, data plane, and hub state live in pooled process state: a Caddy config reload never drops a registration or a WebSocket. Janus control state is memory-only — a restart empties the registry and tenants re-register. See [`Caddyfile.minimal`](Caddyfile.minimal) for the operator-facing starting point, [`Caddyfile.example`](Caddyfile.example) for the full capability walkthrough, and [`docs/`](docs/) for the contracts.
 
 This repository is a Go module. Caddy is a dependency, not a git submodule. The `janus` binary is built from [`cmd/janus`](cmd/janus/main.go), which compiles stock Caddy, this module, and the Route 53 DNS provider into one static executable; the module also loads into any custom Caddy build like any other plugin.
 
@@ -73,7 +73,7 @@ needs no infrastructure underneath the app. The
 [performance ledger](docs/20260719-165500-rip-server-performance.md)
 holds every number with raw provenance — sustained hub fan-out is
 ~0.4M deliveries/s, roughly independent of room size, with zero socket
-drops across a config reload). Pushpin proved the edge-held-connection
+drops across a config reload. Pushpin proved the edge-held-connection
 pattern at Fastly scale; the hub is that pattern folded into the
 registry. And Caddy is not a competitor at all: Janus is a Caddy
 module, and every stock directive works unchanged next to it.
@@ -83,8 +83,9 @@ module, and every stock directive works unchanged next to it.
 - **a reverse-proxy configuration language.** There is no parallel
   grammar — capabilities are normal Caddyfile directives with legal
   values, defaults, and hard errors, same as stock Caddy.
-- **a persistent store.** Memory-only by contract: a restart empties
-  the registry and tenants re-register. Nothing is written to disk.
+- **a persistent store.** Janus does not persist registry, session, or
+  hub state; tenants re-register after a restart. Caddy still writes
+  configured certificate storage and log outputs.
 - **a container orchestrator.** Janus never starts, stops, or
   supervises a process. Tenants run themselves; Janus routes to what
   is alive.
@@ -101,8 +102,9 @@ behind Janus in production, unchanged.
 
 ## Requirements
 
-- **Go** — current stable release ([go.dev/dl](https://go.dev/dl/))
-- A `Caddyfile` that loads Janus (repo root)
+- A supported prebuilt platform, or the current stable **Go** release
+  ([go.dev/dl](https://go.dev/dl/)) for source builds
+- A Caddyfile that loads Janus; start with [`Caddyfile.minimal`](Caddyfile.minimal)
 
 ### Install Go (macOS, Homebrew)
 
@@ -141,8 +143,8 @@ go test ./...
 
 `cmd/janus` is the binary's main package: stock Caddy, the Janus module,
 and the Route 53 DNS provider (DNS-01 wildcard certificates), compiled as
-one static executable. go.mod pins every dependency, including chi at
-v5.3.2 — a security pin above the v5.2.5 that Caddy 2.11.4 resolves alone.
+one static executable. `go.mod` pins all dependencies, including explicit
+security-sensitive overrides.
 `janus version`, `-v`, `-V`, and `--version` all report the Janus and Caddy
 versions; every other subcommand is stock Caddy.
 
@@ -195,13 +197,32 @@ curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 
 ### 5. auth
 
-URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `caddy janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: unchanged reloads keep eligible sessions, removing a user or host revokes its sessions after commit, and a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
+URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `janus janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: unchanged reloads keep eligible sessions, removing a user or host revokes its sessions after commit, and a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
 
 ```bash
 ./bin/janus janus-auth-hash                 # mint a version-a passhash (password prompted, never argv)
 curl -s http://127.0.0.1:7600/1.0/auth      # wall counters + session count
 curl -s http://127.0.0.1:7600/1.0/auth/sessions
 ```
+
+### 6. files
+
+Apps register ordered static roots. Janus serves files and same-root
+precompressed sidecars, can fall back to an SPA shell, and can admit a
+host only when its requested site directory exists.
+
+### 7. sendfile
+
+An upstream can return `X-Sendfile` after authorizing a download. Janus
+validates the path and serves the file with range and conditional-request
+support; this response transformation is always available and has no
+configuration toggle.
+
+### 8. browse
+
+Hot registered roots and cold configured roots can expose navigable
+directory listings with embedded or custom themes, bounded renderers,
+and process leases.
 
 ### 9. access log
 
@@ -290,7 +311,10 @@ make install            # build + install -> /usr/local/bin/janus
 
 ## JSON config
 
-The Caddyfile adapts to this JSON shape (all capability keys optional; unset keys cascade global → site → built-in default):
+The Caddyfile adapts to the following partial JSON shape. Site-scoped
+capabilities cascade global → site → built-in default. `control` and `mdns`
+are process-wide; access logging belongs to each HTTP site's `log` config;
+sendfile is always on and has no config key.
 
 ```json
 {
@@ -346,7 +370,7 @@ The Caddyfile adapts to this JSON shape (all capability keys optional; unset key
 | `control_mdns.go` | mDNS control surface (`GET /1.0/mdns`) |
 | `auth.go` | Auth wall: gates, pooled sessions, throttle ladder, CSRF, login doors |
 | `auth_config.go` | `auth` directive: users, gates, parse, cascade, passhash codec, site table |
-| `auth_cmd.go` | `caddy janus-auth-hash` credential minter |
+| `auth_cmd.go` | `janus janus-auth-hash` credential minter |
 | `auth.html` | Embedded login/status page (self-contained; zero external resources) |
 | `control_auth.go` | Auth control surface (`GET /1.0/auth`, session list + revocation) |
 | `access.go` | Pooled access bridge, registration sequence state, bounded event schema |

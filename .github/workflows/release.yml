@@ -123,14 +123,10 @@ jobs:
             chmod 0700 "$install_bin"
             printf 'stale executable\n' > "$install_bin/janus"
             chmod 0755 "$install_bin/janus"
-            # The installer also clears the retired binary name.
-            printf 'stale executable\n' > "$install_bin/caddy-janus"
-            chmod 0755 "$install_bin/caddy-janus"
             BIN="$install_bin" "$RUNNER_TEMP/janus-smoke/$name/install.sh"
             exe="$install_bin/janus"
             [[ -x "$exe" ]]
             cmp "$packaged_exe" "$exe"
-            [[ ! -e "$install_bin/caddy-janus" ]]
             if [[ "${{ matrix.goos }}" == darwin ]]; then
               [[ "$(stat -f '%Lp' "$install_bin")" == 700 ]]
             else

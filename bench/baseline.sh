@@ -4,7 +4,7 @@
 # leg tee'd to $RAW. Discipline and interpretation:
 # docs/20260720-143705-bench-harness.md.
 #
-# Assumes: Janus caddy already running (control at $CONTROL), NO rip
+# Assumes: Janus already running (control at $CONTROL), NO rip
 # manager running — this script owns the manager lifecycle.
 #
 # Env knobs (all optional):
@@ -34,9 +34,9 @@ wants() { [[ " $BENCH_SECTIONS " == *" $1 "* ]] }
 [[ -d $RIP_DIR ]] || die "rip checkout not found at $RIP_DIR (set RIP_DIR)"
 [[ -x $RIP_BIN ]] || die "rip CLI not found at $RIP_BIN (bun install in $RIP_DIR, or set RIP_BIN)"
 command -v oha >/dev/null 2>&1 || die "oha not found on PATH (brew install oha)"
-[[ -x $JANUS_DIR/bin/caddy ]] || die "no caddy binary at $JANUS_DIR/bin/caddy — build it: cd $JANUS_DIR && xcaddy build --with github.com/shreeve/janus=. --output ./bin/caddy"
+[[ -x $JANUS_DIR/bin/janus ]] || die "no Janus binary at $JANUS_DIR/bin/janus — build it: cd $JANUS_DIR && make janus"
 curl -sf --max-time 2 $CONTROL/1.0/health >/dev/null 2>&1 \
-  || die "Janus control plane not answering at $CONTROL/1.0/health — start it: cd $JANUS_DIR && ulimit -n 1048575 && ./bin/caddy run"
+  || die "Janus control plane not answering at $CONTROL/1.0/health — start it: cd $JANUS_DIR && ulimit -n 1048575 && ./bin/janus run"
 
 # Scratch dir: the manager's Bun.build artifact step resolves imports from
 # the app's directory, so @rip-lang/{server,validate} must be resolvable
@@ -107,7 +107,7 @@ say "=== canonical cold-machine baseline $(date) ==="
 say "sections: $BENCH_SECTIONS; legs ${DUR}s"
 say "load: $(uptime)"
 say "rig: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model), $(sysctl -n hw.ncpu) cores, $(($(sysctl -n hw.memsize)/1073741824))GB, $(sw_vers -productVersion)"
-say "bun $(bun --version), $(go version | cut -d' ' -f3), caddy $($JANUS_DIR/bin/caddy version | head -1 | cut -d' ' -f1), oha $(oha --version | cut -d' ' -f2)"
+say "bun $(bun --version), $(go version | cut -d' ' -f3), $($JANUS_DIR/bin/janus version | head -1), oha $(oha --version | cut -d' ' -f2)"
 say "ulimit -n $(ulimit -n); ${DUR}s legs, 5s warmups discarded; HTTPS full stack; RIP_ENV=production"
 say ""
 

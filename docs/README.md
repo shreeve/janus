@@ -1,8 +1,9 @@
 # docs/ — what is authoritative, what is history
 
-Files are timestamped (`YYYYMMDD-HHMMSS-…`) and append-only: each is a
-point-in-time contract or record, never rewritten after review. This
-index says which is which.
+Timestamped files (`YYYYMMDD-HHMMSS-…`) are point-in-time contracts,
+measurements, or design records. This index identifies their role and
+the living tutorials that track the shipped code. Raw measurement files
+are immutable.
 
 ## Contracts (what the code implements against)
 
@@ -44,7 +45,7 @@ plus its runnable artifacts.
 
 | Doc | Role |
 | --- | --- |
-| [`counter/index.md`](counter/index.md) | The realtime counter demo: all four capabilities end to end with a Rip tenant (`app.rip` and `Caddyfile.demo` ship alongside) |
+| [`counter/index.md`](counter/index.md) | The realtime counter demo: ping, control, and hub end to end with a Rip tenant (`app.rip` and `Caddyfile.demo` ship alongside) |
 
 ## Design history (kept, superseded by the contracts above)
 
@@ -53,6 +54,7 @@ plus its runnable artifacts.
 | [`20260718-125236-rip-caddy.html`](20260718-125236-rip-caddy.html) | Original design exploration |
 | [`20260718-125236-rip-caddy-ownership.html`](20260718-125236-rip-caddy-ownership.html) | Ownership-boundary design notes |
 | [`20260718-182420-janus-api-1.0.html`](20260718-182420-janus-api-1.0.html) | `/1.0` API sketch |
+| [`20260722-134812-capability-auth.md`](20260722-134812-capability-auth.md) | Original capability 5 design ledger; superseded by the current auth contract above |
 
 Images (`janus-*.png`, `janus-doorway-mark.svg`) are the project logo,
 mark, and social card.

@@ -28,8 +28,8 @@ Raw result files land flat under `docs/` as
 - A rip checkout with `bun install` run (default `~/Data/Code/rip`;
   override with `RIP_DIR`, or point `RIP_BIN` at a rip CLI directly).
 - `oha` on PATH (`brew install oha`).
-- Janus caddy running with the root `Caddyfile`:
-  `ulimit -n 1048575 && ./bin/caddy run` from the repo root. The
+- Janus running with the root `Caddyfile`:
+  `ulimit -n 1048575 && ./bin/janus run` from the repo root. The
   scripts refuse to start it themselves — they check
   `/1.0/health` and fail with the exact command instead.
 
@@ -45,7 +45,7 @@ HUB_SECTIONS="1" DUR=5 ./bench/hub.sh     # subset, short legs
 HUB_SECTIONS="2" HUB2_CEIL=400 ./bench/hub.sh   # latency legs at a measured ceiling
 ```
 
-`hub.sh` needs only the running caddy (no rip checkout): its fixture
+`hub.sh` needs only the running Janus process (no rip checkout): its fixture
 tenant answers bridge POSTs from a unix socket and heartbeats the app
 itself. Section 2's rate points are 10/50/90% of `HUB2_CEIL` — read the
 ceiling off section 1's output for the same subscriber count first.

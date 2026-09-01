@@ -197,10 +197,10 @@ curl -sk -H "Authorization: Bearer $JANUS_TOKEN" https://127.0.0.1:7601/1.0
 go test ./...
 ./test.sh
 
-./bin/caddy adapt --config Caddyfile
+./bin/janus adapt --config Caddyfile
 # → apps.janus.control includes internal + local
 
-./bin/caddy run
+./bin/janus run
 # log: janus control listening  mode=local  listen=http://127.0.0.1:7600/
 # log: janus control listening  mode=internal  listen=run/janus.sock
 ```

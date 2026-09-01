@@ -119,17 +119,18 @@
 		# with an allow list; login door is exact `{prefix}auth`. One
 		# host-wide `__Host-janus` session; sign in/out once. Longest
 		# prefix wins. Outside every gate is open (strip/421 still apply
-		# when auth is on). Mint credentials with `caddy janus-auth-hash`
+		# when auth is on). Mint credentials with `janus janus-auth-hash`
 		# (argon2id; password prompted, never argv). PERIMETER: guarded
 		# upstreams must bind localhost or unix sockets. Observe/revoke:
 		# GET /1.0/auth, DELETE /1.0/auth/sessions[/{id}]. Catch-alls
 		# need an explicit `auth off` unless you mean to gate them.
 		auth {
 			users {
-				alice adoBxXzvgqIE6iavsfd02vuzcJSC7sVh # caddy janus-auth-hash → paste (version a passhash)
+				alice adoBxXzvgqIE6iavsfd02vuzcJSC7sVh # janus janus-auth-hash → paste (version a passhash)
 			}
 			ttl 8h # host-wide sliding idle; default 8h
-			gate / { # whole site; door /auth
+			gate / {
+				# whole site; door /auth
 				alice
 			}
 		}
@@ -284,7 +285,7 @@ duckui.example.com {
 	janus {
 		auth {
 			users {
-				dave a7kQxZ3mNvB8pR2sT5wY9cH4jL6nF0gK # caddy janus-auth-hash
+				dave a7kQxZ3mNvB8pR2sT5wY9cH4jL6nF0gK # janus janus-auth-hash
 			}
 			ttl 2h # shorter than the 8h default: this door opens a database
 			gate / {

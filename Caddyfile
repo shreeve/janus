@@ -2,7 +2,7 @@
 #
 # *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
 #
-#   ./bin/caddy run
+#   ./bin/janus run
 #
 # 1) ping — primordial; needs nothing else
 #   Global ping ON.
@@ -61,7 +61,7 @@
 #
 # 5) auth — URL-prefix gates for auth-less apps (site-scoped, cascades)
 #   Global auth ON with fixture users + gates (passwords in the block
-#   below; mint with `./bin/caddy janus-auth-hash`). Every site EXCEPT
+#   below; mint with `./bin/janus janus-auth-hash`). Every site EXCEPT
 #   authwall/authcarol opts out with `auth off`. Cascade:
 #   authwall.ripdev.io   → inherits global users + gates
 #   authcarol.ripdev.io  → site auth { … } replaces global (carol only)
@@ -85,27 +85,33 @@
 		control local
 		heartbeat_ttl {$JANUS_HEARTBEAT_TTL:15s}
 		hub # 3) site-scoped default: on (path /hub, origin same)
-		mdns { # 4) process-wide LAN presence
+		mdns {
+			# 4) process-wide LAN presence
 			listen :7680 # dedicated dev/test listener; default (no listen) shares the :80 HTTP server
 		}
-		auth { # 5) site-scoped default: on — fixture credentials (committed on purpose, like certs/)
+		auth {
+			# 5) site-scoped default: on — fixture credentials (committed on purpose, like certs/)
 			users {
 				alice aZoyWD0mfNZH7GZCh3DH9Te1FwAxA0yc # password: sesame-alice
-				bob   aI9eoj7z2M0oTFWY3ai7uQzblQR2spHF # password: sesame-bob
+				bob aI9eoj7z2M0oTFWY3ai7uQzblQR2spHF # password: sesame-bob
 				larry aTsNAccM4EGpfEd4HaZMzNc4KJ63yeD1 # password: sesame-larry
 			}
 			ttl 8h # host-wide sliding idle (default)
-			gate / { # whole site; login door /auth
+			gate / {
+				# whole site; login door /auth
 				alice bob
 			}
-			gate /one/ { # longer prefix wins under /one/
+			gate /one/ {
+				# longer prefix wins under /one/
 				alice larry
 			}
 		}
-		files { # 6) site-scoped default: on; hot registrations carry roots and shell
+		files {
+			# 6) site-scoped default: on; hot registrations carry roots and shell
 			precompressed # transparent .br, .zst, .gz sidecars in Caddy preference order
 		}
-		browse { # 8) navigable roots; embedded theme + bounded fixture renderers
+		browse {
+			# 8) navigable roots; embedded theme + bounded fixture renderers
 			timeout 10s
 			max_output 8MB
 			concurrency 4

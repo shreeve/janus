@@ -81,8 +81,6 @@ trap cleanup_stage EXIT
 trap 'exit 1' HUP INT TERM
 run_as_owner install -m 0755 "$SOURCE" "$STAGE"
 run_as_owner mv -f "$STAGE" "$DEST"
-# Exactly one janus binary lives on PATH.
-run_as_owner rm -f "$DEST_DIR/caddy-janus"
 STAGE=""
 trap - EXIT HUP INT TERM
 

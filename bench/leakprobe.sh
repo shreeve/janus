@@ -4,7 +4,7 @@
 # CUMULATIVE requests: a leak grows with request count; GC steady-state
 # plateaus. Interpretation: docs/20260720-143705-bench-harness.md.
 #
-# Assumes: Janus caddy AND a manager already running (this script only
+# Assumes: Janus and a manager already running (this script only
 # reads the pool — it never starts or stops anything).
 #
 # Env knobs (all optional):
@@ -28,7 +28,7 @@ die() { echo "FATAL: $@" >&2; exit 1 }
 [[ -x $RIP_BIN ]] || die "rip CLI not found at $RIP_BIN (bun install in $RIP_DIR, or set RIP_BIN)"
 command -v oha >/dev/null 2>&1 || die "oha not found on PATH (brew install oha)"
 curl -sf --max-time 2 $CONTROL/1.0/health >/dev/null 2>&1 \
-  || die "Janus control plane not answering at $CONTROL/1.0/health — start caddy first"
+  || die "Janus control plane not answering at $CONTROL/1.0/health — start Janus first"
 
 SOCK=$($RIP_BIN $BENCH/sock.rip $CONTROL) || die "no worker socket at the control plane (is a manager running?)"
 WPID=$(lsof -t "$SOCK" 2>/dev/null | head -1)

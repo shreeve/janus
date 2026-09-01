@@ -5,16 +5,13 @@ Standing rules for anyone (AI or human) working in this repository.
 Janus is a **Caddy module**: cold Caddyfile capabilities + hot `/1.0`
 control API. Registry, data plane, and hub state live in pooled process
 state (`caddy.UsagePool`) — a config reload never drops a registration
-or a WebSocket. Everything is memory-only by contract: a restart
-empties the registry and tenants re-register.
+or a WebSocket. Janus runtime state is memory-only by contract: a
+restart empties the registry and tenants re-register.
 
-**Era: stewardship.** Feature-complete at v1.0.0 — every build-spec
-box ticked; nine capabilities shipped. Ongoing work is fix,
-harden, measure. New behavior arrives as a capability through the
-proven loop: **design contract → adversarial review → revise →
-implement → pin in tests → measure** (mdns, capability 4, is the
-first post-v1.0.0 product of that loop; auth, capability 5, is the
-second).
+**Era: stewardship.** Nine capabilities are shipped. Ongoing work is
+fix, harden, and measure. New behavior arrives as a capability through
+the proven loop: **design contract → adversarial review → revise →
+implement → pin in tests → measure**.
 
 ## The Rules
 
@@ -34,8 +31,8 @@ second).
 
 4. **Capabilities are the unit of product work.** Numbered by landing
    order; the story (ping → control → hub → mdns → auth → files →
-   sendfile → browse → …) never
-   reorders in docs or `test.sh`. A new one starts at "When adding a
+   sendfile → browse → access log) never reorders in docs or `test.sh`.
+   A new one starts at "When adding a
    capability" below — contract doc and adversarial review before code.
 
 5. **Cascade is explicit.**
@@ -46,9 +43,9 @@ second).
      `on`; built-in default when unset everywhere.
    Document **Cascades: yes/no** on every capability page.
 
-6. **Present tense only.** Code and docs state current facts. No
-   "legacy", "previously", "for compat", or speculative "someday"
-   comments.
+6. **Present tense for current truth.** Code, source comments, and living
+   docs state current facts. Timestamped design and measurement records
+   may retain the point-in-time context identified by `docs/README.md`.
 
 7. **Tests are the contract.** Two layers, both required:
    - **`go test ./...`** — idiomatic Go tests for developers building
@@ -88,7 +85,6 @@ second).
 | 7 | **sendfile** | Always-on final upstream `X-Sendfile` transformation: application authorization, Janus validators, ranges, and streaming (cascades: no; configuration: none). |
 | 8 | **browse** | Navigable hot and cold roots, embedded/custom themes, bounded extension renderers, strict leases, cold-host reservations, and redacted status (cascades: yes). |
 | 9 | **access log** | Durable JSON-compatible Caddy encoder plus bounded app-scoped live NDJSON observation (cascades: no; configured by each site's `log`). |
-| 10+ | next | Future capabilities, each through the loop above. |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,
 heartbeat, tls, hub, tenant, mdns, auth, files, sendfile,
@@ -111,14 +107,14 @@ down. Memory-only across restarts — tenants re-register.
 - [`docs/README.md`](docs/README.md) is the index — contracts vs
   measurements vs design history. Start there.
 - Timestamp prefix: `YYYYMMDD-HHMMSS-{name}.md` (or `.html`) under
-  `docs/` only; each file is an append-only point-in-time contract or
-  record.
+  `docs/` only. Dated files are point-in-time contracts or records;
+  raw measurement files are immutable.
 - Runnable demo tutorials live in `docs/<name>/` subdirectories
   (`index.md` + artifacts, e.g. `docs/counter/`).
 - Each capability doc covers order #, what/why, scope, cascade yes/no,
   syntax, examples, hard errors, non-goals.
-- Design HTML = history. Build SPEC + capability pages = what we
-  implement against.
+- Design history is labeled in `docs/README.md`; the build spec and
+  current capability pages define the implementation contract.
 - Root **`Caddyfile`** is the working cold config; **`Caddyfile.minimal`**
   is the operator-facing starting point and **`Caddyfile.example`** the
   full capability walkthrough (both validate standalone).
@@ -137,7 +133,8 @@ make unit              # developer / unit
 make test              # build + unit + acceptance (foreground!)
 
 make janus
-./bin/janus validate   # Caddyfile.minimal / Caddyfile.example: add --config … --adapter caddyfile
+./bin/janus validate --config Caddyfile.minimal --adapter caddyfile
+./bin/janus validate --config Caddyfile.example --adapter caddyfile
 ./bin/janus run
 ```
 
