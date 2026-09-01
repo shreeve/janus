@@ -98,6 +98,11 @@ main() {
   # Linux binds :80/:443 as non-root only with cap_net_bind_service, and the
   # install writes a fresh inode — which silently drops any capability the
   # old binary carried. Capture before, restore after; hint when absent.
+  #
+  # Releases packaged since the cap logic landed carry it in their own
+  # embedded installer, so acting here too would restore twice and print
+  # the hint twice. Only compensate when the archive's installer predates
+  # the logic (no mention of setcap).
   dest="$BIN/$NAME"
   had_caps=
   if [ "$os" = Linux ] && command -v getcap >/dev/null; then
@@ -106,7 +111,7 @@ main() {
 
   bash "$tmp/$NAME-$tag-$plat/install.sh"
 
-  if [ "$os" = Linux ]; then
+  if [ "$os" = Linux ] && ! grep -q setcap "$tmp/$NAME-$tag-$plat/install.sh"; then
     case "$had_caps" in
       *cap_net_bind_service*)
         say "restoring cap_net_bind_service (upgrades drop it with the old inode)"
