@@ -2467,10 +2467,15 @@ case_mdns_reload_teardown() {
 	# Reload with mdns removed: real teardown — the advertiser withdraws
 	# and the front-door port closes; /1.0/mdns answers enabled:false.
 	local stripped="$ROOT/.test-mdns-stripped-caddyfile"
-	local start
-	start="$(grep -n 'mdns { # 4)' "$ROOT/Caddyfile" | cut -d: -f1)"
+	# Locate the block structurally — opener to its closing brace — so the
+	# test survives comment and formatting changes inside the Caddyfile.
+	# (The mdns block nests no braces; the first bare } closes it.)
+	local start end
+	start="$(grep -nE '^[[:space:]]*mdns \{' "$ROOT/Caddyfile" | cut -d: -f1 | head -n1)"
 	ok "-n \"$start\"" "mdns block not found in the root Caddyfile"
-	sed "${start},$((start + 2))d" "$ROOT/Caddyfile" >"$stripped"
+	end="$(awk -v s="$start" 'NR > s && /^[[:space:]]*\}[[:space:]]*$/ { print NR; exit }' "$ROOT/Caddyfile")"
+	ok "-n \"$end\"" "mdns block closing brace not found"
+	sed "${start},${end}d" "$ROOT/Caddyfile" >"$stripped"
 	if grep -qE '^[[:space:]]*mdns' "$stripped"; then
 		echo "failed to strip the mdns block from the reload config" >&2
 		return 1
