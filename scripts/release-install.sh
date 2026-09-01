@@ -13,10 +13,19 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-[[ -f janus && -x janus ]] || {
-  echo "install.sh: janus is missing or not executable" >&2
-  exit 2
-}
+# Color only when stdout is a terminal, and never against NO_COLOR.
+Color_Off='' Red='' Green='' Dim='' Bold_Green='' Bold_White=''
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  Color_Off='\033[0m'
+  Red='\033[0;31m' Green='\033[0;32m' Dim='\033[0;2m'
+  Bold_Green='\033[1;32m' Bold_White='\033[1m'
+fi
+
+info() { printf "${Dim}%s${Color_Off}\n" "$*"; }
+fail() { printf "${Red}error${Color_Off}: %s\n" "$*" >&2; exit 2; }
+tildify() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+
+[[ -f janus && -x janus ]] || fail "janus is missing or not executable"
 
 # System-wide for root (a deploy's systemd unit and setcap keep their path),
 # user-owned for everyone else — the XDG home for user executables.
@@ -33,8 +42,7 @@ as_owner() {
 }
 
 if [[ -e "$BIN" && ! -d "$BIN" ]]; then
-  echo "install.sh: BIN exists but is not a directory: $BIN" >&2
-  exit 2
+  fail "BIN exists but is not a directory: $BIN"
 fi
 if [[ ! -d "$BIN" ]]; then
   # Plain first: a missing parent (a fresh ~/.local) reads as unwritable,
@@ -44,7 +52,7 @@ fi
 DEST_DIR="$(cd "$BIN" && pwd -P)"
 DEST="$DEST_DIR/janus"
 if [[ "$SOURCE" == "$DEST" ]]; then
-  echo "janus already runs in place at $DEST"
+  printf "${Green}janus already runs in place at ${Bold_Green}%s${Color_Off}\n" "$(tildify "$DEST")"
   exit 0
 fi
 # Stage the complete replacement beside the destination, so a copy failure
@@ -84,27 +92,32 @@ run_as_owner mv -f "$STAGE" "$DEST"
 STAGE=""
 trap - EXIT HUP INT TERM
 
+hint_caps=false
 if [[ "$(uname -s)" == Linux ]]; then
   if [[ "$HAD_CAPS" == *cap_net_bind_service* ]]; then
-    echo "restoring cap_net_bind_service (upgrades drop it with the old inode)"
+    info "restoring cap_net_bind_service (upgrades drop it with the old inode)"
     if [[ "$(id -u)" == 0 ]]; then setcap cap_net_bind_service=+ep "$DEST"
     else sudo setcap cap_net_bind_service=+ep "$DEST"; fi
   elif [[ "$(getcap "$DEST" 2>/dev/null || true)" != *cap_net_bind_service* ]]; then
-    echo
-    echo "note: to let janus bind :80/:443 as non-root, run:"
-    echo "  sudo setcap cap_net_bind_service=+ep $DEST"
+    hint_caps=true
   fi
 fi
 
+printf "${Green}janus was installed successfully to ${Bold_Green}%s${Color_Off}\n" "$(tildify "$DEST")"
+
 case ":$PATH:" in
   *":$DEST_DIR:"*)
-    echo "installed janus -> $DEST_DIR"
-    echo "try: janus version"
+    info "Run 'janus version' to get started"
     ;;
   *)
-    echo "installed janus -> $DEST_DIR"
-    echo
-    echo "$DEST_DIR is not on your PATH. Add it:"
-    echo "  echo 'export PATH=\"$DEST_DIR:\$PATH\"' >> ~/.zshrc   # or ~/.bashrc"
+    printf '\n'
+    info "$(tildify "$DEST_DIR") is not on your PATH. Add it:"
+    printf "  ${Bold_White}echo 'export PATH=\"%s:\$PATH\"' >> ~/.zshrc${Color_Off}${Dim}   # or ~/.bashrc${Color_Off}\n" "$DEST_DIR"
     ;;
 esac
+
+if $hint_caps; then
+  printf '\n'
+  info "To let janus bind :80/:443 as non-root, run:"
+  printf "  ${Bold_White}sudo setcap cap_net_bind_service=+ep %s${Color_Off}\n" "$DEST"
+fi
