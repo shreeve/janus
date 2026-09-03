@@ -103,7 +103,7 @@ if [[ "$(uname -s)" == Linux ]]; then
   fi
 fi
 
-printf "${Green}janus was installed successfully to ${Bold_Green}%s${Color_Off}\n" "$(tildify "$DEST")"
+printf "${Green}janus was installed to ${Bold_Green}%s${Color_Off}\n" "$(tildify "$DEST")"
 
 case ":$PATH:" in
   *":$DEST_DIR:"*)

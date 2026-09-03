@@ -15,6 +15,11 @@
 # (systemd unit, setcap) keeps its path. Override either with BIN=...;
 # sudo is used only if the destination dir is root-owned. Windows support
 # comes later.
+#
+# Uninstall the same way — the binary goes; your Caddyfile, service units,
+# and certificates stay:
+#
+#   curl -fsSL .../install.sh | bash -s -- --uninstall
 
 set -euo pipefail
 
@@ -31,10 +36,28 @@ fi
 
 info() { printf "${Dim}%s${Color_Off}\n" "$*"; }
 fail() { printf "${Red}error${Color_Off}: %s\n" "$*" >&2; exit 1; }
+tildify() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+
+# Remove only what install put down — the binary (any capability on it dies
+# with the inode). The Caddyfile, service units, certificates, and state
+# belong to the operator, and an uninstaller that reaches for those is
+# malware with a manual. No network: the filesystem answers what's installed.
+uninstall() {
+  if [ "$(id -u)" = 0 ]; then BIN="${BIN:-/usr/local/bin}"
+  else BIN="${BIN:-$HOME/.local/bin}"; fi
+  [ -e "$BIN/$NAME" ] || fail "$NAME is not installed at $(tildify "$BIN/$NAME") (BIN= if it lives elsewhere; sudo for a system install)"
+  rm -f "$BIN/$NAME" || fail "cannot remove $(tildify "$BIN/$NAME") — re-run under sudo if it was installed system-wide"
+  printf "${Green}$NAME was removed from ${Bold_Green}%s${Color_Off}\n" "$(tildify "$BIN")"
+  info "your Caddyfile, service units, and certificates are untouched"
+}
 
 # Everything lives in main() so a truncated `curl | bash` download can
 # never execute a half-delivered script.
 main() {
+  case "${1:-}" in
+    --uninstall) uninstall; return ;;
+  esac
+
   command -v curl >/dev/null || fail "curl is required"
   command -v tar  >/dev/null || fail "tar is required"
 

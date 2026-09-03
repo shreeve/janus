@@ -270,7 +270,9 @@ checksums, and installs `janus` into `~/.local/bin` (as root:
 curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bash
 ```
 
-Pin a version with `... | bash -s v1.10.1`.
+Pin a version with `... | bash -s v1.10.1`. Uninstall with
+`... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
+units, and certificates stay.
 
 The tagged release workflow publishes five self-contained archives:
 
