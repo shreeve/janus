@@ -142,6 +142,15 @@ main() {
 
   bash "$tmp/$NAME-$tag-$plat/install.sh"
 
+  # The green success line lives in the archive's embedded installer.
+  # An archive packaged before that line exists prints plain — compensate
+  # here, exactly like the setcap block below: only when the embedded
+  # installer has no mention of it, so a newer archive never prints twice.
+  if ! grep -q "was installed" "$tmp/$NAME-$tag-$plat/install.sh"; then
+    printf "${Green}$NAME was installed to ${Bold_Green}%s${Color_Off}\n" \
+      "$(tildify "$BIN/$NAME")"
+  fi
+
   if [ "$os" = Linux ] && ! grep -q setcap "$tmp/$NAME-$tag-$plat/install.sh"; then
     case "$had_caps" in
       *cap_net_bind_service*)
