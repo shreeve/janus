@@ -377,19 +377,29 @@ func TestMarkedBusy503TriesNextUpstream(t *testing.T) {
 
 func TestAllWorkersBusy503RetryAfter(t *testing.T) {
 	dp, reg := newTestDataPlane(t)
+	dp.busyWait = 120 * time.Millisecond
 	b1 := startUnixHTTP(t, busyUpstream(nil))
 	b2 := startUnixHTTP(t, busyUpstream(nil))
 	registerApp(t, reg, "app.test", Upstream{Path: b1}, Upstream{Path: b2})
 
+	started := time.Now()
 	rr, err := doServe(dp, "GET", "app.test", "/", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("want 503 when every worker is busy, got %d", rr.Code)
+	// Workers that stay busy for the whole wait: the hold runs to its
+	// deadline, then the capacity 503 — never the unhealthy one.
+	if held := time.Since(started); held < dp.busyWait {
+		t.Fatalf("want the request held for the busy wait (%v), answered after %v", dp.busyWait, held)
+	}
+	if rr.Code != http.StatusServiceUnavailable || rr.Body.String() != "all workers busy\n" {
+		t.Fatalf("want 503 all workers busy when every worker stays busy, got %d %q", rr.Code, rr.Body.String())
 	}
 	if rr.Header().Get("Retry-After") != retryAfter {
 		t.Fatalf("want Retry-After %q, got %q", retryAfter, rr.Header().Get("Retry-After"))
+	}
+	if n := capacityWaiters(reg, "app.test"); n != 0 {
+		t.Fatalf("waiter left counted after its 503: %d", n)
 	}
 	// Busy workers stay healthy: the next request tries them again.
 	for _, p := range []string{b1, b2} {
@@ -1001,5 +1011,284 @@ func TestInboundXForwardedIsReplacedNotAppended(t *testing.T) {
 	}
 	if got := h.Get("X-Forwarded-Proto"); got == "https" {
 		t.Fatalf("X-Forwarded-Proto should reflect our own hop, got %q", got)
+	}
+}
+
+// --- capacity hold (every selectable worker busy) --------------------------
+
+// startUnixHTTPServer is startUnixHTTP with the server handed back so a test
+// can kill the worker mid-hold.
+func startUnixHTTPServer(t testing.TB, handler http.Handler) (string, *http.Server) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "janus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "u.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: handler}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return sock, srv
+}
+
+// slotUpstream behaves like a c:1 worker: the first request in holds its one
+// slot until release is closed, then answers 200; every request that finds
+// the slot taken bounces a marked busy 503.
+func slotUpstream(name string, release <-chan struct{}, entered chan<- struct{}, bounces *atomic.Int32) http.Handler {
+	slot := make(chan struct{}, 1)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case slot <- struct{}{}:
+		default:
+			bounces.Add(1)
+			w.Header().Set(workerBusyHeader, "1")
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("busy"))
+			return
+		}
+		defer func() { <-slot }()
+		if entered != nil {
+			entered <- struct{}{}
+		}
+		<-release
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("upstream:" + name))
+	})
+}
+
+// capacityWaiters reports how many requests are parked on the app's gate.
+func capacityWaiters(reg *appRegistry, host string) int32 {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	return reg.apps[reg.hosts[host]].capacity.waiters.Load()
+}
+
+func TestAllWorkersBusyHoldsUntilASlotFrees(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	// With the poll parked past the wait, only A's completion can release
+	// B before the deadline; a poll-only wake would surface as B's 503.
+	dp.busyPoll = 10 * time.Second
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var bounces atomic.Int32
+	w1 := startUnixHTTP(t, slotUpstream("w1", release, entered, &bounces))
+	w2 := startUnixHTTP(t, busyUpstream(nil))
+	registerApp(t, reg, "app.test", Upstream{Path: w1}, Upstream{Path: w2})
+
+	// Request A takes w1's only slot and holds it.
+	type result struct {
+		rr  *httptest.ResponseRecorder
+		err error
+	}
+	a := make(chan result, 1)
+	go func() {
+		rr, err := doServe(dp, "GET", "app.test", "/a", "")
+		a <- result{rr, err}
+	}()
+	<-entered
+
+	// Request B finds w1 busy and w2 busy: the fail-fast answer was 503.
+	// It must park instead, and complete on w1 once A releases the slot.
+	b := make(chan result, 1)
+	go func() {
+		rr, err := doServe(dp, "GET", "app.test", "/b", "")
+		b <- result{rr, err}
+	}()
+	waitFor(t, "request B parked on the capacity gate", func() bool {
+		return capacityWaiters(reg, "app.test") == 1
+	})
+	select {
+	case <-b:
+		t.Fatal("request B answered while every worker was busy")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	released := time.Now()
+	close(release)
+	for _, ch := range []chan result{a, b} {
+		res := <-ch
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		if res.rr.Code != http.StatusOK || res.rr.Body.String() != "upstream:w1" {
+			t.Fatalf("want 200 upstream:w1, got %d %q", res.rr.Code, res.rr.Body.String())
+		}
+	}
+	if woke := time.Since(released); woke >= dp.busyWait {
+		t.Fatalf("B took %v after A's release: not woken by the completion", woke)
+	}
+	if bounces.Load() == 0 {
+		t.Fatal("B never bounced off the busy slot: the hold was not exercised")
+	}
+	if n := capacityWaiters(reg, "app.test"); n != 0 {
+		t.Fatalf("waiters still counted after both requests finished: %d", n)
+	}
+}
+
+func TestBusyHoldPollsWhenNoCompletionSignals(t *testing.T) {
+	// A worker that frees without any Janus-side completion (it was busy
+	// with something Janus never proxied): only the poll can notice.
+	dp, reg := newTestDataPlane(t)
+	freeAt := time.Now().Add(20 * time.Millisecond)
+	w := startUnixHTTP(t, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if time.Now().Before(freeAt) {
+			busyUpstream(nil).ServeHTTP(rw, r)
+			return
+		}
+		rw.WriteHeader(http.StatusOK)
+		rw.Write([]byte("upstream:w"))
+	}))
+	registerApp(t, reg, "app.test", Upstream{Path: w})
+
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK || rr.Body.String() != "upstream:w" {
+		t.Fatalf("want 200 after the worker freed, got %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBusyHoldFollowsAPoolSwap(t *testing.T) {
+	// The tenant replaces its workers while a request is parked (an API
+	// edit under watch): the hold must re-select against the new pool.
+	dp, reg := newTestDataPlane(t)
+	old := startUnixHTTP(t, busyUpstream(nil))
+	fresh := startUnixHTTP(t, echoUpstream("w2", nil))
+	id := registerApp(t, reg, "app.test", Upstream{Path: old})
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr, err := doServe(dp, "GET", "app.test", "/", "")
+		if err != nil {
+			t.Error(err)
+		}
+		done <- rr
+	}()
+	waitFor(t, "request parked on the capacity gate", func() bool {
+		return capacityWaiters(reg, "app.test") == 1
+	})
+	if _, err := reg.setUpstreams(id, []Upstream{{Path: fresh}}); err != nil {
+		t.Fatal(err)
+	}
+	rr := <-done
+	if rr.Code != http.StatusOK || rr.Body.String() != "upstream:w2" {
+		t.Fatalf("want 200 from the swapped-in worker, got %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBusyHoldWaiterCapIsImmediate503(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	dp.waiterCap = 1
+	dp.busyWait = 300 * time.Millisecond
+	b := startUnixHTTP(t, busyUpstream(nil))
+	registerApp(t, reg, "app.test", Upstream{Path: b})
+
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr, _ := doServe(dp, "GET", "app.test", "/", "")
+		first <- rr
+	}()
+	waitFor(t, "first request parked", func() bool {
+		return capacityWaiters(reg, "app.test") == 1
+	})
+
+	started := time.Now()
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusServiceUnavailable || rr.Body.String() != "all workers busy\n" {
+		t.Fatalf("want the overflow 503, got %d %q", rr.Code, rr.Body.String())
+	}
+	if took := time.Since(started); took >= dp.busyWait {
+		t.Fatalf("overflow must not wait: took %v", took)
+	}
+	if rr := <-first; rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("parked request past its deadline: want 503, got %d", rr.Code)
+	}
+}
+
+func TestBusyHoldEndsWhenClientLeaves(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	b := startUnixHTTP(t, busyUpstream(nil))
+	registerApp(t, reg, "app.test", Upstream{Path: b})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "http://app.test/", nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	go func() {
+		// Cancel once the request is parked (a deadline guards the loop;
+		// the assertions below fail on their own if it never parks).
+		for until := time.Now().Add(2 * time.Second); time.Now().Before(until); time.Sleep(2 * time.Millisecond) {
+			if capacityWaiters(reg, "app.test") == 1 {
+				break
+			}
+		}
+		cancel()
+	}()
+	started := time.Now()
+	if err := dp.serve(rr, r); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(started); took >= dp.busyWait {
+		t.Fatalf("a departed client held its slot for the whole wait (%v)", took)
+	}
+	if rr.Body.Len() != 0 || rr.Header().Get("Retry-After") != "" {
+		t.Fatalf("nothing should be written to a departed client, got %q", rr.Body.String())
+	}
+	if n := capacityWaiters(reg, "app.test"); n != 0 {
+		t.Fatalf("departed client still counted as a waiter: %d", n)
+	}
+}
+
+func TestBusyHoldKeepsUnhealthyDistinct(t *testing.T) {
+	// The only worker bounces busy, then dies mid-hold. The next
+	// re-selection fails its dial, marks it unhealthy, and the request
+	// gets the logged unhealthy 503 — not the capacity one, and not the
+	// whole busy wait.
+	dp, reg := newTestDataPlane(t)
+	dp.busyWait = time.Second
+	var bounces atomic.Int32
+	b, srv := startUnixHTTPServer(t, busyUpstream(&bounces))
+	registerApp(t, reg, "app.test", Upstream{Path: b})
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	started := time.Now()
+	go func() {
+		rr, err := doServe(dp, "GET", "app.test", "/", "")
+		if err != nil {
+			t.Error(err)
+		}
+		done <- rr
+	}()
+	// The request bounces once, counts itself as a waiter, and re-selects
+	// once more before parking. Kill the worker only after that second
+	// bounce has been answered, so the close hits a parked request rather
+	// than an in-flight bounce (which would read as a worker dying after
+	// the dial — a 502, not the unhealthy 503 under test).
+	waitFor(t, "request parked after its re-selection", func() bool {
+		return capacityWaiters(reg, "app.test") == 1 && bounces.Load() >= 2
+	})
+	time.Sleep(10 * time.Millisecond)
+	srv.Close()
+	rr := <-done
+	if rr.Code != http.StatusServiceUnavailable || rr.Body.String() != "service unavailable\n" {
+		t.Fatalf("want the unhealthy 503, got %d %q", rr.Code, rr.Body.String())
+	}
+	if took := time.Since(started); took >= dp.busyWait {
+		t.Fatalf("a dead pool should not be held for the busy wait: %v", took)
+	}
+	dp.stateMu.RLock()
+	st := dp.state[b]
+	dp.stateMu.RUnlock()
+	if st == nil || !st.unhealthyNow() {
+		t.Fatal("the dead worker was not marked unhealthy")
 	}
 }
