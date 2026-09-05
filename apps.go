@@ -87,6 +87,10 @@ type AppRecord struct {
 	// contend while a worker is selected and charged.
 	selectMu *sync.Mutex
 
+	// capacity is this app's bounded wait for a free worker slot; like
+	// selectMu it is shared by every snapshot and private to the app.
+	capacity *capacityGate
+
 	// siteSuffix is the normalized suffix owned by Site. siteValue is the
 	// request-local label resolved from a pattern or alias. Both stay
 	// internal to the registry snapshot.
@@ -464,7 +468,7 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 	rec := &AppRecord{
 		ID: id, Name: name, Hosts: hosts, Upstreams: append([]Upstream{}, upstreams...),
 		Site: site, Files: files, Bridge: bridgeVal, Lease: lease,
-		selectMu: new(sync.Mutex), siteSuffix: suffix,
+		selectMu: new(sync.Mutex), capacity: newCapacityGate(), siteSuffix: suffix,
 	}
 	if r.access != nil {
 		rec.access = r.access.newState()

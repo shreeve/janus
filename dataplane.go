@@ -38,6 +38,20 @@ const (
 	// defaultUnhealthyWindow is how long a failed upstream stays deselected.
 	defaultUnhealthyWindow = 2 * time.Second
 
+	// defaultBusyWait bounds how long a request whose every selectable
+	// worker bounced a marked busy 503 is held for a slot to free. It
+	// exceeds the Retry-After Janus itself advertises (1s): the hold
+	// absorbs any burst a client retry would have absorbed, and a burst
+	// against a small pool drains in a fraction of it.
+	defaultBusyWait = 2 * time.Second
+
+	// defaultBusyPoll is the backstop re-selection interval for a held
+	// request. Completed proxy attempts are the primary wake; the poll
+	// only covers a slot that freed without one (freed before the request
+	// was counted as a waiter, or by a worker that died mid-response). The
+	// workers' own Retry-After: 0 licenses re-delivery at any time.
+	defaultBusyPoll = 50 * time.Millisecond
+
 	// upstreamDialTimeout bounds one unix-socket dial.
 	upstreamDialTimeout = 3 * time.Second
 
@@ -67,6 +81,8 @@ type dataPlane struct {
 	waiterCap       int
 	maxRings        int
 	unhealthyWindow time.Duration
+	busyWait        time.Duration
+	busyPoll        time.Duration
 
 	// transport pools keep-alive connections per socket path (the socket
 	// path is hex-encoded into the synthetic URL host, so the transport's
@@ -82,9 +98,11 @@ type dataPlane struct {
 	stateMu sync.RWMutex
 	state   map[string]*upstreamState // socket path → health + inflight + proxy
 
-	// selectFallback is used only by direct callers that do not have a
-	// registry-backed AppRecord (principally focused unit tests).
-	selectFallback sync.Mutex
+	// selectFallback and capacityFallback are used only by direct callers
+	// that do not have a registry-backed AppRecord (principally focused
+	// unit tests).
+	selectFallback   sync.Mutex
+	capacityFallback *capacityGate
 
 	mu      sync.Mutex
 	flights map[string]*ringFlight // app id → the one outstanding ring
@@ -110,15 +128,18 @@ func newDataPlane(reg *appRegistry, logger *zap.Logger) *dataPlane {
 		logger = zap.NewNop()
 	}
 	dp := &dataPlane{
-		registry:        reg,
-		logger:          logger,
-		ringTimeout:     defaultRingTimeout,
-		waiterCap:       defaultWaiterCap,
-		maxRings:        defaultMaxRings,
-		unhealthyWindow: defaultUnhealthyWindow,
-		buffers:         newBufferPool(),
-		state:           map[string]*upstreamState{},
-		flights:         map[string]*ringFlight{},
+		registry:         reg,
+		logger:           logger,
+		ringTimeout:      defaultRingTimeout,
+		waiterCap:        defaultWaiterCap,
+		maxRings:         defaultMaxRings,
+		unhealthyWindow:  defaultUnhealthyWindow,
+		busyWait:         defaultBusyWait,
+		busyPoll:         defaultBusyPoll,
+		capacityFallback: newCapacityGate(),
+		buffers:          newBufferPool(),
+		state:            map[string]*upstreamState{},
+		flights:          map[string]*ringFlight{},
 	}
 	dp.transport = &http.Transport{
 		DialContext:         dp.dialUpstream,
@@ -152,7 +173,15 @@ func (dp *dataPlane) serveResolved(w http.ResponseWriter, r *http.Request, host 
 		}
 		bell, isBell := doorbellOf(rec)
 		if !isBell {
-			return dp.proxyWorkers(w, r, rec)
+			next, err := dp.proxyWorkers(w, r, host, rec)
+			if next == nil {
+				return err
+			}
+			// The pool changed shape during a capacity wait (emptied, or
+			// went on-demand behind a doorbell): re-run the table on the
+			// current record.
+			rec = *next
+			continue
 		}
 		if rings >= dp.maxRings {
 			accessFactsOf(r).setClass("janus")
@@ -322,40 +351,188 @@ func (dp *dataPlane) dialUpstream(ctx context.Context, _, addr string) (net.Conn
 	return conn, nil
 }
 
+// capacityGate is one app's bounded wait for worker capacity. A request whose
+// every selectable worker bounced a marked busy 503 counts itself as a waiter
+// and parks until a wake token arrives, the poll fires, its deadline passes,
+// or its client leaves. Every proxy attempt that concludes a request to the
+// app hands out one token — the slot it held is free, and least-conn selection
+// sends the woken request there — at the cost of one atomic load while nobody
+// waits. Waiters are capped so the edge never grows an unbounded queue, and
+// the last waiter out drains unconsumed tokens so they cannot wake a later
+// burst spuriously.
+type capacityGate struct {
+	waiters atomic.Int32
+	wake    chan struct{}
+}
+
+func newCapacityGate() *capacityGate {
+	return &capacityGate{wake: make(chan struct{}, defaultWaiterCap)}
+}
+
+// enter counts one more waiter, or reports the cap already reached.
+func (g *capacityGate) enter(limit int) bool {
+	for {
+		n := g.waiters.Load()
+		if int(n) >= limit {
+			return false
+		}
+		if g.waiters.CompareAndSwap(n, n+1) {
+			return true
+		}
+	}
+}
+
+// leave uncounts a waiter; the last one out drains pending tokens.
+func (g *capacityGate) leave() {
+	if g.waiters.Add(-1) != 0 {
+		return
+	}
+	for {
+		select {
+		case <-g.wake:
+		default:
+			return
+		}
+	}
+}
+
+// signal hands one waiter a wake token. Without waiters nothing happens; a
+// full token buffer drops the token and the poll backstop covers it.
+func (g *capacityGate) signal() {
+	if g.waiters.Load() == 0 {
+		return
+	}
+	select {
+	case g.wake <- struct{}{}:
+	default:
+	}
+}
+
+type capacityOutcome int
+
+const (
+	capacityWoke capacityOutcome = iota
+	capacityTimeout
+	capacityClientGone
+)
+
+// awaitCapacity parks a counted waiter until a wake token, the poll, the
+// deadline, or the client's departure — whichever comes first.
+func (dp *dataPlane) awaitCapacity(ctx context.Context, gate *capacityGate, deadline time.Time) capacityOutcome {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return capacityTimeout
+	}
+	timer := time.NewTimer(min(remaining, dp.busyPoll))
+	defer timer.Stop()
+	select {
+	case <-gate.wake:
+		return capacityWoke
+	case <-timer.C:
+		if !time.Now().Before(deadline) {
+			return capacityTimeout
+		}
+		return capacityWoke
+	case <-ctx.Done():
+		return capacityClientGone
+	}
+}
+
 // proxyWorkers streams the request to a healthy worker (least-conn). A failed
 // dial marks that socket unhealthy and tries the next; when every socket is
-// unhealthy the answer is 503 + Retry-After. 502 is reserved for a dial that
-// succeeded followed by a misbehaving worker.
-func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, rec AppRecord) error {
+// unhealthy the answer is a logged 503 + Retry-After. 502 is reserved for a
+// dial that succeeded followed by a misbehaving worker.
+//
+// A marked busy 503 from every selectable worker is capacity, not failure:
+// the request is held — bounded by busyWait and the per-app waiter cap — and
+// re-selected against the app's current upstreams whenever a proxied request
+// to the app completes or the poll fires, so a burst wider than the pool
+// drains through it instead of failing on first contact. Only replayable
+// requests reach the hold, and a marked 503 means the worker refused the
+// request at its gate before handling it, so delivering it later is never a
+// second delivery whatever its method. Past the deadline or the cap the
+// answer is 503 + Retry-After, unlogged (the access log carries it) and
+// distinct from the unhealthy 503.
+//
+// A non-nil record hands a re-resolved app back to the decision table: during
+// the hold the pool emptied, went behind a doorbell, or the host changed
+// hands. A nil record means the request was answered (or its client left).
+func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, host string, rec AppRecord) (*AppRecord, error) {
 	var tried map[string]bool // allocated lazily: only a retry needs it
 	sawBusy := false
+	gate := rec.capacity
+	if gate == nil {
+		gate = dp.capacityFallback
+	}
+	waiting := false
+	var deadline time.Time
+	defer func() {
+		if waiting {
+			gate.leave()
+		}
+	}()
 	for {
 		path, st, ok := dp.acquireUpstream(rec.Upstreams, tried, rec.selectMu)
-		if !ok {
-			if sawBusy {
-				// Every upstream bounced a marked 503 — capacity, not
-				// failure. Answer 503 + Retry-After without the health
-				// warning (and without the per-request log: under a burst
-				// this is the common path).
-				w.Header().Set("Retry-After", retryAfter)
-				w.Header().Set("Cache-Control", "no-store")
-				accessFactsOf(r).setClass("janus")
-				http.Error(w, "all workers busy", http.StatusServiceUnavailable)
-				return nil
+		if ok {
+			final, busy := dp.proxyOnce(w, r, path, st)
+			if final {
+				gate.signal() // the slot this attempt held is free again
+				return nil, nil
 			}
+			if tried == nil {
+				tried = make(map[string]bool, len(rec.Upstreams))
+			}
+			tried[path] = true
+			sawBusy = sawBusy || busy
+			continue
+		}
+		if !sawBusy {
 			accessFactsOf(r).setClass("janus")
-			return dp.unavailable(w, rec.ID, "all upstreams unhealthy")
+			return nil, dp.unavailable(w, rec.ID, "all upstreams unhealthy")
 		}
-		final, busy := dp.proxyOnce(w, r, path, st)
-		if final {
-			return nil
+		// Every selectable worker bounced this round.
+		if !waiting {
+			if !gate.enter(dp.waiterCap) {
+				return nil, dp.allWorkersBusy(w, r)
+			}
+			waiting = true
+			deadline = time.Now().Add(dp.busyWait)
+			// A slot freed before this request counted as a waiter woke
+			// nobody: re-select once before parking.
+		} else {
+			switch dp.awaitCapacity(r.Context(), gate, deadline) {
+			case capacityTimeout:
+				return nil, dp.allWorkersBusy(w, r)
+			case capacityClientGone:
+				return nil, nil
+			}
+			// Select against the app as it is now: a pool the tenant
+			// swapped mid-hold is where the capacity is.
+			fresh, ok := dp.registry.resolveHost(host)
+			if !ok {
+				accessFactsOf(r).clearOwner()
+				return nil, caddyhttp.Error(http.StatusNotFound,
+					fmt.Errorf("janus: host %q vanished during capacity wait", host))
+			}
+			accessFactsOf(r).setOwner(fresh)
+			if _, bell := doorbellOf(fresh); bell || len(fresh.Upstreams) == 0 || fresh.ID != rec.ID {
+				return &fresh, nil
+			}
+			rec = fresh
 		}
-		if tried == nil {
-			tried = make(map[string]bool, len(rec.Upstreams))
-		}
-		tried[path] = true
-		sawBusy = sawBusy || busy
+		clear(tried)
+		sawBusy = false
 	}
+}
+
+// allWorkersBusy is the capacity 503: Retry-After, no health warning, and no
+// process log line — the access log carries it.
+func (dp *dataPlane) allWorkersBusy(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Retry-After", retryAfter)
+	w.Header().Set("Cache-Control", "no-store")
+	accessFactsOf(r).setClass("janus")
+	http.Error(w, "all workers busy", http.StatusServiceUnavailable)
+	return nil
 }
 
 // acquireUpstream picks the healthy, untried worker socket with the fewest
