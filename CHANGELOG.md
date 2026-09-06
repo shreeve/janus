@@ -1,8 +1,8 @@
 # Janus changelog
 
 Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
-first. Releases before 1.11.0 predate this file; their notes live on the
-[releases page](https://github.com/shreeve/janus/releases).
+first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
+entry; their changes ship in the next tag.
 
 ## 1.11.0 — 2026-09-05
 
@@ -32,3 +32,192 @@ first. Releases before 1.11.0 predate this file; their notes live on the
   predates it.
 - Documents the capacity hold and published concurrency in the pool
   protocol: decision table, flow-control rules, and defaults.
+
+## 1.10.1 — 2026-08-31
+
+- Retires the `caddy` and `caddy-janus` binary names everywhere: the
+  Makefile, installer, release smoke test, bench scripts, and capability
+  docs build and invoke `janus`, and `janus-auth-hash` is documented as a
+  `janus` subcommand.
+- Restores `cap_net_bind_service` once, not twice, when the release
+  archive's embedded installer already carries the logic.
+- Scopes the memory-only claim (Caddy still writes certificate storage and
+  logs) and completes the README's files, sendfile, and browse sections.
+- Locates the mdns block structurally in the acceptance suite instead of
+  by a literal comment.
+
+## 1.10.0 — 2026-08-31
+
+- Pins that inbound `X-Forwarded-*` headers are replaced with Janus's own
+  hop, never appended to.
+- Removes the remaining references to the retired micro-cache.
+
+## 1.9.1 — 2026-08-31
+
+- Fixes the acceptance contract for the cache-free build.
+
+## 1.9.0 — 2026-08-31
+
+- Removes the response micro-cache and request coalescing capability.
+- Adds the `curl | bash` bootstrap installer for macOS and Linux: a user
+  install lands in `~/.local/bin` and root keeps `/usr/local/bin`, so a
+  system deploy keeps its path; never uses sudo to create a directory
+  under `HOME`.
+- Preserves `cap_net_bind_service` across upgrades, hints on fresh Linux
+  installs, hardens the no-release guard, and retries `curl`.
+
+## 1.8.1 — 2026-08-27
+
+- Fixes an aborted config reload wedging the control unix socket. Janus
+  now owns a pooled canonical listener per socket path; each config
+  generation holds only a duplicated descriptor, so an aborted generation
+  cannot disturb the survivor.
+- Adds the acceptance regression: after an aborted reload, later reloads
+  still work and both control listeners answer.
+
+## 1.8.0 — 2026-08-27
+
+- Ships a repo-owned main: `cmd/janus` compiles stock Caddy, the Janus
+  module, and the Route 53 DNS provider (DNS-01 wildcard issuance) into one
+  static `janus` executable, replacing the xcaddy assembly step.
+- Adds `janus version`, reporting the Janus and Caddy versions from the
+  release stamp with a VCS-stamped fallback.
+- Release archives and the installer ship `janus`; docs describe the
+  binary name, build flow, and version surface.
+
+## 1.7.2 — 2026-08-26
+
+- Fixes an identical mdns reload re-probing: the advertiser epoch is kept,
+  so the names on the air never flap.
+- Adds `Caddyfile.minimal` as the starting point and positions
+  `Caddyfile.example` as the capability tour.
+
+## 1.7.0 — 2026-08-26
+
+- Hardens the request path: single host resolution per request, per-app
+  upstream selection, a reload commit seam, host-bound auth sessions, and
+  mdns rollback.
+- Control: rejects unsafe listen URLs and aliased binds, closes listeners
+  idempotently, and force-closes shutdown stragglers.
+- Hub: dispatches outside the membership lock, kicks and closes
+  atomically, fences bridge attachment, and closes a socket whose ping
+  write fails.
+- Access log: validates but never constructs an unobservable event.
+- Gates releases behind the acceptance suite, packages the installer with
+  each archive, and makes the acceptance harness safe to run.
+- Bumps `golang.org/x`, OpenTelemetry, gRPC, and compression dependencies.
+
+## 1.6.8 — 2026-08-26
+
+- Re-cuts 1.6.7 with the release packaging corrected.
+
+## 1.6.7 — 2026-08-26
+
+- Makes the startup unwind portable, and verifies that a failed startup
+  stops serving.
+- Makes the passhash rejection fixture deterministic.
+
+## 1.6.6 — 2026-08-14
+
+- Auth hardening from a security review: the login form posts to its own
+  gate's door (a non-root gate no longer leaks credentials to the
+  upstream), session and CSRF cookies are `SameSite=Strict`, and gate
+  matching folds case so `/ONE/secret` cannot slip past a `/one/` gate.
+- Gives the auth wall light, dark, and system themes with a three-stop
+  toggle.
+- Adds `release.sh`: dev builds locally, tagged releases publish
+  per-platform binaries.
+- Documents auth in front of an app that has none of its own.
+
+## 1.6.4 — 2026-08-10
+
+- Allows remapping aliases beneath the `{site}` pattern; only a true
+  self-alias is rejected.
+
+## 1.6.3 — 2026-08-08
+
+- Treats launchd file-descriptor listeners as the HTTP port for shared
+  mDNS coverage, so the local posture starts under macOS socket activation.
+
+## 1.6.2 — 2026-08-07
+
+- Moves credentials to passhash version `a` with 32-character base62
+  blobs, matching Zift so minted blobs verify in either project; drops the
+  `g1` naming.
+
+## 1.6.1 — 2026-08-05
+
+- Renames the hub's `bridge_path` field to `bridge` and normalizes slashes
+  (`hub`, `/hub`, and `///hub///` all store as `/hub`).
+
+## 1.6.0 — 2026-08-05
+
+- Serves transparent precompressed sidecars for registered files: a
+  same-root `.br`, `.zst`, or `.gz` representation when `Accept-Encoding`
+  matches, with identity fallback and `Vary: Accept-Encoding`, never
+  across roots.
+
+## 1.5.0 — 2026-08-01
+
+- Adds registration-scoped access logs: a JSON-compatible Caddy encoder
+  and bounded per-registration NDJSON streams carrying authoritative
+  completion facts across proxied, file, sendfile, browse, error, and
+  WebSocket responses.
+- Hardens startup, cancellation, trailer, and reload behavior found during
+  access-path certification.
+
+## 1.4.0 — 2026-08-01
+
+- Adds the browse capability: navigable file roots with bounded directory
+  listings, embedded and custom themes, extension renderers, cold and
+  managed root lifetimes, process leases, and explicit `never`,
+  `revalidate`, and `forever` cache policies. The renderer supervisor
+  bounds process-wide concurrency, timeout, output, and descendant cleanup.
+
+## 1.3.0 — 2026-08-01
+
+- Adds the files capability: registered ordered file roots, SPA shells,
+  directory-gated site hosts, and trusted `Rip-Site` context.
+- Adds the sendfile capability: always-on `X-Sendfile` offload for final
+  client-bound upstream responses, with Janus owning validators, ranges,
+  framing, compression compatibility, and streaming while stripping the
+  instruction across every trust boundary.
+- Rewrites auth as URL-prefix gates under a shared users table: one
+  host-wide session, per-gate allow lists, longest-prefix match, and a
+  ladder throttle.
+- Completes the Rip application edge: atomic initial upstreams at
+  registration, direct hub admission for manager-owned browser apps, and
+  redacted LAN launch status with site-alias advertising.
+
+## 1.2.0 — 2026-07-22
+
+- Adds the auth capability: an edge authentication wall for apps that have
+  none of their own, with one reserved `/auth` URL, argon2id credentials
+  minted by `janus-auth-hash`, pooled sessions that survive a reload,
+  per-request site authorization, strip-then-inject `Remote-User`, a
+  runtime `421` on plain-HTTP walls, and the `/1.0/auth` observe-and-revoke
+  surface.
+
+## 1.1.0 — 2026-07-22
+
+- Adds the mdns capability: LAN presence for `janus.local` and per-app
+  `.local` names over multicast DNS, a read-only status front door that
+  shares the `:80` server, and loud logging when an aborted reload leaves
+  the advertiser on the wrong configuration.
+- Adds the README's positioning section.
+
+## 1.0.0 — 2026-07-21
+
+- First release, with four capabilities: ping, control, cache, and hub.
+- Control: the memory-only `/1.0/apps` registry, the pool coordination
+  protocol with Rip Server (doorbell ring, heartbeat TTL reaping,
+  worker-marked `503`s as flow control), and on-demand TLS minting gated by
+  the registry.
+- Cache: a generation-fenced micro-cache with request coalescing (removed
+  in 1.9.0).
+- Hub: edge-terminated WebSocket fan-out with the Bam directive grammar, a
+  tenant bridge, and a publish plane.
+- Ships the cascade configuration model, the operator `Caddyfile.example`,
+  a control TLS knob, the Go testkit behind the acceptance suite, the
+  bench harness with its performance ledger, and the realtime counter
+  tutorial.
