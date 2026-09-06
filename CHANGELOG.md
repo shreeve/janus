@@ -4,6 +4,25 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## Unreleased
+
+- Adds the service verbs: `janus autostart` installs the edge under launchd
+  (macOS) or systemd (Linux) as a login item for a user or a system service
+  for root, running now, at every boot, and again after a crash; `janus
+  autostart off [stop]` removes it. `janus start`, `stop`, and `restart`
+  manage that edge, and restart is how an installed upgrade takes effect.
+  `janus status` reports running or stopped, the supervisor, the binary and
+  version (and whether the binary is newer than the running edge), the
+  Caddyfile and log paths, and how many apps are registered on the control
+  plane, exiting 3 when stopped. The service Caddyfile lives at
+  `~/.config/janus/Caddyfile` (root: `/etc/janus/Caddyfile`) with the
+  control socket, pidfile, and rolling process log under
+  `~/.local/state/janus` (root: `/var/lib/janus`, `/var/log/janus`);
+  `autostart` seeds a runnable one when absent and validates before
+  installing, so a bad config never becomes a restart loop. `start`,
+  `stop`, `reload`, and `validate` default to that Caddyfile, and `run`
+  does when the current directory has none.
+
 ## 1.11.1 — 2026-09-05
 
 - Makes `janus help` and every subcommand's help name `janus` as the

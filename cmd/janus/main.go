@@ -64,12 +64,23 @@ The janus binary is stock Caddy compiled together with the Janus module and
 the Route 53 DNS provider as one executable. Every Caddy command is here
 under the janus name; there is no separate caddy command on a Janus host.
 
-To run Janus, use:
+To run Janus as the host's edge, use:
 
-	- 'janus run' to run Janus in the foreground (recommended).
-	- 'janus start' to start Janus in the background; only do this
-	  if you will be keeping the terminal window open until you run
-	  'janus stop' to close the server.
+	- 'janus autostart' to install it as a service: running now, at every
+	  boot, and again after a crash. 'janus autostart off' removes it.
+	- 'janus start', 'janus stop', 'janus restart' to manage that edge;
+	  restart is how an installed upgrade takes effect.
+	- 'janus reload' to apply an edited Caddyfile without a restart.
+	- 'janus status' to see what is running, under what, and how many
+	  apps are registered.
+
+The service Caddyfile lives at ~/.config/janus/Caddyfile for a user and
+/etc/janus/Caddyfile for root; the control socket, pidfile, and log live
+under ~/.local/state/janus (root: /var/lib/janus, /var/log/janus). Those
+verbs default to that Caddyfile when it exists.
+
+For a one-off, 'janus run' runs Janus in the foreground with a Caddyfile
+from the current directory or --config.
 
 Configuration is an ordinary Caddyfile (see
 https://caddyserver.com/docs/caddyfile) with a global janus block for the
@@ -98,10 +109,11 @@ The remaining commands are Caddy's own; Caddy's command-line reference
 documents them in full: https://caddyserver.com/docs/command-line
 `
 
-const rootExample = `  $ janus run
-  $ janus run --config Caddyfile
-  $ janus reload --config Caddyfile
-  $ janus stop`
+const rootExample = `  $ janus autostart
+  $ janus status
+  $ janus reload
+  $ janus restart
+  $ janus run --config Caddyfile`
 
 const helpFooter = `Janus documentation: https://github.com/shreeve/janus
 Caddy's command-line reference (these commands, in full):
@@ -128,8 +140,17 @@ func newRootCommand() *cobra.Command {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	byName := map[string]*cobra.Command{}
 	for _, name := range names {
-		root.AddCommand(toCobra(registered[name]))
+		cmd := toCobra(registered[name])
+		byName[name] = cmd
+		root.AddCommand(cmd)
+	}
+	// The service verbs: Caddy's start/stop/reload/run/validate learn the
+	// service's Caddyfile and supervisor, and restart/autostart/status join
+	// them.
+	for _, cmd := range serviceCommands(byName["run"], byName["start"], byName["stop"], byName["reload"], byName["validate"]) {
+		root.AddCommand(cmd)
 	}
 	root.AddCommand(manpageCommand())
 	// cobra supplies the completion command, generated for a root named
