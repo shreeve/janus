@@ -245,7 +245,7 @@ make janus        # go build ./cmd/janus -> bin/janus
 From anywhere, against a published version:
 
 ```bash
-go install github.com/shreeve/janus/cmd/janus@v1.11.0
+go install github.com/shreeve/janus/cmd/janus@v1.11.1
 ```
 
 Janus also remains a plain Caddy module: builders that assemble their own
@@ -275,7 +275,7 @@ checksums, and installs `janus` into `~/.local/bin` (as root:
 curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bash
 ```
 
-Pin a version with `... | bash -s v1.11.0`. Uninstall with
+Pin a version with `... | bash -s v1.11.1`. Uninstall with
 `... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
 units, and certificates stay.
 

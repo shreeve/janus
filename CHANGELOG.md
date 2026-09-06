@@ -4,6 +4,19 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.11.1 — 2026-09-05
+
+- Makes `janus help` and every subcommand's help name `janus` as the
+  command and Janus as the process. The binary now owns its command tree:
+  a Janus description and examples, Caddy's registered commands with
+  their help text made accurate, a manpage command titled Janus, and
+  shell completion generated for a root named `janus`. Caddy's own nouns
+  stay where they are accurate (Caddyfile, Caddy's native JSON, Caddy
+  modules, caddyserver.com links), and the help footer links both the
+  Janus repository and Caddy's command-line reference.
+- Fixes a timing race in the release smoke test that could kill the
+  binary with SIGPIPE under `grep -q` and fail a platform build.
+
 ## 1.11.0 — 2026-09-05
 
 - Holds a request whose every worker is busy instead of answering `503` on
