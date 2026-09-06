@@ -3943,10 +3943,10 @@ test "origin same rejects before any bridge; any admits" case_hub_origin_policy
 test "hub claims upgrades only; hub-off site never intercepts" case_hub_interception_scope
 test "publish plane: 400 positioned / 404 / 409" case_hub_publish_plane_errors
 test "publish * kick: frame, close 1000, close bridge" case_hub_publish_kick
-test "caddy reload: socket, membership, fan-out survive" case_hub_caddy_reload_persistence
+test "janus reload: socket, membership, fan-out survive" case_hub_caddy_reload_persistence
 test "handshake snapshot over 32KiB → 431" case_hub_bridge_snapshot_cap
 test "snapshot exposes opaque handles, never raw ids" case_hub_snapshot_opacity
-test "parse rejections: every hub hard error fails caddy adapt" case_hub_parse_rejections
+test "parse rejections: every hub hard error fails janus adapt" case_hub_parse_rejections
 
 group "tenant"
 test "real manager registers on /1.0" case_tenant_register
@@ -3972,7 +3972,7 @@ test "TTL reap withdraws" case_mdns_reap_withdraws
 test "reload no-flap: set identical, counters unmoved" case_mdns_reload_no_flap
 test "reload teardown: enabled:false, port closed, restore returns" case_mdns_reload_teardown
 test "canonical present: /1.0/mdns + status.json + probe script" case_mdns_canonical_present
-test "parse rejections: every mdns hard error fails caddy adapt" case_mdns_parse_rejections
+test "parse rejections: every mdns hard error fails janus adapt" case_mdns_parse_rejections
 
 group "auth"
 test "register app + recording upstream, /1.0/auth answers" case_auth_setup
@@ -3995,8 +3995,8 @@ test "reload revokes the removed user, keeps the rest" case_auth_reload_revokes_
 test "hot surface: list, revoke one, wipe all" case_auth_hot_revoke
 test "janus-auth-hash mints; minted cred opens a wall; plain HTTP → 421" case_auth_minter_and_dead_wall
 test "restart wipes every session" case_auth_restart_wipes
-test "zero-users lockout fails caddy validate" case_auth_zero_users_lockout
-test "parse rejections: every auth hard error fails caddy adapt" case_auth_parse_rejections
+test "zero-users lockout fails janus validate" case_auth_zero_users_lockout
+test "parse rejections: every auth hard error fails janus adapt" case_auth_parse_rejections
 stop_auth_fixtures
 
 group "files"
