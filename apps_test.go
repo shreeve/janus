@@ -225,6 +225,9 @@ func TestValidateUpstreamsDoorbellSoleEntry(t *testing.T) {
 		{[]Upstream{{Path: "/run/bell.sock", Doorbell: true}, {Path: "/run/a.sock"}}, false},                // mixed
 		{[]Upstream{{Path: "/run/a.sock"}, {Path: "/run/bell.sock", Doorbell: true}}, false},                // mixed
 		{[]Upstream{{Path: "/run/b1.sock", Doorbell: true}, {Path: "/run/b2.sock", Doorbell: true}}, false}, // two doorbells
+		{[]Upstream{{Path: "/run/a.sock", Concurrency: 1}, {Path: "/run/b.sock", Concurrency: 4}}, true},    // published caps
+		{[]Upstream{{Path: "/run/a.sock", Concurrency: -1}}, false},                                         // negative cap
+		{[]Upstream{{Path: "/run/bell.sock", Doorbell: true, Concurrency: 1}}, false},                       // cap on a doorbell
 		{[]Upstream{{Path: ""}}, false},                                                                     // empty path
 		{[]Upstream{{Path: "/run/a.sock"}, {Path: "/run/a.sock"}}, false},                                   // duplicate path
 	}

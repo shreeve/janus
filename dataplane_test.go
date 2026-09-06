@@ -487,7 +487,7 @@ func TestAcquireUpstreamLeastConn(t *testing.T) {
 	dp.state["a"] = stateWithInflight(2)
 	dp.state["b"] = stateWithInflight(1)
 
-	path, st, ok := dp.acquireUpstream(ups, nil, nil)
+	path, st, ok, _ := dp.acquireUpstream(ups, nil, nil)
 	if !ok || path != "b" {
 		t.Fatalf("want b (least conn), got %q ok=%v", path, ok)
 	}
@@ -503,19 +503,19 @@ func TestAcquireUpstreamLeastConn(t *testing.T) {
 
 	// Unhealthy entries are skipped even when least loaded.
 	dp.markUnhealthy(dp.state["b"])
-	path, _, ok = dp.acquireUpstream(ups, nil, nil)
+	path, _, ok, _ = dp.acquireUpstream(ups, nil, nil)
 	if !ok || path != "a" {
 		t.Fatalf("want a (b unhealthy), got %q ok=%v", path, ok)
 	}
 
 	// Tried entries are skipped.
-	_, _, ok = dp.acquireUpstream(ups, map[string]bool{"a": true, "b": true}, nil)
+	_, _, ok, _ = dp.acquireUpstream(ups, map[string]bool{"a": true, "b": true}, nil)
 	if ok {
 		t.Fatal("acquired an already-tried upstream")
 	}
 
 	// Doorbells are never acquired.
-	_, _, ok = dp.acquireUpstream([]Upstream{{Path: "bell", Doorbell: true}}, nil, nil)
+	_, _, ok, _ = dp.acquireUpstream([]Upstream{{Path: "bell", Doorbell: true}}, nil, nil)
 	if ok {
 		t.Fatal("acquired a doorbell as a worker")
 	}
@@ -526,7 +526,7 @@ func TestAcquireUpstreamTieBreakUniform(t *testing.T) {
 	ups := []Upstream{{Path: "a"}, {Path: "b"}, {Path: "c"}}
 	picks := map[string]int{}
 	for range 300 {
-		path, st, ok := dp.acquireUpstream(ups, nil, nil)
+		path, st, ok, _ := dp.acquireUpstream(ups, nil, nil)
 		if !ok {
 			t.Fatal("acquire failed on all-healthy ties")
 		}
@@ -548,7 +548,7 @@ func TestAcquireUpstreamSelectionIsPerApp(t *testing.T) {
 	blockedApp.Lock()
 	blockedDone := make(chan struct{})
 	go func() {
-		_, st, ok := dp.acquireUpstream([]Upstream{{Path: "blocked"}}, nil, blockedApp)
+		_, st, ok, _ := dp.acquireUpstream([]Upstream{{Path: "blocked"}}, nil, blockedApp)
 		if ok {
 			st.inflight.Add(-1)
 		}
@@ -561,7 +561,7 @@ func TestAcquireUpstreamSelectionIsPerApp(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_, st, ok := dp.acquireUpstream([]Upstream{{Path: "other"}}, nil, otherApp)
+		_, st, ok, _ := dp.acquireUpstream([]Upstream{{Path: "other"}}, nil, otherApp)
 		if ok {
 			st.inflight.Add(-1)
 		}
@@ -1354,5 +1354,137 @@ func TestBusyHoldWakesWhenWorkerDiesMidResponse(t *testing.T) {
 	}
 	if rr.Code != http.StatusServiceUnavailable || rr.Body.String() != "service unavailable\n" {
 		t.Fatalf("want the unhealthy 503 after the pool died, got %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+// --- published concurrency ---------------------------------------------------
+
+func TestAcquireUpstreamSkipsSocketAtPublishedCap(t *testing.T) {
+	dp, _ := newTestDataPlane(t)
+	ups := []Upstream{{Path: "a", Concurrency: 2}, {Path: "b", Concurrency: 2}}
+	dp.state["a"] = stateWithInflight(2) // full
+	dp.state["b"] = stateWithInflight(1) // one slot left
+
+	path, st, ok, atCap := dp.acquireUpstream(ups, nil, nil)
+	if !ok || path != "b" {
+		t.Fatalf("want b (a is at its cap), got %q ok=%v", path, ok)
+	}
+	if !atCap {
+		t.Fatal("a was passed over for capacity but atCap was not reported")
+	}
+	st.inflight.Add(-1)
+
+	// Both full: nothing selectable, and the reason is capacity, not health.
+	dp.state["b"].inflight.Store(2)
+	_, _, ok, atCap = dp.acquireUpstream(ups, nil, nil)
+	if ok || !atCap {
+		t.Fatalf("want no selection with atCap=true when every socket is full, got ok=%v atCap=%v", ok, atCap)
+	}
+
+	// Unknown cap (zero) never skips: the bounce is how Janus learns.
+	_, _, ok, atCap = dp.acquireUpstream([]Upstream{{Path: "a"}}, nil, nil)
+	if !ok || atCap {
+		t.Fatalf("an upstream with no published cap must stay selectable, got ok=%v atCap=%v", ok, atCap)
+	}
+	// A socket never touched has no state and no load: selectable.
+	_, _, ok, _ = dp.acquireUpstream([]Upstream{{Path: "fresh", Concurrency: 1}}, nil, nil)
+	if !ok {
+		t.Fatal("a fresh socket with a published cap must be selectable")
+	}
+}
+
+func TestPublishedCapRoutesAroundSaturatedWorkerWithoutDialing(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	var fullHits atomic.Int32
+	full := startUnixHTTP(t, echoUpstream("full", &fullHits))
+	free := startUnixHTTP(t, echoUpstream("free", nil))
+	registerApp(t, reg, "app.test",
+		Upstream{Path: full, Concurrency: 1}, Upstream{Path: free, Concurrency: 1})
+	// The first worker is at its published cap; least-conn alone would
+	// still consider it (and on main it would be dialed and bounce).
+	dp.state[full] = stateWithInflight(1)
+
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK || rr.Body.String() != "upstream:free" {
+		t.Fatalf("want 200 from the worker with a free slot, got %d %q", rr.Code, rr.Body.String())
+	}
+	if fullHits.Load() != 0 {
+		t.Fatalf("the saturated worker was dialed %d time(s); the cap should have skipped it", fullHits.Load())
+	}
+}
+
+func TestPublishedCapHoldsWithoutDialing(t *testing.T) {
+	// One worker, c=1, its slot taken by request A. Request B must park
+	// on the capacity gate without ever reaching the worker, then land
+	// on it when A's completion frees the slot.
+	dp, reg := newTestDataPlane(t)
+	dp.busyPoll = 10 * time.Second
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var bounces atomic.Int32
+	w := startUnixHTTP(t, slotUpstream("w", release, entered, &bounces))
+	registerApp(t, reg, "app.test", Upstream{Path: w, Concurrency: 1})
+
+	type result struct {
+		rr  *httptest.ResponseRecorder
+		err error
+	}
+	a := make(chan result, 1)
+	go func() {
+		rr, err := doServe(dp, "GET", "app.test", "/a", "")
+		a <- result{rr, err}
+	}()
+	<-entered
+
+	b := make(chan result, 1)
+	go func() {
+		rr, err := doServe(dp, "GET", "app.test", "/b", "")
+		b <- result{rr, err}
+	}()
+	waitFor(t, "request B parked on the capacity gate", func() bool {
+		return capacityWaiters(reg, "app.test") == 1
+	})
+	select {
+	case <-b:
+		t.Fatal("request B answered while the only slot was taken")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	released := time.Now()
+	close(release)
+	for _, ch := range []chan result{a, b} {
+		res := <-ch
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		if res.rr.Code != http.StatusOK || res.rr.Body.String() != "upstream:w" {
+			t.Fatalf("want 200 upstream:w, got %d %q", res.rr.Code, res.rr.Body.String())
+		}
+	}
+	if woke := time.Since(released); woke >= dp.busyWait {
+		t.Fatalf("B took %v after A's release: not woken by the completion", woke)
+	}
+	if bounces.Load() != 0 {
+		t.Fatalf("the worker bounced %d request(s); with the cap published it should never have been dialed while full", bounces.Load())
+	}
+	if n := capacityWaiters(reg, "app.test"); n != 0 {
+		t.Fatalf("waiters still counted after both requests finished: %d", n)
+	}
+}
+
+func TestPublishedCapSurvivesTheControlPlane(t *testing.T) {
+	// The field round-trips through the registry: a PUT that names caps
+	// is what the data plane selects against.
+	_, reg := newTestDataPlane(t)
+	id := registerApp(t, reg, "app.test", Upstream{Path: "/run/a.sock", Concurrency: 3})
+	rec, ok := reg.resolveHost("app.test")
+	if !ok || len(rec.Upstreams) != 1 || rec.Upstreams[0].Concurrency != 3 {
+		t.Fatalf("published concurrency did not survive the registry: %+v", rec.Upstreams)
+	}
+	if _, err := reg.setUpstreams(id, []Upstream{{Path: "/run/a.sock", Concurrency: -2}}); err == nil {
+		t.Fatal("a negative concurrency was accepted")
 	}
 }
