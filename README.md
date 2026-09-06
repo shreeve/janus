@@ -245,7 +245,7 @@ make janus        # go build ./cmd/janus -> bin/janus
 From anywhere, against a published version:
 
 ```bash
-go install github.com/shreeve/janus/cmd/janus@v1.10.1
+go install github.com/shreeve/janus/cmd/janus@v1.11.0
 ```
 
 Janus also remains a plain Caddy module: builders that assemble their own
@@ -270,7 +270,7 @@ checksums, and installs `janus` into `~/.local/bin` (as root:
 curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bash
 ```
 
-Pin a version with `... | bash -s v1.10.1`. Uninstall with
+Pin a version with `... | bash -s v1.11.0`. Uninstall with
 `... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
 units, and certificates stay.
 
@@ -295,6 +295,8 @@ leaves configuration in the archive rather than overwriting a live Caddyfile.
 The release's `janus-<tag>-checksums.txt` verifies every archive.
 (Debian packages the unrelated WebRTC gateway janus-gateway as `janus`;
 on a host running both, install this binary under a different `BIN`.)
+
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 Release builds run on native GitHub runners and compile from the pushed tag,
 so `janus version` on a downloaded binary reports the exact Janus and Caddy
