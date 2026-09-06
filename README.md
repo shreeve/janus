@@ -245,7 +245,7 @@ make janus        # go build ./cmd/janus -> bin/janus
 From anywhere, against a published version:
 
 ```bash
-go install github.com/shreeve/janus/cmd/janus@v1.11.1
+go install github.com/shreeve/janus/cmd/janus@v1.12.0
 ```
 
 Janus also remains a plain Caddy module: builders that assemble their own
@@ -340,7 +340,7 @@ curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bas
 Then `janus autostart` makes it the host's edge
 ([Running as a service](#running-as-a-service)).
 
-Pin a version with `... | bash -s v1.11.1`. Uninstall with
+Pin a version with `... | bash -s v1.12.0`. Uninstall with
 `... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
 units, and certificates stay.
 
