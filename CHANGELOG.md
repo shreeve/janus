@@ -4,7 +4,7 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
-## Unreleased
+## 1.12.0 — 2026-09-06
 
 - Adds the service verbs: `janus autostart` installs the edge under launchd
   (macOS) or systemd (Linux) as a login item for a user or a system service
