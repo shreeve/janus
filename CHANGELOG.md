@@ -4,6 +4,29 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.12.1 — 2026-09-06
+
+- Service verbs, hardened. `autostart` says what it does: a user's edge
+  starts at login (root's at boot) and, on Linux, `autostart` enables
+  lingering so it survives logout. The systemd user unit no longer orders
+  itself after `default.target`, an ordering cycle that dropped its start
+  at login. `start` after a clean stop replaces the job launchd still
+  holds, so a rewritten item is what runs. The seed puts Caddy's admin API
+  on a socket under the state directory, and `status` identifies its edge
+  by that socket rather than by whoever answers on port 7600, so `stop`,
+  `reload`, and `restart` can never reach another Caddy on the host.
+  `restart` validates the Caddyfile before stopping anything. `stop` when
+  nothing runs is a quiet no-op; `reload` says so. A bare `start` with no
+  Caddyfile is refused instead of starting an empty Caddy. Stale pidfiles
+  (a crash, a reused pid) are recognized and removed. `autostart --config`
+  is gone: the service Caddyfile lives in one place, and the sites
+  directory beside it is where variation goes. An env file beside the
+  Caddyfile reaches the edge at start. The item's PATH carries only
+  absolute entries, and relocated XDG roots follow the edge. A root
+  install refuses a binary another user can change. `status --json`
+  reports `control` and `apps` only when the control plane answered, and
+  splits the version into `janus` and `caddy`.
+
 ## 1.12.0 — 2026-09-06
 
 - Adds the service verbs: `janus autostart` installs the edge under launchd
