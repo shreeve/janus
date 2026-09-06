@@ -60,6 +60,14 @@ type Upstream struct {
 	// be the only entry in the list. Phase 3 stores and validates the
 	// flag; ringing is data-plane behavior (Phase 4).
 	Doorbell bool `json:"doorbell,omitempty"`
+
+	// Concurrency is the worker's own request cap — the same number its
+	// gate enforces with a marked busy 503. Zero means unknown, and the
+	// data plane learns the cap the old way, by bouncing. When published,
+	// selection skips a socket whose in-flight count has reached it, so
+	// a saturated worker is never dialed only to refuse. Meaningless on a
+	// doorbell entry, which is never selected as a worker.
+	Concurrency int `json:"concurrency,omitempty"`
 }
 
 // AppRecord is one registered app in the hot registry.
@@ -264,8 +272,14 @@ func validateUpstreams(ups []Upstream) error {
 			return errBadRequest("duplicate upstream path %q", u.Path)
 		}
 		seen[u.Path] = true
+		if u.Concurrency < 0 {
+			return errBadRequest("upstream %q concurrency must not be negative, got %d", u.Path, u.Concurrency)
+		}
 		if u.Doorbell {
 			doorbells++
+			if u.Concurrency != 0 {
+				return errBadRequest("doorbell %q carries no concurrency (it is never selected as a worker)", u.Path)
+			}
 		}
 	}
 	if doorbells > 1 {

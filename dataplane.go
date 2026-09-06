@@ -459,12 +459,15 @@ func (dp *dataPlane) awaitCapacity(ctx context.Context, gate *capacityGate, dead
 // the request is held — bounded by busyWait and the per-app waiter cap — and
 // re-selected against the app's current upstreams whenever a proxied request
 // to the app completes or the poll fires, so a burst wider than the pool
-// drains through it instead of failing on first contact. Only replayable
-// requests reach the hold, and a marked 503 means the worker refused the
-// request at its gate before handling it, so delivering it later is never a
-// second delivery whatever its method. Past the deadline or the cap the
-// answer is 503 + Retry-After, unlogged (the access log carries it) and
-// distinct from the unhealthy 503.
+// drains through it instead of failing on first contact. A worker whose
+// published concurrency the in-flight count has reached is capacity too, and
+// is held for without being dialed at all: with the cap known, the bounce
+// becomes the fallback rather than the way Janus learns a pool is full. Only
+// replayable requests reach the hold, and a marked 503 means the worker
+// refused the request at its gate before handling it, so delivering it later
+// is never a second delivery whatever its method. Past the deadline or the
+// cap the answer is 503 + Retry-After, unlogged (the access log carries it)
+// and distinct from the unhealthy 503.
 //
 // A non-nil record hands a re-resolved app back to the decision table: during
 // the hold the pool emptied, went behind a doorbell, or the host changed
@@ -494,7 +497,7 @@ func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, host s
 		}
 	}()
 	for {
-		path, st, ok := dp.acquireUpstream(rec.Upstreams, tried, rec.selectMu)
+		path, st, ok, atCap := dp.acquireUpstream(rec.Upstreams, tried, rec.selectMu)
 		if ok {
 			concluded = true
 			final, busy := dp.proxyOnce(w, r, path, st)
@@ -514,11 +517,12 @@ func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, host s
 			}
 			continue
 		}
-		if !sawBusy {
+		if !sawBusy && !atCap {
 			accessFactsOf(r).setClass("janus")
 			return nil, dp.unavailable(w, rec.ID, "all upstreams unhealthy")
 		}
-		// Every selectable worker bounced this round.
+		// Every selectable worker bounced this round, or sits at its
+		// published cap: capacity either way.
 		if !waiting {
 			if !gate.enter(dp.waiterCap) {
 				return nil, dp.allWorkersBusy(w, r)
@@ -569,7 +573,14 @@ func (dp *dataPlane) allWorkersBusy(w http.ResponseWriter, r *http.Request) erro
 // returns its state — the proxy, the lock-free release, and health marking
 // all ride the returned pointer. Selection is serialized per app so unrelated
 // tenants do not contend with one another.
-func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool, selection *sync.Mutex) (string, *upstreamState, bool) {
+//
+// A socket with a published concurrency is skipped once its in-flight count
+// has reached it; atCap reports that at least one healthy socket was passed
+// over for that reason, so a caller that finds nothing selectable can tell
+// a full pool (hold) from a dead one (unhealthy). Janus charges at selection
+// and releases when the response copy ends, so its count never runs below
+// the worker's own, and a skipped socket really would have bounced.
+func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool, selection *sync.Mutex) (path string, st *upstreamState, ok, atCap bool) {
 	now := time.Now().UnixNano()
 	if selection == nil {
 		selection = &dp.selectFallback
@@ -594,6 +605,10 @@ func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool, sele
 				continue
 			}
 			inflight = st.inflight.Load()
+			if u.Concurrency > 0 && inflight >= int64(u.Concurrency) {
+				atCap = true
+				continue
+			}
 		}
 		switch {
 		case bestIdx == -1 || inflight < best:
@@ -615,15 +630,15 @@ func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool, sele
 	if bestSt != nil && bestSt.proxy != nil {
 		bestSt.inflight.Add(1)
 		dp.stateMu.RUnlock()
-		return ups[bestIdx].Path, bestSt, true
+		return ups[bestIdx].Path, bestSt, true, atCap
 	}
 	dp.stateMu.RUnlock()
 	if bestIdx == -1 {
-		return "", nil, false
+		return "", nil, false, atCap
 	}
-	path := ups[bestIdx].Path
+	path = ups[bestIdx].Path
 	dp.stateMu.Lock()
-	st := dp.state[path]
+	st = dp.state[path]
 	if st == nil {
 		st = &upstreamState{}
 		dp.state[path] = st
@@ -633,7 +648,7 @@ func (dp *dataPlane) acquireUpstream(ups []Upstream, tried map[string]bool, sele
 	}
 	dp.stateMu.Unlock()
 	st.inflight.Add(1)
-	return path, st, true
+	return path, st, true, atCap
 }
 
 // markUnhealthy deselects the upstream for the unhealthy window. A plain
