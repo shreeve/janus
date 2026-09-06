@@ -362,9 +362,11 @@ directory, and log, and the control endpoint with how many apps are
 registered on it.
 
 Exits 3 when the edge is not running. --json prints the same as one
-object: running, pid, uptime, supervisor, autostart, loaded, binary,
-version, janus, caddy, binary_newer, config, sites, log, control, apps
-(present only when control answered).
+object, plus the service's paths for tools that write site files or
+register with the edge: running, pid, uptime, supervisor, autostart,
+loaded, binary, version, janus, caddy, binary_newer, config, sites, env,
+state, socket (the control socket), admin (Caddy's admin socket), log,
+and control with apps (present only when control answered).
 `,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -707,13 +709,17 @@ type edgeStatus struct {
 	BinaryNewer bool   `json:"binary_newer"`
 	Config      string `json:"config"`
 	Sites       string `json:"sites"`
+	Env         string `json:"env"`
+	State       string `json:"state"`
+	Socket      string `json:"socket"` // control internal socket
+	Admin       string `json:"admin"`  // Caddy admin socket
 	Log         string `json:"log"`
 	Control     string `json:"control,omitempty"`
 	Apps        *int   `json:"apps,omitempty"` // only when control answered
 }
 
 func gatherStatus(p servicePaths) edgeStatus {
-	st := edgeStatus{Config: p.config, Sites: p.sites, Log: p.log, Version: versionLine(), Janus: janusVersion(), Caddy: caddyVersion()}
+	st := edgeStatus{Config: p.config, Sites: p.sites, Env: p.env, State: p.state, Socket: p.sock, Admin: p.admin, Log: p.log, Version: versionLine(), Janus: janusVersion(), Caddy: caddyVersion()}
 	st.Binary, _ = os.Executable()
 	if item := itemFor(p); item != nil {
 		st.Autostart = item.registered()

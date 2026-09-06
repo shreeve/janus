@@ -515,6 +515,9 @@ func TestStatusJSON(t *testing.T) {
 	if st.Janus == "" || st.Caddy == "" {
 		t.Errorf("version fields: %+v", st)
 	}
+	if st.Socket != p.sock || st.Admin != p.admin || st.Env != p.env || st.State != p.state {
+		t.Errorf("path fields: %+v", st)
+	}
 }
 
 // A pidfile edge while the item is registered but not running: status
