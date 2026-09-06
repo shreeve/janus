@@ -252,6 +252,11 @@ Janus also remains a plain Caddy module: builders that assemble their own
 Caddy (xcaddy or a custom main) add `github.com/shreeve/janus` like any
 other plugin.
 
+`janus help` lists every command. They are Caddy's commands, under the
+`janus` name: `janus run`, `janus adapt`, `janus reload`, `janus trust`, and
+the rest behave exactly as Caddy's reference documents them, and there is no
+separate `caddy` command on a Janus host.
+
 Confirm the modules are linked:
 
 ```bash
