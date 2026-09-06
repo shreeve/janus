@@ -245,9 +245,10 @@ func TestHubBridgeFIFOOrder(t *testing.T) {
 			t.Fatalf("order: post %d = %q", i, f.post(i).body)
 		}
 	}
-	if st.hubs.getOrCreate(rec.ID, nil).ctr.bridgeSent.Load() != 3 {
-		t.Fatal("bridge_sent must count 2xx posts")
-	}
+	// The counter moves after each post returns, a hair behind the
+	// fixture's own count.
+	ctr := &st.hubs.getOrCreate(rec.ID, nil).ctr
+	waitFor(t, "bridge_sent must count 2xx posts", func() bool { return ctr.bridgeSent.Load() == 3 })
 }
 
 func TestHubBridgeDropOldestOverflow(t *testing.T) {

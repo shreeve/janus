@@ -257,11 +257,13 @@ default when it exists, and the service env file is loaded beside it.
 		c.Use = strings.Replace(c.Use, "--config <path>", "[--config <path>]", 1)
 		c.Long = janusify(c.Long) + serviceDefault
 		wrap(c, func(orig runFunc, cmd *cobra.Command, args []string) error {
+			// Only the service edge is known to be running or not; a
+			// --config or --address names some other edge.
+			if cmd.Name() == "reload" && targetsService(cmd) && runningPID(p) == 0 && !controlReachable(p) {
+				return errors.New("janus is not running; 'janus start' runs the current Caddyfile")
+			}
 			if !cmd.Flags().Changed("config") && fileExists(p.config) {
 				setConfig(cmd, p.config)
-			}
-			if cmd.Name() == "reload" && !cmd.Flags().Changed("address") && runningPID(p) == 0 && !controlReachable(p) {
-				return errors.New("janus is not running; 'janus start' runs the current Caddyfile")
 			}
 			return orig(cmd, args)
 		})
@@ -272,12 +274,12 @@ until the next login (root: boot); 'janus start' brings it back. When
 nothing is running this is a quiet no-op.
 `
 	wrap(caddyStop, func(orig runFunc, cmd *cobra.Command, args []string) error {
-		if !cmd.Flags().Changed("config") && fileExists(p.config) {
-			setConfig(cmd, p.config)
-		}
-		if !cmd.Flags().Changed("address") && runningPID(p) == 0 && !controlReachable(p) {
+		if targetsService(cmd) && runningPID(p) == 0 && !controlReachable(p) {
 			fmt.Fprintln(cmd.OutOrStdout(), "janus was not running")
 			return nil
+		}
+		if !cmd.Flags().Changed("config") && fileExists(p.config) {
+			setConfig(cmd, p.config)
 		}
 		return orig(cmd, args)
 	})
@@ -394,6 +396,12 @@ func setEnvfile(cmd *cobra.Command, p servicePaths) {
 	if cfg, _ := cmd.Flags().GetString("config"); cfg == p.config {
 		_ = cmd.Flags().Set("envfile", p.env)
 	}
+}
+
+// targetsService reports whether a stop or reload is aimed at the service
+// edge: no --config and no --address, which would name another one.
+func targetsService(cmd *cobra.Command) bool {
+	return !cmd.Flags().Changed("config") && !cmd.Flags().Changed("address")
 }
 
 func fileExists(path string) bool {
