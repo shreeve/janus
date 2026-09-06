@@ -401,6 +401,18 @@ func TestStopAndReloadWhenStopped(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "janus is not running") {
 		t.Errorf("reload when stopped: %v", err)
 	}
+	// Naming another edge's config or admin address bypasses the check:
+	// the verb goes to Caddy, which reports what it finds there.
+	other := filepath.Join(t.TempDir(), "Caddyfile")
+	if err := os.WriteFile(other, []byte("{\n\tadmin unix//tmp/janus-test-nothing.sock\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"reload", "--config", other}, {"stop", "--config", other}, {"stop", "--address", "unix//tmp/janus-test-nothing.sock"}} {
+		out, err := run(t, args...)
+		if err == nil || strings.Contains(out, "janus was not running") || strings.Contains(err.Error(), "janus is not running") {
+			t.Errorf("%v treated as the service edge: err=%v out=%q", args, err, out)
+		}
+	}
 }
 
 // A control server on the service's socket, answering /1.0 and /1.0/apps.
