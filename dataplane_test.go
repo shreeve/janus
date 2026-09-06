@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,22 +30,9 @@ func newTestDataPlane(t testing.TB) (*dataPlane, *appRegistry) {
 }
 
 // startUnixHTTP serves handler on a fresh unix socket and returns its path.
-// A short MkdirTemp pattern keeps the path under the darwin 104-byte limit.
 func startUnixHTTP(t testing.TB, handler http.Handler) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "janus")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "u.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &http.Server{Handler: handler}
-	go srv.Serve(ln)
-	t.Cleanup(func() { srv.Close() })
+	sock, _ := startUnixHTTPServer(t, handler)
 	return sock
 }
 
@@ -1016,8 +1004,9 @@ func TestInboundXForwardedIsReplacedNotAppended(t *testing.T) {
 
 // --- capacity hold (every selectable worker busy) --------------------------
 
-// startUnixHTTPServer is startUnixHTTP with the server handed back so a test
-// can kill the worker mid-hold.
+// startUnixHTTPServer serves handler on a fresh unix socket and returns its
+// path and the server, so a test can kill the worker mid-hold. A short
+// MkdirTemp pattern keeps the path under the darwin 104-byte limit.
 func startUnixHTTPServer(t testing.TB, handler http.Handler) (string, *http.Server) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "janus")
@@ -1290,5 +1279,80 @@ func TestBusyHoldKeepsUnhealthyDistinct(t *testing.T) {
 	dp.stateMu.RUnlock()
 	if st == nil || !st.unhealthyNow() {
 		t.Fatal("the dead worker was not marked unhealthy")
+	}
+}
+
+func TestBusyHoldWakesWhenWorkerDiesMidResponse(t *testing.T) {
+	// A worker dying after its headers landed never returns from the
+	// proxy attempt: the copy aborts with a panic. The slot it held is
+	// free all the same, so the completion signal must ride the unwind
+	// and wake a parked request — with the poll parked past the wait,
+	// only that signal can end B's hold before the deadline.
+	dp, reg := newTestDataPlane(t)
+	dp.busyPoll = 10 * time.Second
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	slot := make(chan struct{}, 1)
+	var bounces atomic.Int32
+	w := startUnixHTTP(t, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		select {
+		case slot <- struct{}{}:
+		default:
+			busyUpstream(&bounces).ServeHTTP(rw, r)
+			return
+		}
+		defer func() { <-slot }()
+		entered <- struct{}{}
+		<-release
+		// Declares 1000 bytes, sends 500: the server slams the connection.
+		rw.Header().Set("Content-Length", "1000")
+		rw.WriteHeader(http.StatusOK)
+		rw.Write(make([]byte, 500))
+	}))
+	registerApp(t, reg, "app.test", Upstream{Path: w})
+
+	// ReverseProxy aborts a failed body copy with a panic only when it is
+	// serving under a real http.Server (it suppresses the panic for direct
+	// handler calls), so the dying request must arrive through one for the
+	// unwind path to run at all.
+	edge := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		r.Host = "app.test"
+		dp.serve(rw, r)
+	}))
+	edge.Config.ErrorLog = log.New(io.Discard, "", 0) // the abort panic is the server's business
+	t.Cleanup(edge.Close)
+	go func() {
+		resp, err := http.Get(edge.URL + "/a")
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	<-entered
+
+	b := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr, _ := doServe(dp, "GET", "app.test", "/b", "")
+		b <- rr
+	}()
+	// B bounces once, counts itself as a waiter, re-selects once more and
+	// only then parks; release the slot after that second bounce, so the
+	// death lands on a parked request rather than on B's own re-selection
+	// (which would find the socket unhealthy on its own, proving nothing).
+	waitFor(t, "request B parked after its re-selection", func() bool {
+		return capacityWaiters(reg, "app.test") == 1 && bounces.Load() >= 2
+	})
+	time.Sleep(10 * time.Millisecond)
+
+	released := time.Now()
+	close(release)
+	rr := <-b
+	// The death marked the only worker unhealthy, so the woken request
+	// gets the logged unhealthy 503 — promptly, not at the busy deadline.
+	if took := time.Since(released); took >= dp.busyWait {
+		t.Fatalf("B ran to the busy deadline (%v): the dying worker's completion never signaled", took)
+	}
+	if rr.Code != http.StatusServiceUnavailable || rr.Body.String() != "service unavailable\n" {
+		t.Fatalf("want the unhealthy 503 after the pool died, got %d %q", rr.Code, rr.Body.String())
 	}
 }

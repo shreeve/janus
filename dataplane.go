@@ -46,11 +46,13 @@ const (
 	defaultBusyWait = 2 * time.Second
 
 	// defaultBusyPoll is the backstop re-selection interval for a held
-	// request. Completed proxy attempts are the primary wake; the poll
-	// only covers a slot that freed without one (freed before the request
-	// was counted as a waiter, or by a worker that died mid-response). The
-	// workers' own Retry-After: 0 licenses re-delivery at any time.
-	defaultBusyPoll = 50 * time.Millisecond
+	// request. Every concluded proxy attempt is the primary wake, so the
+	// poll only covers a slot that freed with no attempt to report it.
+	// Each wait draws its interval uniformly from [poll/2, 3·poll/2): a
+	// burst that parked in the same millisecond would otherwise re-select
+	// in lockstep on every tick. The workers' own Retry-After: 0 licenses
+	// re-delivery at any time.
+	defaultBusyPoll = 100 * time.Millisecond
 
 	// upstreamDialTimeout bounds one unix-socket dial.
 	upstreamDialTimeout = 3 * time.Second
@@ -357,20 +359,26 @@ func (dp *dataPlane) dialUpstream(ctx context.Context, _, addr string) (net.Conn
 // or its client leaves. Every proxy attempt that concludes a request to the
 // app hands out one token — the slot it held is free, and least-conn selection
 // sends the woken request there — at the cost of one atomic load while nobody
-// waits. Waiters are capped so the edge never grows an unbounded queue, and
-// the last waiter out drains unconsumed tokens so they cannot wake a later
-// burst spuriously.
+// waits. Waiters are capped so the edge never grows an unbounded queue. The
+// last waiter out drains unconsumed tokens; a token that lands in the narrow
+// window after that drain can survive and wake the first waiter of a later
+// burst one round early, which costs that waiter one extra selection and
+// nothing else.
 type capacityGate struct {
 	waiters atomic.Int32
 	wake    chan struct{}
 }
 
+// newCapacityGate sizes the token buffer to the default waiter cap; enter
+// clamps the effective cap to that buffer so a token can never be dropped
+// merely because a waiter has nowhere to receive it.
 func newCapacityGate() *capacityGate {
 	return &capacityGate{wake: make(chan struct{}, defaultWaiterCap)}
 }
 
 // enter counts one more waiter, or reports the cap already reached.
 func (g *capacityGate) enter(limit int) bool {
+	limit = min(limit, cap(g.wake))
 	for {
 		n := g.waiters.Load()
 		if int(n) >= limit {
@@ -423,7 +431,11 @@ func (dp *dataPlane) awaitCapacity(ctx context.Context, gate *capacityGate, dead
 	if remaining <= 0 {
 		return capacityTimeout
 	}
-	timer := time.NewTimer(min(remaining, dp.busyPoll))
+	poll := dp.busyPoll
+	if poll > 0 {
+		poll = poll/2 + rand.N(poll) // uniform in [poll/2, 3·poll/2)
+	}
+	timer := time.NewTimer(min(remaining, poll))
 	defer timer.Stop()
 	select {
 	case <-gate.wake:
@@ -466,24 +478,40 @@ func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, host s
 	}
 	waiting := false
 	var deadline time.Time
+	// concluded is set around every attempt and cleared only when the
+	// attempt hands the request back for another upstream. It stays set
+	// when the attempt answered the client — or unwound through a panic
+	// (a worker dying mid-response aborts the copy with ErrAbortHandler),
+	// which is exactly when the slot it held has just freed — so the
+	// signal rides the defer and no completion is ever silent.
+	concluded := false
 	defer func() {
 		if waiting {
 			gate.leave()
+		}
+		if concluded {
+			gate.signal() // the slot this attempt held is free again
 		}
 	}()
 	for {
 		path, st, ok := dp.acquireUpstream(rec.Upstreams, tried, rec.selectMu)
 		if ok {
+			concluded = true
 			final, busy := dp.proxyOnce(w, r, path, st)
 			if final {
-				gate.signal() // the slot this attempt held is free again
 				return nil, nil
 			}
+			concluded = false
 			if tried == nil {
 				tried = make(map[string]bool, len(rec.Upstreams))
 			}
 			tried[path] = true
 			sawBusy = sawBusy || busy
+			if busy && waiting {
+				// A re-selection round that bounced is the hold checking
+				// for a slot, not a retry the access log should count.
+				accessFactsOf(r).discountAttempt()
+			}
 			continue
 		}
 		if !sawBusy {
