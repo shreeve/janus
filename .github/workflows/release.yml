@@ -142,8 +142,13 @@ jobs:
           # compiled in. Module versions live in build-info: the main module
           # never appears in list-modules --versions, so the version gates
           # assert the CLI stamp and the VCS-stamped build-info instead.
-          "$exe" list-modules | grep -qx 'janus'
-          "$exe" list-modules | grep -qx 'dns.providers.route53'
+          # Capture the list once and grep the text: piping the binary
+          # straight into `grep -q` lets grep close the pipe on its first
+          # match while the binary is still writing, and the resulting
+          # SIGPIPE (exit 141) fails the step under pipefail by timing.
+          modules=$("$exe" list-modules)
+          grep -qx 'janus' <<<"$modules"
+          grep -qx 'dns.providers.route53' <<<"$modules"
           "$exe" adapt \
             --config "$RUNNER_TEMP/janus-smoke/$name/Caddyfile.minimal" \
             --adapter caddyfile >/dev/null
