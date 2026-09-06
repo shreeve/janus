@@ -328,6 +328,9 @@ checksums, and installs `janus` into `~/.local/bin` (as root:
 curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bash
 ```
 
+Then `janus autostart` makes it the host's edge
+([Running as a service](#running-as-a-service)).
+
 Pin a version with `... | bash -s v1.11.1`. Uninstall with
 `... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
 units, and certificates stay.
