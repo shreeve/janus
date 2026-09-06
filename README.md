@@ -275,7 +275,7 @@ verbs Harbor uses:
 | `janus start` / `janus stop` | Start or stop that edge. A stop is clean, so it stays stopped until the next boot. |
 | `janus restart` | Stop and start again. This is how an installed upgrade takes effect. |
 | `janus reload` | Apply an edited Caddyfile in place, keeping every connection. |
-| `janus status` | Running or not, under what, which binary and version, and how many apps are registered. Exit 3 when stopped. |
+| `janus status [--json]` | Running or not, under what, which binary and version, and how many apps are registered. Exit 3 when stopped. |
 | `janus validate` | Check the service Caddyfile without touching the running edge. |
 
 The supervisor is launchd on macOS and systemd on Linux. As a user the
@@ -290,16 +290,25 @@ The service's files:
 | | User | Root |
 | --- | --- | --- |
 | Caddyfile | `~/.config/janus/Caddyfile` | `/etc/janus/Caddyfile` |
+| Drop-in sites | `~/.config/janus/sites/*.caddy` | `/etc/janus/sites/*.caddy` |
 | Control socket, pidfile | `~/.local/state/janus/run/` | `/var/lib/janus/run/` |
 | Process log | `~/.local/state/janus/log/janus.log` | `/var/log/janus/janus.log` |
 
 `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` move the user paths. `autostart`
 seeds the Caddyfile when there is none — the control plane on its unix
 socket and `http://127.0.0.1:7600`, the process log on a rolling file, and
-no sites — and validates it (or the one `--config` names) before installing
-anything, so a bad config never becomes a restart loop. `start`, `stop`,
-`reload`, and `validate` default to that Caddyfile when it exists; `run`
-does too when the current directory has no Caddyfile of its own.
+an `import` of the drop-in sites directory — and validates it (or the one
+`--config` names) before installing anything, so a bad config never becomes
+a restart loop. A tool that owns a site writes one `*.caddy` file into the
+sites directory and runs `janus reload`; the Caddyfile itself stays the
+operator's. `start`, `stop`, `reload`, and `validate` default to that
+Caddyfile when it exists; `run` does too when the current directory has no
+Caddyfile of its own.
+
+`JANUS_SERVICE_LABEL` renames the launchd item or systemd unit (default
+`janus.edge` and `janus.service`). With `XDG_CONFIG_HOME` and
+`XDG_STATE_HOME` pointed elsewhere it lets a test suite run an edge beside
+the host's real one; that edge needs its own ports in its own Caddyfile.
 
 Upgrading is the installer followed by a restart:
 
@@ -312,9 +321,9 @@ is running. On Linux a user's edge needs `cap_net_bind_service` on the
 binary to bind ports 80 and 443; `autostart` says so when it is missing,
 and the installer restores it across upgrades.
 
-A host whose edge is run by another supervisor — Rip's `rip sites` runs its
-own Janus under its own item — does not also need `janus autostart`; two
-edges would contend for the same ports.
+This is the whole story of running Janus on a host. Rip's `rip sites`
+registers apps with this edge and drops its site files into the sites
+directory; it does not run a Janus of its own.
 
 ### Prebuilt releases
 

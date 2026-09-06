@@ -7,7 +7,7 @@ import (
 
 func TestLaunchdPlist(t *testing.T) {
 	p := servicePathsFor(false, "/Users/ann", func(string) string { return "" })
-	got := launchdPlist(p, "/Users/ann/.local/bin/janus")
+	got := launchdPlist("janus.edge", p, "/Users/ann/.local/bin/janus")
 	for _, want := range []string{
 		"<string>janus.edge</string>",
 		"<string>/Users/ann/.local/bin/janus</string>",
@@ -29,5 +29,10 @@ func TestLaunchdPlist(t *testing.T) {
 	root := newServiceItem(servicePathsFor(true, "/var/root", func(string) string { return "" })).(*launchdItem)
 	if root.plist != "/Library/LaunchDaemons/janus.edge.plist" || root.domain != "system" {
 		t.Errorf("root item: %+v", root)
+	}
+	t.Setenv("JANUS_SERVICE_LABEL", "janus.test7")
+	alt := newServiceItem(p).(*launchdItem)
+	if alt.label != "janus.test7" || alt.plist != "/Users/ann/Library/LaunchAgents/janus.test7.plist" || alt.target() != item.domain+"/janus.test7" {
+		t.Errorf("label override: %+v", alt)
 	}
 }

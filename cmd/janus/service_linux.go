@@ -14,25 +14,29 @@ import (
 	"strings"
 )
 
-const systemdUnit = "janus.service"
+const defaultSystemdLabel = "janus"
 
 type systemdItem struct {
-	user bool
-	unit string
+	user  bool
+	label string // unit name without .service
+	unit  string // unit file path
 }
 
 func newServiceItem(p servicePaths) serviceItem {
+	label := serviceLabel(defaultSystemdLabel)
 	if p.root {
-		return &systemdItem{unit: "/etc/systemd/system/" + systemdUnit}
+		return &systemdItem{label: label, unit: "/etc/systemd/system/" + label + ".service"}
 	}
-	return &systemdItem{user: true, unit: filepath.Join(p.home, ".config", "systemd", "user", systemdUnit)}
+	return &systemdItem{user: true, label: label, unit: filepath.Join(p.home, ".config", "systemd", "user", label+".service")}
 }
+
+func (s *systemdItem) service() string { return s.label + ".service" }
 
 func (s *systemdItem) name() string {
 	if s.user {
-		return "systemd --user " + systemdUnit
+		return "systemd --user " + s.service()
 	}
-	return "systemd " + systemdUnit
+	return "systemd " + s.service()
 }
 func (s *systemdItem) file() string { return s.unit }
 
@@ -56,7 +60,7 @@ func (s *systemdItem) systemctl(args ...string) ([]byte, error) {
 }
 
 func (s *systemdItem) loaded() (bool, int) {
-	out, err := s.systemctl("show", "-p", "ActiveState", "-p", "MainPID", "--value", systemdUnit)
+	out, err := s.systemctl("show", "-p", "ActiveState", "-p", "MainPID", "--value", s.service())
 	if err != nil {
 		return false, 0
 	}
@@ -86,12 +90,12 @@ func (s *systemdItem) register(p servicePaths, exe string) error {
 	if _, err := s.systemctl("daemon-reload"); err != nil {
 		return err
 	}
-	_, err := s.systemctl("enable", systemdUnit)
+	_, err := s.systemctl("enable", s.service())
 	return err
 }
 
 func (s *systemdItem) load() error {
-	_, err := s.systemctl("start", systemdUnit)
+	_, err := s.systemctl("start", s.service())
 	return err
 }
 
@@ -102,7 +106,7 @@ func (s *systemdItem) unregister() (bool, error) {
 	if !s.registered() {
 		return false, nil
 	}
-	_, _ = s.systemctl("disable", systemdUnit)
+	_, _ = s.systemctl("disable", s.service())
 	if err := os.Remove(s.unit); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return true, err
 	}
