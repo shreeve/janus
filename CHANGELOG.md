@@ -4,6 +4,12 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## Unreleased
+
+- `janus status --json` reports the service's paths for tools that write
+  site files or register with the edge: `env`, `state`, `socket` (the
+  control socket), and `admin` (Caddy's admin socket).
+
 ## 1.12.1 — 2026-09-06
 
 - Service verbs, hardened. `autostart` says what it does: a user's edge
