@@ -15,26 +15,29 @@ import (
 	"strings"
 )
 
-const launchdLabel = "janus.edge"
+const defaultLaunchdLabel = "janus.edge"
 
 type launchdItem struct {
+	label  string
 	domain string
 	plist  string
 }
 
 func newServiceItem(p servicePaths) serviceItem {
+	label := serviceLabel(defaultLaunchdLabel)
 	if p.root {
-		return &launchdItem{domain: "system", plist: "/Library/LaunchDaemons/" + launchdLabel + ".plist"}
+		return &launchdItem{label: label, domain: "system", plist: "/Library/LaunchDaemons/" + label + ".plist"}
 	}
 	return &launchdItem{
+		label:  label,
 		domain: "gui/" + strconv.Itoa(os.Getuid()),
-		plist:  filepath.Join(p.home, "Library", "LaunchAgents", launchdLabel+".plist"),
+		plist:  filepath.Join(p.home, "Library", "LaunchAgents", label+".plist"),
 	}
 }
 
-func (l *launchdItem) name() string   { return "launchd " + l.domain + "/" + launchdLabel }
+func (l *launchdItem) name() string   { return "launchd " + l.target() }
 func (l *launchdItem) file() string   { return l.plist }
-func (l *launchdItem) target() string { return l.domain + "/" + launchdLabel }
+func (l *launchdItem) target() string { return l.domain + "/" + l.label }
 
 func (l *launchdItem) registered() bool { return fileExists(l.plist) }
 
@@ -56,7 +59,7 @@ func (l *launchdItem) register(p servicePaths, exe string) error {
 	if err := os.MkdirAll(filepath.Dir(l.plist), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(l.plist, []byte(launchdPlist(p, exe)), 0o644); err != nil {
+	if err := os.WriteFile(l.plist, []byte(launchdPlist(l.label, p, exe)), 0o644); err != nil {
 		return err
 	}
 	// A previous `disable` outlives the plist; clear it so bootstrap and
@@ -97,7 +100,7 @@ func launchctl(args ...string) error {
 	return nil
 }
 
-func launchdPlist(p servicePaths, exe string) string {
+func launchdPlist(label string, p servicePaths, exe string) string {
 	path := os.Getenv("PATH")
 	if p.root {
 		path = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -143,7 +146,7 @@ func launchdPlist(p servicePaths, exe string) string {
 	<string>%s</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(exe), xmlEscape(p.config), xmlEscape(p.state), xmlEscape(p.home), xmlEscape(path), xmlEscape(p.sup), xmlEscape(p.sup))
+`, xmlEscape(label), xmlEscape(exe), xmlEscape(p.config), xmlEscape(p.state), xmlEscape(p.home), xmlEscape(path), xmlEscape(p.sup), xmlEscape(p.sup))
 }
 
 func xmlEscape(s string) string {

@@ -21,7 +21,12 @@ entry; their changes ship in the next tag.
   `autostart` seeds a runnable one when absent and validates before
   installing, so a bad config never becomes a restart loop. `start`,
   `stop`, `reload`, and `validate` default to that Caddyfile, and `run`
-  does when the current directory has none.
+  does when the current directory has none. The seed imports
+  `sites/*.caddy` beside the Caddyfile, so a tool that owns a site drops
+  one file there and reloads. `janus status --json` prints the same
+  status as one object; `JANUS_SERVICE_LABEL` renames the item so a test
+  suite can run an edge beside the host's. `autostart` refuses a state
+  root that would push the control socket past the unix path limit.
 
 ## 1.11.1 — 2026-09-05
 

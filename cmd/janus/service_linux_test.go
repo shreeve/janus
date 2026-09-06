@@ -31,4 +31,9 @@ func TestSystemdUnit(t *testing.T) {
 	if root.unit != "/etc/systemd/system/janus.service" || root.user {
 		t.Errorf("root item: %+v", root)
 	}
+	t.Setenv("JANUS_SERVICE_LABEL", "janus-test7")
+	alt := newServiceItem(p).(*systemdItem)
+	if alt.service() != "janus-test7.service" || alt.unit != "/home/ann/.config/systemd/user/janus-test7.service" {
+		t.Errorf("label override: %+v", alt)
+	}
 }

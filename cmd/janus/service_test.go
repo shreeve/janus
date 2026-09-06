@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -56,7 +57,7 @@ func TestSeedConfigValidates(t *testing.T) {
 		}
 	}
 	seed := seedConfig(p)
-	if !strings.Contains(seed, "control internal "+p.sock) || !strings.Contains(seed, "output file "+p.log) {
+	if !strings.Contains(seed, "control internal "+p.sock) || !strings.Contains(seed, "output file "+p.log) || !strings.Contains(seed, "import "+p.sites+"/*.caddy") {
 		t.Fatalf("seed does not name the service paths:\n%s", seed)
 	}
 	if err := os.WriteFile(p.config, []byte(seed), 0o644); err != nil {
@@ -276,6 +277,27 @@ func TestAutostartRefusesBrokenConfig(t *testing.T) {
 	}
 }
 
+// A state root deep enough to push the control socket past the unix
+// path limit is refused up front, not discovered as a restart loop.
+func TestAutostartRefusesLongSocketPath(t *testing.T) {
+	isolatedHome(t)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), strings.Repeat("deep/", 30)))
+	f := &fakeItem{}
+	withFakeItem(t, f)
+	root := newRootCommand()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"autostart"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unix sockets allow") {
+		t.Fatalf("long socket path: %v", err)
+	}
+	if f.reg {
+		t.Error("installed anyway")
+	}
+}
+
 // status reads the control plane for the app count.
 func TestStatusCountsApps(t *testing.T) {
 	p := isolatedHome(t)
@@ -311,6 +333,25 @@ func TestStatusCountsApps(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "2 apps registered") || !strings.Contains(out.String(), "edge     running") {
 		t.Errorf("status:\n%s", out.String())
+	}
+}
+
+func TestStatusJSON(t *testing.T) {
+	p := isolatedHome(t)
+	withFakeItem(t, &fakeItem{reg: true, isLoaded: true, pid: os.Getpid()})
+	root := newRootCommand()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"status", "--json"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var st edgeStatus
+	if err := json.Unmarshal(out.Bytes(), &st); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out.String())
+	}
+	if !st.Running || st.PID != os.Getpid() || !st.Autostart || !st.Loaded || st.Supervisor != "fake" || st.Config != p.config || st.Sites != p.sites {
+		t.Errorf("status: %+v", st)
 	}
 }
 
