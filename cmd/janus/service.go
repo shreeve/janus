@@ -644,14 +644,8 @@ func installedExe(p servicePaths) (string, error) {
 			}
 		}
 	}
-	if p.root {
-		st, err := os.Stat(exe)
-		if err != nil {
-			return "", err
-		}
-		if sys, ok := st.Sys().(*syscall.Stat_t); ok && (sys.Uid != 0 || st.Mode().Perm()&0o022 != 0) {
-			return "", fmt.Errorf("%s is not root-owned and unwritable by others; a system service must not run a binary another user can change (install as root: 'curl -fsSL .../install.sh | sudo bash' puts it in /usr/local/bin)", exe)
-		}
+	if p.root && !rootOwnedAndPrivate(exe) {
+		return "", fmt.Errorf("%s is not root-owned and unwritable by others; a system service must not run a binary another user can change (install as root: 'curl -fsSL .../install.sh | sudo bash' puts it in /usr/local/bin)", exe)
 	}
 	return exe, nil
 }
