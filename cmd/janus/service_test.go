@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,21 +12,22 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/spf13/cobra"
 )
 
 func TestServicePathsUser(t *testing.T) {
 	p := servicePathsFor(false, "/home/ann", func(string) string { return "" })
 	want := map[string]string{
 		"config": "/home/ann/.config/janus/Caddyfile",
+		"sites":  "/home/ann/.config/janus/sites",
+		"env":    "/home/ann/.config/janus/env",
 		"state":  "/home/ann/.local/state/janus",
 		"log":    "/home/ann/.local/state/janus/log/janus.log",
 		"sock":   "/home/ann/.local/state/janus/run/janus.sock",
+		"admin":  "/home/ann/.local/state/janus/run/admin.sock",
 		"pid":    "/home/ann/.local/state/janus/run/janus.pid",
 		"home":   "/home/ann",
 	}
-	got := map[string]string{"config": p.config, "state": p.state, "log": p.log, "sock": p.sock, "pid": p.pid, "home": p.home}
+	got := map[string]string{"config": p.config, "sites": p.sites, "env": p.env, "state": p.state, "log": p.log, "sock": p.sock, "admin": p.admin, "pid": p.pid, "home": p.home}
 	for k, w := range want {
 		if got[k] != w {
 			t.Errorf("%s = %q, want %q", k, got[k], w)
@@ -46,19 +48,43 @@ func TestServicePathsRoot(t *testing.T) {
 	}
 }
 
-// The seed is a runnable Caddyfile: it adapts and validates, control and
-// log pointed at the service's paths.
+// The item's environment: HOME, an absolute-only PATH that leads with the
+// binary's directory, and relocated XDG roots.
+func TestServiceEnv(t *testing.T) {
+	t.Setenv("PATH", ".:/Users/ann/bin:relative/bin:/usr/bin:/Users/ann/bin")
+	t.Setenv("XDG_DATA_HOME", "/data")
+	t.Setenv("XDG_CACHE_HOME", "")
+	p := servicePathsFor(false, "/Users/ann", func(string) string { return "" })
+	env := serviceEnv(p, "/Users/ann/.local/bin/janus")
+	if env["PATH"] != "/Users/ann/.local/bin:/Users/ann/bin:/usr/bin" {
+		t.Errorf("PATH = %q", env["PATH"])
+	}
+	if env["HOME"] != "/Users/ann" || env["XDG_DATA_HOME"] != "/data" {
+		t.Errorf("env = %v", env)
+	}
+	if _, ok := env["XDG_CACHE_HOME"]; ok {
+		t.Error("empty XDG_CACHE_HOME carried")
+	}
+	root := serviceEnv(servicePathsFor(true, "/var/root", func(string) string { return "" }), "/usr/local/bin/janus")
+	if root["HOME"] != "/var/lib/janus" || !strings.HasPrefix(root["PATH"], "/usr/local/bin:") || strings.Contains(root["PATH"], "/Users/") {
+		t.Errorf("root env = %v", root)
+	}
+}
+
+// The seed is a runnable Caddyfile: it adapts and validates, control, admin,
+// and log pointed at the service's paths, sites imported from beside it.
 func TestSeedConfigValidates(t *testing.T) {
-	home := t.TempDir()
-	p := servicePathsFor(false, home, func(string) string { return "" })
+	p := isolatedHome(t)
 	for _, dir := range []string{filepath.Dir(p.config), p.run, filepath.Dir(p.log)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	seed := seedConfig(p)
-	if !strings.Contains(seed, "control internal "+p.sock) || !strings.Contains(seed, "output file "+p.log) || !strings.Contains(seed, "import "+p.sites+"/*.caddy") {
-		t.Fatalf("seed does not name the service paths:\n%s", seed)
+	for _, want := range []string{"control internal " + p.sock, "output file " + p.log, "import " + p.sites + "/*.caddy", "admin unix/" + p.admin} {
+		if !strings.Contains(seed, want) {
+			t.Errorf("seed lacks %q", want)
+		}
 	}
 	if err := os.WriteFile(p.config, []byte(seed), 0o644); err != nil {
 		t.Fatal(err)
@@ -75,33 +101,28 @@ func TestRootHasServiceVerbs(t *testing.T) {
 			t.Errorf("no %s command", name)
 		}
 	}
-	// start under the service is described as such; the Long text is
-	// Janus's, not Caddy's "keep the terminal open" advice.
 	start, _, _ := root.Find([]string{"start"})
 	if !strings.Contains(start.Long, "autostart") {
 		t.Errorf("start help does not mention autostart:\n%s", start.Long)
+	}
+	// reload/validate show --config as optional and say what the default is.
+	for _, name := range []string{"reload", "validate"} {
+		cmd, _, _ := root.Find([]string{name})
+		if !strings.Contains(cmd.Use, "[--config <path>]") || !strings.Contains(cmd.Long, "service Caddyfile") {
+			t.Errorf("%s: Use %q Long lacks the service default", name, cmd.Use)
+		}
+	}
+	autostart, _, _ := root.Find([]string{"autostart"})
+	if autostart.Flags().Lookup("config") != nil {
+		t.Error("autostart still takes --config")
 	}
 }
 
 // validate/stop/reload default --config to the service Caddyfile when it
 // exists; a --config given wins.
 func TestValidateDefaultsToServiceConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("XDG_STATE_HOME", "")
-	p := currentPaths()
-	if !strings.HasPrefix(p.config, home) {
-		t.Fatalf("paths not under the test HOME: %s", p.config)
-	}
-	for _, dir := range []string{filepath.Dir(p.config), p.run, filepath.Dir(p.log)} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(p.config, []byte(seedConfig(p)), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	p := isolatedHome(t)
+	seedAt(t, p)
 	var out bytes.Buffer
 	root := newRootCommand()
 	root.SetOut(&out)
@@ -122,20 +143,22 @@ func TestValidateDefaultsToServiceConfig(t *testing.T) {
 type fakeItem struct {
 	reg, isLoaded bool
 	pid           int
-	loads, kicks  int
+	loads         int
 	removed       bool
+	body          string
 }
 
 func (f *fakeItem) name() string        { return "fake" }
 func (f *fakeItem) file() string        { return "/fake/item" }
 func (f *fakeItem) registered() bool    { return f.reg }
 func (f *fakeItem) loaded() (bool, int) { return f.isLoaded, f.pid }
-func (f *fakeItem) register(servicePaths, string) error {
-	f.reg = true
-	return nil
+func (f *fakeItem) register(p servicePaths, exe string) (bool, error) {
+	body := exe + " " + p.config
+	changed := body != f.body
+	f.body, f.reg = body, true
+	return changed, nil
 }
 func (f *fakeItem) load() error { f.loads++; f.isLoaded = true; return nil }
-func (f *fakeItem) kick() error { f.kicks++; return nil }
 func (f *fakeItem) unregister() (bool, error) {
 	had := f.reg
 	f.reg, f.removed = false, true
@@ -151,13 +174,49 @@ func withFakeItem(t *testing.T, f *fakeItem) {
 	t.Cleanup(func() { itemFor, validateConfig = prev, prevValidate })
 }
 
+// isolatedHome points the service at fresh directories. The state root is
+// under /tmp rather than the test temp dir: unix socket paths are short
+// by law, and the seed puts two under state/run.
 func isolatedHome(t *testing.T) servicePaths {
 	t.Helper()
 	home := t.TempDir()
+	state, err := os.MkdirTemp("/tmp", "janus-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(state) })
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("XDG_STATE_HOME", state)
+	// Nothing answers here, so a foreign edge on the real port cannot
+	// pass as this one during tests.
+	prev := localControlURL
+	localControlURL = "http://127.0.0.1:1"
+	t.Cleanup(func() { localControlURL = prev })
 	return currentPaths()
+}
+
+func seedAt(t *testing.T, p servicePaths) {
+	t.Helper()
+	for _, dir := range []string{filepath.Dir(p.config), p.sites, p.run, filepath.Dir(p.log)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(p.config, []byte(seedConfig(p)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func run(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	root := newRootCommand()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs(args)
+	err := root.Execute()
+	return out.String(), err
 }
 
 func TestStartUnderItem(t *testing.T) {
@@ -166,86 +225,126 @@ func TestStartUnderItem(t *testing.T) {
 	withFakeItem(t, f)
 
 	// Not loaded: start loads it.
-	root := newRootCommand()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"start"})
-	if err := root.Execute(); err != nil {
+	out, err := run(t, "start")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if f.loads != 1 || f.kicks != 0 || !strings.Contains(out.String(), "started under fake") {
-		t.Errorf("loads=%d kicks=%d out=%q", f.loads, f.kicks, out.String())
+	if f.loads != 1 || !strings.Contains(out, "started under fake") {
+		t.Errorf("loads=%d out=%q", f.loads, out)
 	}
 
-	// Loaded but exited (after a stop): start kicks it.
+	// Loaded but exited (after a stop): start loads again, which the
+	// item does by replacing the job it still holds.
 	f.pid = 0
-	root = newRootCommand()
-	root.SetOut(&out)
-	root.SetArgs([]string{"start"})
-	if err := root.Execute(); err != nil {
+	if _, err := run(t, "start"); err != nil {
 		t.Fatal(err)
 	}
-	if f.loads != 1 || f.kicks != 1 {
-		t.Errorf("loads=%d kicks=%d", f.loads, f.kicks)
+	if f.loads != 2 {
+		t.Errorf("loads=%d", f.loads)
 	}
 
 	// Running: start says so and does nothing.
-	f.pid = 4242
-	out.Reset()
-	root = newRootCommand()
-	root.SetOut(&out)
-	root.SetArgs([]string{"start"})
-	if err := root.Execute(); err != nil {
+	f.pid = os.Getpid()
+	out, err = run(t, "start")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if f.kicks != 1 || !strings.Contains(out.String(), "already running (pid 4242)") {
-		t.Errorf("kicks=%d out=%q", f.kicks, out.String())
+	if f.loads != 2 || !strings.Contains(out, "already running (pid "+itoa(os.Getpid())+")") {
+		t.Errorf("loads=%d out=%q", f.loads, out)
 	}
 
 	// Start options belong to the item's Caddyfile.
-	root = newRootCommand()
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"start", "--config", "/elsewhere/Caddyfile"})
-	err := root.Execute()
-	if err == nil || !strings.Contains(err.Error(), "autostart item runs the edge") {
-		t.Errorf("start --config under an item: %v", err)
+	for _, flag := range []string{"--config=/elsewhere/Caddyfile", "--watch", "--pidfile=/x"} {
+		_, err = run(t, "start", flag)
+		if err == nil || !strings.Contains(err.Error(), "belong to the autostart item") {
+			t.Errorf("start %s under an item: %v", flag, err)
+		}
+	}
+}
+
+func itoa(n int) string { return fmtInt(n) }
+
+func fmtInt(n int) string {
+	b, _ := json.Marshal(n)
+	return string(b)
+}
+
+// A bare start with no Caddyfile anywhere is refused rather than starting
+// an empty Caddy.
+func TestBareStartNeedsConfig(t *testing.T) {
+	p := isolatedHome(t)
+	withFakeItem(t, &fakeItem{})
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	_, err := run(t, "start")
+	if err == nil || !strings.Contains(err.Error(), "no Caddyfile at "+p.config) {
+		t.Fatalf("bare start without a Caddyfile: %v", err)
+	}
+}
+
+func TestAutostartInstalls(t *testing.T) {
+	p := isolatedHome(t)
+	f := &fakeItem{}
+	withFakeItem(t, f)
+	out, err := run(t, "autostart")
+	if err != nil {
+		t.Fatalf("autostart: %v\n%s", err, out)
+	}
+	if !fileExists(p.config) || !strings.Contains(out, "seeded "+p.config) {
+		t.Errorf("seed missing: %q", out)
+	}
+	if st, err := os.Stat(p.sites); err != nil || !st.IsDir() {
+		t.Error("sites dir missing")
+	}
+	if !f.reg || f.loads != 1 || !strings.Contains(out, "autostart on: /fake/item") || !strings.Contains(out, "started under fake") {
+		t.Errorf("item: %+v out=%q", f, out)
+	}
+
+	// Again while running and unchanged: says so, loads nothing.
+	f.pid = os.Getpid()
+	out, err = run(t, "autostart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.loads != 1 || !strings.Contains(out, "already running") {
+		t.Errorf("idempotent autostart: loads=%d out=%q", f.loads, out)
+	}
+
+	// The item file changed (a new binary path) while running: the
+	// operator is told a restart applies it.
+	f.body = "old"
+	out, _ = run(t, "autostart")
+	if !strings.Contains(out, "under the previous item; 'janus restart' applies") {
+		t.Errorf("changed item while running: %q", out)
 	}
 }
 
 func TestAutostartOffLeavesEdgeRunning(t *testing.T) {
 	isolatedHome(t)
-	f := &fakeItem{reg: true, isLoaded: true, pid: 4242}
+	f := &fakeItem{reg: true, isLoaded: true, pid: os.Getpid()}
 	withFakeItem(t, f)
-	root := newRootCommand()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"autostart", "off"})
-	if err := root.Execute(); err != nil {
+	out, err := run(t, "autostart", "off")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !f.removed || !strings.Contains(out.String(), "autostart off: removed /fake/item") {
-		t.Errorf("removed=%v out=%q", f.removed, out.String())
+	if !f.removed || !strings.Contains(out, "autostart off: removed /fake/item; a running edge is left alone") {
+		t.Errorf("removed=%v out=%q", f.removed, out)
 	}
 
 	// Off again is a no-op, not an error.
-	out.Reset()
-	root = newRootCommand()
-	root.SetOut(&out)
-	root.SetArgs([]string{"autostart", "off"})
-	if err := root.Execute(); err != nil {
+	out, err = run(t, "autostart", "off")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "was not on") {
-		t.Errorf("out=%q", out.String())
+	if !strings.Contains(out, "was not on") {
+		t.Errorf("out=%q", out)
 	}
 
-	for _, bad := range [][]string{{"autostart", "on"}, {"autostart", "off", "now"}} {
-		root = newRootCommand()
-		root.SetOut(&out)
-		root.SetErr(&out)
-		root.SetArgs(bad)
-		if err := root.Execute(); err == nil {
+	for _, bad := range [][]string{{"autostart", "on"}, {"autostart", "off", "now"}, {"autostart", "stop"}} {
+		if _, err := run(t, bad...); err == nil {
 			t.Errorf("%v accepted", bad)
 		}
 	}
@@ -263,12 +362,7 @@ func TestAutostartRefusesBrokenConfig(t *testing.T) {
 	if err := os.WriteFile(p.config, []byte("{\n\tjanus {\n\t\tno-such-capability\n\t}\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	root := newRootCommand()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"autostart"})
-	err := root.Execute()
+	_, err := run(t, "autostart")
 	if err == nil || !strings.Contains(err.Error(), "does not validate") {
 		t.Fatalf("autostart with a broken config: %v", err)
 	}
@@ -277,19 +371,14 @@ func TestAutostartRefusesBrokenConfig(t *testing.T) {
 	}
 }
 
-// A state root deep enough to push the control socket past the unix
-// path limit is refused up front, not discovered as a restart loop.
+// A state root deep enough to push the sockets past the unix path limit
+// is refused up front, not discovered as a restart loop.
 func TestAutostartRefusesLongSocketPath(t *testing.T) {
 	isolatedHome(t)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), strings.Repeat("deep/", 30)))
 	f := &fakeItem{}
 	withFakeItem(t, f)
-	root := newRootCommand()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"autostart"})
-	err := root.Execute()
+	_, err := run(t, "autostart")
 	if err == nil || !strings.Contains(err.Error(), "unix sockets allow") {
 		t.Fatalf("long socket path: %v", err)
 	}
@@ -298,78 +387,161 @@ func TestAutostartRefusesLongSocketPath(t *testing.T) {
 	}
 }
 
-// status reads the control plane for the app count.
-func TestStatusCountsApps(t *testing.T) {
+// stop and reload with nothing running: stop is a quiet no-op, reload
+// says what to do instead.
+func TestStopAndReloadWhenStopped(t *testing.T) {
 	p := isolatedHome(t)
+	seedAt(t, p)
 	withFakeItem(t, &fakeItem{})
+	out, err := run(t, "stop")
+	if err != nil || !strings.Contains(out, "janus was not running") {
+		t.Errorf("stop when stopped: err=%v out=%q", err, out)
+	}
+	_, err = run(t, "reload")
+	if err == nil || !strings.Contains(err.Error(), "janus is not running") {
+		t.Errorf("reload when stopped: %v", err)
+	}
+}
+
+// A control server on the service's socket, answering /1.0 and /1.0/apps.
+func controlServer(t *testing.T, p servicePaths, apps string) {
+	t.Helper()
 	if err := os.MkdirAll(p.run, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/1.0/apps" {
+		switch r.URL.Path {
+		case "/1.0":
+			_, _ = w.Write([]byte(`{"type":"janus","control":[{"mode":"internal","listen":"` + p.sock + `"}]}`))
+		case "/1.0/apps":
+			_, _ = w.Write([]byte(apps))
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		_, _ = w.Write([]byte(`[{"id":"a"},{"id":"b"}]`))
 	}))
-	ln, err := listenUnix(p.sock)
+	ln, err := net.Listen("unix", p.sock)
 	if err != nil {
-		t.Skipf("unix listener: %v", err)
+		t.Fatal(err)
 	}
 	srv.Listener = ln
 	srv.Start()
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+}
+
+// status reads the control plane for the app count, over the socket.
+func TestStatusCountsApps(t *testing.T) {
+	p := isolatedHome(t)
+	withFakeItem(t, &fakeItem{})
+	controlServer(t, p, `[{"id":"a"},{"id":"b"}]`)
 
 	n, at := probeControl(p)
-	if n != 2 || !strings.HasPrefix(at, "unix ") {
+	if n != 2 || at != "unix "+p.sock {
 		t.Fatalf("probe: n=%d at=%q", n, at)
 	}
-	root := newRootCommand()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"status"})
-	if err := root.Execute(); err != nil {
+	out, err := run(t, "status")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "2 apps registered") || !strings.Contains(out.String(), "edge     running") {
-		t.Errorf("status:\n%s", out.String())
+	if !strings.Contains(out, "2 apps registered") || !strings.Contains(out, "edge     running") {
+		t.Errorf("status:\n%s", out)
+	}
+}
+
+// Over loopback, only an edge that also listens on this service's socket
+// is this edge; another Janus with 'control local' is not.
+func TestProbeControlLoopbackIdentity(t *testing.T) {
+	p := isolatedHome(t)
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/1.0":
+			_, _ = w.Write([]byte(`{"type":"janus","control":[{"mode":"internal","listen":"/elsewhere/janus.sock"},{"mode":"local","listen":"http://127.0.0.1:7600/"}]}`))
+		case "/1.0/apps":
+			_, _ = w.Write([]byte(`[{"id":"x"}]`))
+		}
+	}))
+	defer other.Close()
+	prev := localControlURL
+	localControlURL = other.URL
+	defer func() { localControlURL = prev }()
+	if _, at := probeControl(p); at != "" {
+		t.Fatalf("a foreign edge passed as this one: %q", at)
+	}
+	// The same server claiming this socket is accepted.
+	mine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/1.0":
+			_, _ = w.Write([]byte(`{"type":"janus","control":[{"mode":"internal","listen":"` + p.sock + `"}]}`))
+		case "/1.0/apps":
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	defer mine.Close()
+	localControlURL = mine.URL
+	if n, at := probeControl(p); at != mine.URL || n != 0 {
+		t.Fatalf("own edge over loopback: n=%d at=%q", n, at)
 	}
 }
 
 func TestStatusJSON(t *testing.T) {
 	p := isolatedHome(t)
 	withFakeItem(t, &fakeItem{reg: true, isLoaded: true, pid: os.Getpid()})
-	root := newRootCommand()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"status", "--json"})
-	if err := root.Execute(); err != nil {
+	out, err := run(t, "status", "--json")
+	if err != nil {
 		t.Fatal(err)
 	}
 	var st edgeStatus
-	if err := json.Unmarshal(out.Bytes(), &st); err != nil {
-		t.Fatalf("not JSON: %v\n%s", err, out.String())
+	if err := json.Unmarshal([]byte(out), &st); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
 	}
 	if !st.Running || st.PID != os.Getpid() || !st.Autostart || !st.Loaded || st.Supervisor != "fake" || st.Config != p.config || st.Sites != p.sites {
 		t.Errorf("status: %+v", st)
+	}
+	// Control did not answer: no apps count, rather than a misleading 0.
+	if st.Apps != nil || st.Control != "" || strings.Contains(out, `"apps"`) {
+		t.Errorf("apps reported without control: %s", out)
+	}
+	if st.Janus == "" || st.Caddy == "" {
+		t.Errorf("version fields: %+v", st)
+	}
+}
+
+// A pidfile edge while the item is registered but not running: status
+// says which is which. A pidfile naming a process that is not a janus is
+// stale and goes away.
+func TestStatusPidfileUnderRegisteredItem(t *testing.T) {
+	p := isolatedHome(t)
+	withFakeItem(t, &fakeItem{reg: true, isLoaded: true})
+	if err := os.MkdirAll(p.run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The test binary is janus.test, which is janus enough for ps.
+	if err := os.WriteFile(p.pid, []byte(fmtInt(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, "status")
+	if err != nil || !strings.Contains(out, "under    pidfile "+p.pid+" (autostart on, but the item is not running it") {
+		t.Errorf("pidfile edge under a registered item: err=%v\n%s", err, out)
+	}
+	// pid 1 is alive (init) and is not a janus: stale.
+	if err := os.WriteFile(p.pid, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = run(t, "status")
+	if !strings.Contains(out, "edge     stopped") || fileExists(p.pid) {
+		t.Errorf("stale pidfile kept: exists=%v\n%s", fileExists(p.pid), out)
 	}
 }
 
 func TestStatusStoppedExits3(t *testing.T) {
 	isolatedHome(t)
 	withFakeItem(t, &fakeItem{})
-	root := newRootCommand()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"status"})
-	err := root.Execute()
+	out, err := run(t, "status")
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 3 || exitCode(err) != 3 {
 		t.Fatalf("stopped status: %v", err)
 	}
-	if !strings.Contains(out.String(), "edge     stopped") || strings.Contains(out.String(), "Error:") {
-		t.Errorf("status:\n%s", out.String())
+	if !strings.Contains(out, "edge     stopped") || strings.Contains(out, "Error:") {
+		t.Errorf("status:\n%s", out)
 	}
 }
 
@@ -388,5 +560,3 @@ func TestParseElapsed(t *testing.T) {
 		}
 	}
 }
-
-var _ = cobra.Command{}

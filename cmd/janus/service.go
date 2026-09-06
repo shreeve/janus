@@ -8,12 +8,14 @@ package main
 //
 // The item runs `janus run --config <Caddyfile>` in the foreground, restarts
 // it after a crash and never after a clean exit, so `janus stop` stays
-// stopped until the next boot. Everything the edge needs lives under two
-// roots: a config directory holding the Caddyfile, and a state directory
-// holding the control socket, the pidfile a bare `start` uses, and the
+// stopped until the next login (root: boot). Everything the edge needs
+// lives under two roots: a config directory holding the Caddyfile, its
+// drop-in sites, and an optional env file; and a state directory holding
+// the control and admin sockets, the pidfile a bare `start` uses, and the
 // process log the Caddyfile routes the default logger to.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,12 +44,14 @@ type servicePaths struct {
 	home   string // HOME for the supervised process (state root for root)
 	config string // the Caddyfile
 	sites  string // config/sites: drop-in *.caddy site files the Caddyfile imports
+	env    string // config/env: KEY=value lines the edge starts with, when present
 	state  string // state directory
-	run    string // state/run: control socket, pidfile
+	run    string // state/run: control socket, admin socket, pidfile
 	log    string // the process log the Caddyfile writes
 	sup    string // the supervisor's own capture of stdout/stderr
 	pid    string // pidfile for a bare start
 	sock   string // control internal socket
+	admin  string // Caddy admin socket, so stop/reload can only ever reach this edge
 }
 
 func servicePathsFor(root bool, home string, getenv func(string) string) servicePaths {
@@ -75,9 +79,11 @@ func servicePathsFor(root bool, home string, getenv func(string) string) service
 		p.home = home
 	}
 	p.sites = filepath.Join(filepath.Dir(p.config), "sites")
+	p.env = filepath.Join(filepath.Dir(p.config), "env")
 	p.run = filepath.Join(p.state, "run")
 	p.pid = filepath.Join(p.run, "janus.pid")
 	p.sock = filepath.Join(p.run, "janus.sock")
+	p.admin = filepath.Join(p.run, "admin.sock")
 	return p
 }
 
@@ -90,12 +96,14 @@ func currentPaths() servicePaths {
 // the terminating NUL.
 const maxSocketPath = 103
 
-// localControl is the `control local` default the seed config enables.
-const localControl = "http://127.0.0.1:7600"
+// localControlURL is the `control local` default the seed config enables.
+// A variable so tests can point it at a port nothing answers on.
+var localControlURL = "http://127.0.0.1:7600"
 
 // seedConfig is the runnable Caddyfile `autostart` writes when none exists:
-// the control plane apps register into, the process log on a rolling
-// file, and no sites — those are the operator's to add.
+// the control plane apps register into, the admin socket the service verbs
+// use, the process log on a rolling file, and an import of the drop-in
+// sites directory — sites are the operator's (or their tools') to add.
 func seedConfig(p servicePaths) string {
 	return fmt.Sprintf(`# Janus — service config, seeded by 'janus autostart'.
 #
@@ -104,6 +112,10 @@ func seedConfig(p servicePaths) string {
 # capability and knob is Caddyfile.example in the Janus repository:
 # https://github.com/shreeve/janus
 {
+	# Caddy's admin API on a socket only this edge's user can reach.
+	# 'janus stop', 'reload', and 'restart' talk to it; leave it on.
+	admin unix/%s
+
 	# The process log: startup, reloads, certificate events, data-plane
 	# warnings. Rolled so it never grows without bound. Access logs are
 	# separate — each site names its own below.
@@ -139,7 +151,7 @@ func seedConfig(p servicePaths) string {
 # 	janus
 # }
 import %s/*.caddy
-`, p.log, p.sock, filepath.Join(filepath.Dir(p.log), "access.json"), p.sites)
+`, p.admin, p.log, p.sock, filepath.Join(filepath.Dir(p.log), "access.json"), p.sites)
 }
 
 // serviceItem is the supervisor-side half: one login item or system
@@ -155,13 +167,12 @@ type serviceItem interface {
 	// the process it is running (0 when loaded but not running).
 	loaded() (bool, int)
 	// register writes the item and clears any disable the manager holds
-	// for it. It does not load it.
-	register(p servicePaths, exe string) error
-	// load hands the item to the manager: the edge starts now, and at
-	// boot from then on.
+	// for it. It does not load it. Reports whether the file changed.
+	register(p servicePaths, exe string) (changed bool, err error)
+	// load hands the item to the manager so the edge starts now, and at
+	// login or boot from then on. A job the manager still holds from an
+	// earlier file is replaced, so what runs is what the file says.
 	load() error
-	// kick starts a loaded item whose process has exited.
-	kick() error
 	// unregister removes the item and leaves a running edge alone.
 	// Reports whether there was one.
 	unregister() (bool, error)
@@ -182,6 +193,41 @@ func serviceLabel(def string) string {
 // is none); a variable so tests can stand in a fake.
 var itemFor = newServiceItem
 
+// serviceEnv is the environment the item starts the edge with: HOME, a
+// PATH of absolute entries that includes the binary's own directory, and
+// any XDG roots the operator relocated, so Caddy's storage follows.
+func serviceEnv(p servicePaths, exe string) map[string]string {
+	env := map[string]string{"HOME": p.home}
+	var path []string
+	seen := map[string]bool{}
+	add := func(dir string) {
+		if dir == "" || !filepath.IsAbs(dir) || seen[dir] {
+			return
+		}
+		seen[dir] = true
+		path = append(path, dir)
+	}
+	add(filepath.Dir(exe))
+	if p.root {
+		for _, d := range []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"} {
+			add(d)
+		}
+	} else {
+		for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+			add(d)
+		}
+	}
+	env["PATH"] = strings.Join(path, string(os.PathListSeparator))
+	if !p.root {
+		for _, k := range []string{"XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"} {
+			if v := os.Getenv(k); v != "" {
+				env[k] = v
+			}
+		}
+	}
+	return env
+}
+
 // --- verbs -------------------------------------------------------------------
 
 func serviceCommands(caddyRun, caddyStart, caddyStop, caddyReload, caddyValidate *cobra.Command) []*cobra.Command {
@@ -191,31 +237,54 @@ func serviceCommands(caddyRun, caddyStart, caddyStop, caddyReload, caddyValidate
 		orig := cmd.RunE
 		cmd.RunE = func(cmd *cobra.Command, args []string) error { return fn(orig, cmd, args) }
 	}
+	const serviceDefault = "\nThe service Caddyfile is the default --config when it exists.\n"
 
 	// Caddy's own verbs learn the service's Caddyfile as their default.
+	caddyRun.Long = janusify(caddyRun.Long) + `
+With no Caddyfile in the current directory, the service Caddyfile is the
+default when it exists, and the service env file is loaded beside it.
+`
 	wrap(caddyRun, func(orig runFunc, cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("config") {
 			if _, err := os.Stat("Caddyfile"); err != nil && fileExists(p.config) {
 				setConfig(cmd, p.config)
 			}
 		}
+		setEnvfile(cmd, p)
 		return orig(cmd, args)
 	})
-	for _, c := range []*cobra.Command{caddyStop, caddyReload, caddyValidate} {
+	for _, c := range []*cobra.Command{caddyReload, caddyValidate} {
+		c.Use = strings.Replace(c.Use, "--config <path>", "[--config <path>]", 1)
+		c.Long = janusify(c.Long) + serviceDefault
 		wrap(c, func(orig runFunc, cmd *cobra.Command, args []string) error {
 			if !cmd.Flags().Changed("config") && fileExists(p.config) {
 				setConfig(cmd, p.config)
 			}
+			if cmd.Name() == "reload" && !cmd.Flags().Changed("address") && runningPID(p) == 0 && !controlReachable(p) {
+				return errors.New("janus is not running; 'janus start' runs the current Caddyfile")
+			}
 			return orig(cmd, args)
 		})
 	}
-	caddyStop.Long = janusify(caddyStop.Long) + `
+	caddyStop.Long = janusify(caddyStop.Long) + serviceDefault + `
 Under an autostart item this is a clean exit, so the edge stays stopped
-until the next boot; 'janus start' or 'janus autostart' brings it back.
+until the next login (root: boot); 'janus start' brings it back. When
+nothing is running this is a quiet no-op.
 `
+	wrap(caddyStop, func(orig runFunc, cmd *cobra.Command, args []string) error {
+		if !cmd.Flags().Changed("config") && fileExists(p.config) {
+			setConfig(cmd, p.config)
+		}
+		if !cmd.Flags().Changed("address") && runningPID(p) == 0 && !controlReachable(p) {
+			fmt.Fprintln(cmd.OutOrStdout(), "janus was not running")
+			return nil
+		}
+		return orig(cmd, args)
+	})
+
 	// start: under the item when there is one, else Caddy's background
 	// start with the service's Caddyfile and pidfile as defaults.
-	caddyStart.Short = "Starts the Janus process in the background — under its autostart item when one is installed"
+	caddyStart.Short = "Starts the edge in the background (under its autostart item when there is one)"
 	caddyStart.Long = `
 Starts the edge in the background and returns.
 
@@ -225,7 +294,8 @@ Start options belong to the item's Caddyfile then, and are refused here.
 
 Without an item, this is Caddy's background start: the process detaches
 and records its pid so 'janus status' and 'janus restart' can find it.
-The service Caddyfile is the default --config when it exists.
+The service Caddyfile is the default --config when it exists, and the
+service env file is loaded beside it.
 `
 	wrap(caddyStart, func(orig runFunc, cmd *cobra.Command, args []string) error {
 		return startEdge(orig, cmd, args, p)
@@ -233,11 +303,12 @@ The service Caddyfile is the default --config when it exists.
 
 	restart := &cobra.Command{
 		Use:   "restart",
-		Short: "Stops the edge and starts it again — the upgrade path",
+		Short: "Stops the edge and starts it again (the upgrade path)",
 		Long: `
-Stops the running edge gracefully and starts it again, under its autostart
-item when there is one. Connections drop for the moment in between; a
-config change alone is better served by 'janus reload', which keeps them.
+Stops the running edge gracefully, waits for it to exit (up to 10 s), and
+starts it again, under its autostart item when there is one. Connections
+drop for the moment in between; a config change alone is better served by
+'janus reload', which keeps them.
 
 This is how an installed upgrade takes effect: install the new binary,
 then 'janus restart'.
@@ -250,43 +321,48 @@ then 'janus restart'.
 
 	autostart := &cobra.Command{
 		Use:   "autostart [off [stop]]",
-		Short: "Keeps the edge running: now, at every boot, and again after a crash",
+		Short: "Keeps the edge running: now, at every login (root: boot), and after a crash",
 		Long: `
 Installs the edge as a service under the platform's manager — a launchd
 item on macOS, a systemd unit on Linux — and starts it now. From then on it
-starts at boot and comes back after a crash. A clean 'janus stop' stays
-stopped until the next boot.
+comes back after a crash and starts at every login; as root, at every boot
+with no login needed. A clean 'janus stop' stays stopped until then.
 
-Run as a user the item is a login item (~/Library/LaunchAgents, or a
-systemd user unit); run as root it is a system service (/Library/LaunchDaemons,
-or /etc/systemd/system) that needs no login session.
+Run as yourself on a machine you log in to. Run as root ('sudo janus
+autostart', with janus installed where root finds it: /usr/local/bin) for
+a server: ports 80 and 443 with no setcap, up before anyone logs in. One
+or the other on a host, never both.
 
-The Caddyfile is the service config: ` + "`--config`" + ` names one, else the default
-location is used and seeded with a runnable starting point when absent. It
-is validated before the item is installed, so a bad config never becomes a
-restart loop.
+The service Caddyfile is seeded with a runnable starting point when absent
+— the control plane, the admin socket, a rolling process log, and an
+import of the drop-in sites directory beside it — and validated before
+the item is installed, so a bad config never becomes a restart loop. An
+env file beside it (KEY=value lines) is loaded into the edge at start.
 
 'janus autostart off' removes the item and leaves a running edge alone;
-'janus autostart off stop' takes both down.
+'janus autostart off stop' takes both down. Run again after changing the
+binary and the item is rewritten; 'janus restart' applies it.
 `,
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, _ := cmd.Flags().GetString("config")
-			return autostartEdge(caddyStop, p, cfg, args, cmd)
+			return autostartEdge(caddyStop, p, args, cmd)
 		},
 	}
-	autostart.Flags().String("config", "", "Caddyfile the item runs (default: the service config, seeded when absent)")
 
 	status := &cobra.Command{
 		Use:   "status",
-		Short: "Shows the edge: running or not, under what, which binary, and how many apps are registered",
+		Short: "Shows the edge: running or not, under what, and how many apps are registered",
 		Long: `
 Shows the edge: running or stopped (and under what: the autostart item, a
 pidfile, or nothing), this binary and its version, whether the binary is
-newer than the edge that is running, the service Caddyfile and log, and
-the control endpoint with how many apps are registered on it.
+newer than the edge that is running, the service Caddyfile, sites
+directory, and log, and the control endpoint with how many apps are
+registered on it.
 
-Exits 3 when the edge is not running. --json prints the same as one object.
+Exits 3 when the edge is not running. --json prints the same as one
+object: running, pid, uptime, supervisor, autostart, loaded, binary,
+version, janus, caddy, binary_newer, config, sites, log, control, apps
+(present only when control answered).
 `,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -308,6 +384,18 @@ func setConfig(cmd *cobra.Command, path string) {
 	}
 }
 
+// setEnvfile loads the service env file when the command runs the service
+// Caddyfile and the operator named no env file of their own.
+func setEnvfile(cmd *cobra.Command, p servicePaths) {
+	f := cmd.Flags().Lookup("envfile")
+	if f == nil || f.Changed || !fileExists(p.env) {
+		return
+	}
+	if cfg, _ := cmd.Flags().GetString("config"); cfg == p.config {
+		_ = cmd.Flags().Set("envfile", p.env)
+	}
+}
+
 func fileExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Mode().IsRegular()
@@ -316,32 +404,32 @@ func fileExists(path string) bool {
 // --- start / restart -----------------------------------------------------------
 
 func startEdge(orig runFunc, cmd *cobra.Command, args []string, p servicePaths) error {
+	out := cmd.OutOrStdout()
 	if item := itemFor(p); item != nil && item.registered() {
 		for _, f := range []string{"config", "adapter", "envfile", "watch", "pidfile"} {
 			if cmd.Flags().Changed(f) {
-				return fmt.Errorf("an autostart item runs the edge from %s; edit that file and 'janus reload', or 'janus autostart off' first", p.config)
+				return fmt.Errorf("start options belong to the autostart item, which runs the edge from %s: edit that file and 'janus reload', or 'janus autostart off' first", p.config)
 			}
 		}
-		loaded, pid := item.loaded()
-		switch {
-		case loaded && pid > 0:
-			fmt.Fprintf(cmd.OutOrStdout(), "janus is already running (pid %d) under %s\n", pid, item.name())
+		if _, pid := item.loaded(); pid > 0 && processAlive(pid) {
+			fmt.Fprintf(out, "janus is already running (pid %d) under %s\n", pid, item.name())
 			return nil
-		case loaded:
-			if err := item.kick(); err != nil {
-				return err
-			}
-		default:
-			if err := item.load(); err != nil {
-				return err
-			}
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "janus started under %s\n", item.name())
+		if err := item.load(); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "janus started under %s\n", item.name())
 		return nil
 	}
-	if !cmd.Flags().Changed("config") && fileExists(p.config) {
-		setConfig(cmd, p.config)
+	if !cmd.Flags().Changed("config") {
+		if fileExists(p.config) {
+			setConfig(cmd, p.config)
+		} else {
+			// Caddy would start an empty instance; nothing here wants one.
+			return fmt.Errorf("no Caddyfile at %s; 'janus autostart' seeds one, or pass --config", p.config)
+		}
 	}
+	setEnvfile(cmd, p)
 	if !cmd.Flags().Changed("pidfile") {
 		if err := os.MkdirAll(p.run, 0o755); err == nil {
 			_ = cmd.Flags().Set("pidfile", p.pid)
@@ -351,6 +439,14 @@ func startEdge(orig runFunc, cmd *cobra.Command, args []string, p servicePaths) 
 }
 
 func restartEdge(caddyStop, caddyStart *cobra.Command, p servicePaths, cmd *cobra.Command) error {
+	// The edge that comes back runs the service Caddyfile; a broken one
+	// would be a restart loop under the item, and Caddy's stop reads it
+	// too (for the admin address). Check before taking anything down.
+	if fileExists(p.config) {
+		if err := validateConfig(p.config); err != nil {
+			return fmt.Errorf("%s does not validate; the edge is left as it is:\n%v", p.config, err)
+		}
+	}
 	pid := runningPID(p)
 	if pid > 0 {
 		// A fresh flag set: the stop and start below must not inherit
@@ -370,13 +466,25 @@ func restartEdge(caddyStop, caddyStart *cobra.Command, p servicePaths, cmd *cobr
 // runningPID finds the edge's process: the item's, then the pidfile's.
 func runningPID(p servicePaths) int {
 	if item := itemFor(p); item != nil {
-		if _, pid := item.loaded(); pid > 0 {
+		if _, pid := item.loaded(); pid > 0 && processAlive(pid) {
 			return pid
 		}
 	}
-	if pid := readPidfile(p.pid); pid > 0 && processAlive(pid) {
+	return pidfilePID(p)
+}
+
+// pidfilePID reads the bare-start pidfile and vouches for it: the process
+// must be alive and be a janus, or the file is stale (a crash leaves it
+// behind, and pids get reused) and is removed.
+func pidfilePID(p servicePaths) int {
+	pid := readPidfile(p.pid)
+	if pid <= 0 {
+		return 0
+	}
+	if processAlive(pid) && isJanus(pid) {
 		return pid
 	}
+	_ = os.Remove(p.pid)
 	return 0
 }
 
@@ -401,6 +509,16 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
+// isJanus reports whether the process is a janus binary, by its command
+// name as ps reports it.
+func isJanus(pid int) bool {
+	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(filepath.Base(strings.TrimSpace(string(out))), "janus")
+}
+
 func waitGone(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -414,7 +532,7 @@ func waitGone(pid int, timeout time.Duration) bool {
 
 // --- autostart -----------------------------------------------------------------
 
-func autostartEdge(caddyStop *cobra.Command, p servicePaths, cfg string, args []string, cmd *cobra.Command) error {
+func autostartEdge(caddyStop *cobra.Command, p servicePaths, args []string, cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
 	item := itemFor(p)
 	if item == nil {
@@ -422,36 +540,34 @@ func autostartEdge(caddyStop *cobra.Command, p servicePaths, cfg string, args []
 	}
 	if len(args) > 0 {
 		if args[0] != "off" || (len(args) == 2 && args[1] != "stop") || len(args) > 2 {
-			return errors.New("usage: janus autostart [off [stop]]")
+			return errors.New("usage: janus autostart [off [stop]] (to stop the edge and keep the item, 'janus stop')")
 		}
 		had, err := item.unregister()
 		if err != nil {
 			return err
 		}
 		if had {
-			fmt.Fprintf(out, "autostart off: removed %s\n", item.file())
+			fmt.Fprintf(out, "autostart off: removed %s; a running edge is left alone\n", item.file())
 		} else {
 			fmt.Fprintln(out, "autostart was not on")
 		}
 		if len(args) == 2 {
-			if runningPID(p) == 0 && !controlReachable(p) {
-				fmt.Fprintln(out, "janus was not running")
-				return nil
-			}
 			return caddyStop.RunE(caddyStop, nil)
 		}
 		return nil
 	}
 
-	if cfg != "" {
-		abs, err := filepath.Abs(cfg)
-		if err != nil {
-			return err
+	// A unix socket path has a hard limit (104 bytes on macOS, 108 on
+	// Linux) that validation cannot see: the listener binds at start,
+	// which under a crash-only item is a restart loop.
+	for _, sock := range []string{p.sock, p.admin} {
+		if len(sock) > maxSocketPath {
+			return fmt.Errorf("the socket path is %d bytes; unix sockets allow %d:\n  %s\nset XDG_STATE_HOME to a shorter directory", len(sock), maxSocketPath, sock)
 		}
-		p.config = abs
-		if !fileExists(p.config) {
-			return fmt.Errorf("no Caddyfile at %s", p.config)
-		}
+	}
+	exe, err := installedExe(p)
+	if err != nil {
+		return err
 	}
 	for _, dir := range []string{filepath.Dir(p.config), p.sites, p.run, filepath.Dir(p.log), filepath.Dir(p.sup)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -470,44 +586,66 @@ func autostartEdge(caddyStop *cobra.Command, p servicePaths, cfg string, args []
 	if err := validateConfig(p.config); err != nil {
 		return fmt.Errorf("%s does not validate; nothing installed:\n%v", p.config, err)
 	}
-	// A unix socket path has a hard limit (104 bytes on macOS, 108 on
-	// Linux) that validation cannot see: the listener binds at start,
-	// which under a crash-only item is a restart loop.
-	if len(p.sock) > maxSocketPath {
-		return fmt.Errorf("the control socket path is %d bytes; unix sockets allow %d:\n  %s\nset XDG_STATE_HOME to a shorter directory", len(p.sock), maxSocketPath, p.sock)
-	}
-	exe, err := os.Executable()
+
+	changed, err := item.register(p, exe)
 	if err != nil {
 		return err
 	}
-
-	if err := item.register(p, exe); err != nil {
-		return err
-	}
 	fmt.Fprintf(out, "autostart on: %s\n", item.file())
-	if warn := lowPortWarning(p, exe); warn != "" {
+	for _, warn := range platformNotes(p, exe) {
 		fmt.Fprintln(out, warn)
 	}
 
-	loaded, pid := item.loaded()
+	_, pid := item.loaded()
 	switch {
-	case loaded && pid > 0:
-		fmt.Fprintf(out, "janus is already running (pid %d) under %s\n", pid, item.name())
+	case pid > 0 && processAlive(pid):
+		if changed {
+			fmt.Fprintf(out, "janus is running (pid %d) under the previous item; 'janus restart' applies the new one\n", pid)
+		} else {
+			fmt.Fprintf(out, "janus is already running (pid %d) under %s\n", pid, item.name())
+		}
 	case runningPID(p) > 0 || controlReachable(p):
 		fmt.Fprintln(out, "something already serves this edge outside the item; 'janus restart' hands it over")
-	case loaded:
-		if err := item.kick(); err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "janus started under %s\n", item.name())
 	default:
 		if err := item.load(); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "janus started under %s\n", item.name())
 	}
-	fmt.Fprintf(out, "config %s\nlog    %s\n", p.config, p.log)
+	fmt.Fprintf(out, "config %s\nsites  %s\nlog    %s\n", p.config, p.sites, p.log)
 	return nil
+}
+
+// installedExe is the binary the item runs: this one, by the path it was
+// invoked as when that names the same file (a versioned install's stable
+// symlink rather than the resolved target that vanishes on upgrade). A
+// root item refuses a binary that someone other than root can change.
+func installedExe(p servicePaths) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if len(os.Args) > 0 {
+		if invoked, err := exec.LookPath(os.Args[0]); err == nil {
+			if abs, err := filepath.Abs(invoked); err == nil {
+				a, errA := os.Stat(abs)
+				b, errB := os.Stat(exe)
+				if errA == nil && errB == nil && os.SameFile(a, b) {
+					exe = abs
+				}
+			}
+		}
+	}
+	if p.root {
+		st, err := os.Stat(exe)
+		if err != nil {
+			return "", err
+		}
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok && (sys.Uid != 0 || st.Mode().Perm()&0o022 != 0) {
+			return "", fmt.Errorf("%s is not root-owned and unwritable by others; a system service must not run a binary another user can change (install as root: 'curl -fsSL .../install.sh | sudo bash' puts it in /usr/local/bin)", exe)
+		}
+	}
+	return exe, nil
 }
 
 // validateConfig runs this binary's own 'janus validate' on the Caddyfile,
@@ -558,35 +696,43 @@ type edgeStatus struct {
 	PID         int    `json:"pid,omitempty"`
 	Uptime      string `json:"uptime,omitempty"`
 	Supervisor  string `json:"supervisor,omitempty"` // item name, or "pidfile"
-	Autostart   bool   `json:"autostart"`
-	Loaded      bool   `json:"loaded"`
+	Autostart   bool   `json:"autostart"`            // the item file exists
+	Loaded      bool   `json:"loaded"`               // the manager holds the job
 	Binary      string `json:"binary"`
 	Version     string `json:"version"`
+	Janus       string `json:"janus"`
+	Caddy       string `json:"caddy"`
 	BinaryNewer bool   `json:"binary_newer"`
 	Config      string `json:"config"`
 	Sites       string `json:"sites"`
 	Log         string `json:"log"`
 	Control     string `json:"control,omitempty"`
-	Apps        int    `json:"apps"`
+	Apps        *int   `json:"apps,omitempty"` // only when control answered
 }
 
 func gatherStatus(p servicePaths) edgeStatus {
-	st := edgeStatus{Config: p.config, Sites: p.sites, Log: p.log, Version: versionLine()}
+	st := edgeStatus{Config: p.config, Sites: p.sites, Log: p.log, Version: versionLine(), Janus: janusVersion(), Caddy: caddyVersion()}
 	st.Binary, _ = os.Executable()
-	if item := itemFor(p); item != nil && item.registered() {
-		st.Autostart = true
-		st.Supervisor = item.name()
+	if item := itemFor(p); item != nil {
+		st.Autostart = item.registered()
 		st.Loaded, st.PID = item.loaded()
-	}
-	if st.PID == 0 {
-		if fp := readPidfile(p.pid); fp > 0 && processAlive(fp) {
-			st.PID = fp
-			if !st.Autostart {
-				st.Supervisor = "pidfile"
-			}
+		if st.PID > 0 && !processAlive(st.PID) {
+			st.PID = 0
+		}
+		if st.Loaded || st.Autostart {
+			st.Supervisor = item.name()
 		}
 	}
-	st.Apps, st.Control = probeControl(p)
+	if st.PID == 0 {
+		if fp := pidfilePID(p); fp > 0 {
+			st.PID = fp
+			st.Supervisor = "pidfile"
+		}
+	}
+	if n, at := probeControl(p); at != "" {
+		st.Control = at
+		st.Apps = &n
+	}
 	st.Running = st.PID > 0 || st.Control != ""
 	if st.PID > 0 {
 		st.Uptime = elapsed(st.PID)
@@ -628,12 +774,16 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 		fmt.Fprintln(out, "edge     stopped")
 	}
 	switch {
+	case st.Supervisor == "pidfile" && st.Autostart:
+		fmt.Fprintf(out, "under    pidfile %s (autostart on, but the item is not running it: 'janus restart' hands it over)\n", p.pid)
+	case st.Supervisor == "pidfile":
+		fmt.Fprintf(out, "under    pidfile %s\n", p.pid)
 	case st.Autostart && st.Loaded:
 		fmt.Fprintf(out, "under    %s (autostart on)\n", st.Supervisor)
 	case st.Autostart:
 		fmt.Fprintf(out, "under    %s (autostart on, not loaded: 'janus start')\n", st.Supervisor)
-	case st.Supervisor == "pidfile":
-		fmt.Fprintf(out, "under    pidfile %s\n", p.pid)
+	case st.Loaded:
+		fmt.Fprintf(out, "under    %s (autostart off; the job stays until logout or 'janus stop')\n", st.Supervisor)
 	default:
 		fmt.Fprintln(out, "under    nothing (not under autostart)")
 	}
@@ -645,10 +795,10 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 	fmt.Fprintf(out, "sites    %s\n", st.Sites)
 	fmt.Fprintf(out, "log      %s\n", st.Log)
 	switch {
-	case st.Control != "":
-		fmt.Fprintf(out, "control  %s (%d app%s registered)\n", st.Control, st.Apps, plural(st.Apps))
+	case st.Apps != nil:
+		fmt.Fprintf(out, "control  %s (%d app%s registered)\n", st.Control, *st.Apps, plural(*st.Apps))
 	case st.Running:
-		fmt.Fprintf(out, "control  unreachable at %s and %s\n", localControl, p.sock)
+		fmt.Fprintf(out, "control  unreachable at %s and %s\n", p.sock, localControlURL)
 	}
 }
 
@@ -659,14 +809,14 @@ func plural(n int) string {
 	return "s"
 }
 
-// probeControl asks the edge's control plane for its apps, over loopback
-// HTTP first and the service's unix socket second. Returns the count and
+// probeControl asks the edge's control plane for its apps: over the
+// service's unix socket first (its path is this edge's alone), then over
+// loopback HTTP, accepted only when the edge that answers says it also
+// listens on that socket — any Janus with 'control local' answers on the
+// port, and another one must not pass as this edge. Returns the count and
 // the endpoint that answered, or "" when neither did.
 func probeControl(p servicePaths) (int, string) {
-	if n, ok := fetchApps(localControl+"/1.0/apps", nil); ok {
-		return n, localControl
-	}
-	if fileExists(p.sock) || socketExists(p.sock) {
+	if socketExists(p.sock) {
 		dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", p.sock)
@@ -674,6 +824,12 @@ func probeControl(p servicePaths) (int, string) {
 		if n, ok := fetchApps("http://janus/1.0/apps", dial); ok {
 			return n, "unix " + p.sock
 		}
+	}
+	if !controlListensOn(localControlURL+"/1.0", p.sock) {
+		return 0, ""
+	}
+	if n, ok := fetchApps(localControlURL+"/1.0/apps", nil); ok {
+		return n, localControlURL
 	}
 	return 0, ""
 }
@@ -688,13 +844,16 @@ func socketExists(path string) bool {
 	return err == nil && st.Mode()&os.ModeSocket != 0
 }
 
-func fetchApps(url string, dial func(context.Context, string, string) (net.Conn, error)) (int, bool) {
+func controlClient(dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
 	tr := &http.Transport{}
 	if dial != nil {
 		tr.DialContext = dial
 	}
-	client := &http.Client{Transport: tr, Timeout: 1500 * time.Millisecond}
-	resp, err := client.Get(url)
+	return &http.Client{Transport: tr, Timeout: 1500 * time.Millisecond}
+}
+
+func fetchApps(url string, dial func(context.Context, string, string) (net.Conn, error)) (int, bool) {
+	resp, err := controlClient(dial).Get(url)
 	if err != nil {
 		return 0, false
 	}
@@ -707,6 +866,35 @@ func fetchApps(url string, dial func(context.Context, string, string) (net.Conn,
 		return 0, false
 	}
 	return len(apps), true
+}
+
+// controlListensOn asks the control root at url whether that edge also
+// listens on the unix socket path: the identity check for loopback.
+func controlListensOn(url, sock string) bool {
+	resp, err := controlClient(nil).Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var root struct {
+		Type    string `json:"type"`
+		Control []struct {
+			Mode   string `json:"mode"`
+			Listen string `json:"listen"`
+		} `json:"control"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&root); err != nil || root.Type != "janus" {
+		return false
+	}
+	for _, c := range root.Control {
+		if c.Mode == "internal" && c.Listen == sock {
+			return true
+		}
+	}
+	return false
 }
 
 // elapsed reports how long the process has been up, as ps prints it.
@@ -754,4 +942,20 @@ func parseElapsed(s string) time.Duration {
 		secs = secs*60 + n
 	}
 	return time.Duration(days)*24*time.Hour + time.Duration(secs)*time.Second
+}
+
+// runOut runs a command and returns its stdout, with stderr folded into
+// the error.
+func runOut(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return stdout.Bytes(), fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
+	}
+	return stdout.Bytes(), nil
 }

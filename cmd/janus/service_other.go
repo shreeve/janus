@@ -7,4 +7,4 @@ package main
 
 func newServiceItem(servicePaths) serviceItem { return nil }
 
-func lowPortWarning(servicePaths, string) string { return "" }
+func platformNotes(servicePaths, string) []string { return nil }

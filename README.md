@@ -146,7 +146,8 @@ and the Route 53 DNS provider (DNS-01 wildcard certificates), compiled as
 one static executable. `go.mod` pins all dependencies, including explicit
 security-sensitive overrides.
 `janus version`, `-v`, `-V`, and `--version` all report the Janus and Caddy
-versions; every other subcommand is stock Caddy.
+versions; the service verbs (`autostart`, `start`, `stop`, `restart`,
+`status`) are Janus's; every other subcommand is stock Caddy.
 
 ### 1. ping (data plane)
 
@@ -245,17 +246,18 @@ make janus        # go build ./cmd/janus -> bin/janus
 From anywhere, against a published version:
 
 ```bash
-go install github.com/shreeve/janus/cmd/janus@v1.12.0
+go install github.com/shreeve/janus/cmd/janus@v1.12.1
 ```
 
 Janus also remains a plain Caddy module: builders that assemble their own
 Caddy (xcaddy or a custom main) add `github.com/shreeve/janus` like any
 other plugin.
 
-`janus help` lists every command. They are Caddy's commands, under the
-`janus` name: `janus run`, `janus adapt`, `janus reload`, `janus trust`, and
-the rest behave exactly as Caddy's reference documents them, and there is no
-separate `caddy` command on a Janus host.
+`janus help` lists every command. Most are Caddy's, under the `janus`
+name: `janus adapt`, `janus trust`, `janus fmt`, and the rest behave as
+Caddy's reference documents them, and there is no separate `caddy` command
+on a Janus host. The service verbs below are Janus's own, and `run`,
+`start`, `stop`, `reload`, and `validate` default to the service Caddyfile.
 
 Confirm the modules are linked:
 
@@ -266,22 +268,30 @@ Confirm the modules are linked:
 ### Running as a service
 
 One Janus per host is the model, and the binary manages it with the same
-verbs Harbor uses:
+verbs as [Harbor](https://github.com/shreeve/duckdb-harbor):
 
 | Verb | What it does |
 | --- | --- |
-| `janus autostart` | Installs the edge as a service and starts it: running now, at every boot, and again after a crash. |
+| `janus autostart` | Installs the edge as a service and starts it: running now, at every login (as root: every boot), and again after a crash. |
 | `janus autostart off [stop]` | Removes the service; a running edge is left alone unless `stop` is given. |
-| `janus start` / `janus stop` | Start or stop that edge. A stop is clean, so it stays stopped until the next boot. |
-| `janus restart` | Stop and start again. This is how an installed upgrade takes effect. |
+| `janus start` / `janus stop` | Start or stop that edge. A stop is clean, so it stays stopped until the next login or boot. Stopping a stopped edge is a quiet no-op. |
+| `janus restart` | Stop and start again. This is how an installed upgrade takes effect. The Caddyfile is validated first, so a broken one leaves the edge as it is. |
 | `janus reload` | Apply an edited Caddyfile in place, keeping every connection. |
-| `janus status [--json]` | Running or not, under what, which binary and version, and how many apps are registered. Exit 3 when stopped. |
+| `janus status [--json]` | Running or not, under what, which binary and version, whether the binary is newer than the running edge, and how many apps are registered. Exit 3 when stopped. |
 | `janus validate` | Check the service Caddyfile without touching the running edge. |
+
+Run it as yourself on a machine you log in to. Run it as root (`sudo janus
+autostart`, with `janus` installed where root finds it: the installer puts
+it in `/usr/local/bin` when run as root) for a server: ports 80 and 443
+with no setcap, up before anyone logs in, unaffected by logouts. One or
+the other on a host, never both, since two edges would contend for the
+same ports.
 
 The supervisor is launchd on macOS and systemd on Linux. As a user the
 service is a login item (`~/Library/LaunchAgents/janus.edge.plist`, or a
-systemd user unit); as root it is a system service (`/Library/LaunchDaemons`,
-or `/etc/systemd/system/janus.service`) that needs no login session. It runs
+systemd user unit, for which `autostart` also enables lingering so the
+edge survives logout); as root it is a system service
+(`/Library/LaunchDaemons`, or `/etc/systemd/system/janus.service`). It runs
 `janus run --config <Caddyfile>` in the foreground, restarts it after a
 crash, and never after a clean exit.
 
@@ -291,24 +301,27 @@ The service's files:
 | --- | --- | --- |
 | Caddyfile | `~/.config/janus/Caddyfile` | `/etc/janus/Caddyfile` |
 | Drop-in sites | `~/.config/janus/sites/*.caddy` | `/etc/janus/sites/*.caddy` |
-| Control socket, pidfile | `~/.local/state/janus/run/` | `/var/lib/janus/run/` |
+| Environment (optional) | `~/.config/janus/env` | `/etc/janus/env` |
+| Control and admin sockets, pidfile | `~/.local/state/janus/run/` | `/var/lib/janus/run/` |
 | Process log | `~/.local/state/janus/log/janus.log` | `/var/log/janus/janus.log` |
 
-`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` move the user paths. `autostart`
-seeds the Caddyfile when there is none — the control plane on its unix
-socket and `http://127.0.0.1:7600`, the process log on a rolling file, and
-an `import` of the drop-in sites directory — and validates it (or the one
-`--config` names) before installing anything, so a bad config never becomes
-a restart loop. A tool that owns a site writes one `*.caddy` file into the
-sites directory and runs `janus reload`; the Caddyfile itself stays the
-operator's. `start`, `stop`, `reload`, and `validate` default to that
-Caddyfile when it exists; `run` does too when the current directory has no
-Caddyfile of its own.
+`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` move the user's Caddyfile and
+state. `autostart` seeds the Caddyfile when there is none: the control
+plane on its unix socket and `http://127.0.0.1:7600`, Caddy's admin API on
+a socket only this edge's user can reach, `ping` on every site, the
+process log on a rolling file, and an `import` of the drop-in sites
+directory. It validates the Caddyfile before installing anything, so a bad
+config never becomes a restart loop, and refuses a state directory deep
+enough to push the socket paths past the unix limit. A tool that owns a
+site writes one `*.caddy` file into the sites directory and runs `janus
+reload`; the Caddyfile itself stays the operator's. `KEY=value` lines in
+the env file reach the edge at start (the Route 53 provider's `AWS_*`
+credentials, say, or anything a `{env.*}` placeholder reads).
 
-`JANUS_SERVICE_LABEL` renames the launchd item or systemd unit (default
-`janus.edge` and `janus.service`). With `XDG_CONFIG_HOME` and
-`XDG_STATE_HOME` pointed elsewhere it lets a test suite run an edge beside
-the host's real one; that edge needs its own ports in its own Caddyfile.
+`start`, `stop`, `reload`, and `validate` default to the service Caddyfile
+when it exists; `run` does too when the current directory has no Caddyfile
+of its own. `stop`, `reload`, and `restart` reach the edge through its
+admin socket, so they can never touch another Caddy on the host.
 
 Upgrading is the installer followed by a restart:
 
@@ -321,9 +334,14 @@ is running. On Linux a user's edge needs `cap_net_bind_service` on the
 binary to bind ports 80 and 443; `autostart` says so when it is missing,
 and the installer restores it across upgrades.
 
-This is the whole story of running Janus on a host. Rip's `rip sites`
-registers apps with this edge and drops its site files into the sites
-directory; it does not run a Janus of its own.
+`JANUS_SERVICE_LABEL` renames the launchd item or systemd unit (default
+`janus.edge` and `janus.service`). With `XDG_CONFIG_HOME`,
+`XDG_STATE_HOME`, and `XDG_DATA_HOME` pointed elsewhere it lets a test
+suite run an edge beside the host's real one, with its own Caddy storage;
+that edge needs its own ports in its own Caddyfile.
+
+Rip's `rip sites` registers apps with this edge and drops its site files
+into the sites directory; the edge itself is Janus's to run.
 
 ### Prebuilt releases
 
@@ -340,7 +358,7 @@ curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bas
 Then `janus autostart` makes it the host's edge
 ([Running as a service](#running-as-a-service)).
 
-Pin a version with `... | bash -s v1.12.0`. Uninstall with
+Pin a version with `... | bash -s v1.12.1`. Uninstall with
 `... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
 units, and certificates stay.
 

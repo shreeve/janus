@@ -8,11 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const defaultLaunchdLabel = "janus.edge"
@@ -41,43 +42,67 @@ func (l *launchdItem) target() string { return l.domain + "/" + l.label }
 
 func (l *launchdItem) registered() bool { return fileExists(l.plist) }
 
-var launchdPID = regexp.MustCompile(`(?m)^\s*pid = (\d+)`)
-
 func (l *launchdItem) loaded() (bool, int) {
-	out, err := exec.Command("launchctl", "print", l.target()).Output()
+	out, err := runOut("launchctl", "print", l.target())
 	if err != nil {
 		return false, 0
 	}
+	return true, parseLaunchdPID(out)
+}
+
+var launchdPID = regexp.MustCompile(`(?m)^\s*pid = (\d+)`)
+
+// parseLaunchdPID reads the pid from `launchctl print`, present only while
+// the job's process runs (absent when "not running" or "spawn scheduled").
+func parseLaunchdPID(out []byte) int {
 	if m := launchdPID.FindSubmatch(out); m != nil {
 		pid, _ := strconv.Atoi(string(m[1]))
-		return true, pid
+		return pid
 	}
-	return true, 0
+	return 0
 }
 
-func (l *launchdItem) register(p servicePaths, exe string) error {
+func (l *launchdItem) register(p servicePaths, exe string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(l.plist), 0o755); err != nil {
-		return err
+		return false, err
 	}
-	if err := os.WriteFile(l.plist, []byte(launchdPlist(l.label, p, exe)), 0o644); err != nil {
-		return err
+	body := []byte(launchdPlist(l.label, p, exe))
+	prev, _ := os.ReadFile(l.plist)
+	changed := !bytes.Equal(prev, body)
+	if changed {
+		if err := os.WriteFile(l.plist, body, 0o644); err != nil {
+			return false, err
+		}
 	}
 	// A previous `disable` outlives the plist; clear it so bootstrap and
-	// the next boot both take.
+	// the next login both take.
 	_ = launchctl("enable", l.target())
-	return nil
+	return changed, nil
 }
 
+// load bootstraps the plist. launchd keeps the spec it was last handed,
+// so a job it still holds (after a clean stop, or an `autostart off`) is
+// booted out first: what runs is what the file says, and a kickstart
+// inside ThrottleInterval of the last run is not waited out.
 func (l *launchdItem) load() error {
+	if loaded, _ := l.loaded(); loaded {
+		if err := launchctl("bootout", l.target()); err != nil {
+			return err
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if loaded, _ := l.loaded(); !loaded {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 	return launchctl("bootstrap", l.domain, l.plist)
 }
 
-func (l *launchdItem) kick() error {
-	return launchctl("kickstart", l.target())
-}
-
-// unregister removes the plist. The loaded job, if any, runs until logout
-// or reboot: bootout would kill the edge, and off is not stop.
+// unregister removes the plist. A loaded job runs on until 'janus stop'
+// or logout — bootout would kill the edge, and off is not stop — and
+// launchd still revives it after a crash until then.
 func (l *launchdItem) unregister() (bool, error) {
 	err := os.Remove(l.plist)
 	if errors.Is(err, os.ErrNotExist) {
@@ -87,23 +112,20 @@ func (l *launchdItem) unregister() (bool, error) {
 }
 
 func launchctl(args ...string) error {
-	cmd := exec.Command("launchctl", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return fmt.Errorf("launchctl %s: %s", strings.Join(args, " "), msg)
-	}
-	return nil
+	_, err := runOut("launchctl", args...)
+	return err
 }
 
 func launchdPlist(label string, p servicePaths, exe string) string {
-	path := os.Getenv("PATH")
-	if p.root {
-		path = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	env := serviceEnv(p, exe)
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var envXML strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&envXML, "\t\t<key>%s</key>\n\t\t<string>%s</string>\n", xmlEscape(k), xmlEscape(env[k]))
 	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -124,11 +146,7 @@ func launchdPlist(label string, p servicePaths, exe string) string {
 	<string>%s</string>
 	<key>EnvironmentVariables</key>
 	<dict>
-		<key>HOME</key>
-		<string>%s</string>
-		<key>PATH</key>
-		<string>%s</string>
-	</dict>
+%s	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -146,12 +164,21 @@ func launchdPlist(label string, p servicePaths, exe string) string {
 	<string>%s</string>
 </dict>
 </plist>
-`, xmlEscape(label), xmlEscape(exe), xmlEscape(p.config), xmlEscape(p.state), xmlEscape(p.home), xmlEscape(path), xmlEscape(p.sup), xmlEscape(p.sup))
+`, xmlEscape(label), xmlEscape(exe), xmlEscape(p.config), xmlEscape(p.state), envXML.String(), xmlEscape(p.sup), xmlEscape(p.sup))
 }
 
 func xmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
-// lowPortWarning: on macOS any user may bind 80 and 443.
-func lowPortWarning(servicePaths, string) string { return "" }
+// platformNotes: on macOS any user may bind 80 and 443, and a LaunchAgent
+// needs a GUI session to load into.
+func platformNotes(p servicePaths, _ string) []string {
+	if p.root {
+		return nil
+	}
+	if os.Getenv("SSH_CONNECTION") != "" {
+		return []string{"note: a user's item lives in the GUI login session; from ssh it loads only while that user is logged in at the console (a server wants 'sudo janus autostart')"}
+	}
+	return nil
+}
