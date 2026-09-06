@@ -373,6 +373,20 @@ func (f *accessFacts) attempt(path string) {
 	f.mu.Unlock()
 }
 
+// discountAttempt uncounts the most recent attempt: a bounce taken while the
+// request was parked for capacity is the hold re-checking for a slot, and
+// reporting each one as a retry would inflate retry_count by the poll rate.
+func (f *accessFacts) discountAttempt() {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	if f.attempts > 0 {
+		f.attempts--
+	}
+	f.mu.Unlock()
+}
+
 func (f *accessFacts) setMark(values []string, present bool) {
 	if f == nil {
 		return
