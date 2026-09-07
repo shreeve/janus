@@ -31,14 +31,12 @@
 #   tls certs/ripdev.io.crt certs/ripdev.io.key
 {
 	# On-demand TLS: before minting a certificate for a name it has no
-	# cert for, Caddy asks Janus. The registry answers 200 when a
-	# registered app claims the host, 404 otherwise — registration IS
-	# the allowlist; there is nothing separate to manage. Point ask at a
-	# listener WITHOUT token:… (Caddy's ask request carries no
-	# Authorization header; a tokened listener denies every mint with a
-	# loud 401). The default local listener below is that listener.
+	# cert for, Caddy asks Janus, in-process. The registry allows a host
+	# a registered app claims and denies everything else — registration
+	# IS the allowlist; there is nothing separate to manage. (The same
+	# rule answers GET /1.0/tls/ask for a Caddy that must use `ask`.)
 	on_demand_tls {
-		ask http://127.0.0.1:7600/1.0/tls/ask
+		permission janus
 	}
 
 	janus {

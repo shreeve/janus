@@ -255,14 +255,30 @@ func (a *App) controlMuxAt(base string) *http.ServeMux {
 	return mux
 }
 
-// handleTLSAsk answers Caddy's on_demand_tls ask: may a certificate be
-// minted for this domain? 200 = the domain is a host claimed by a
-// registered app; 404 = it is not (Caddy denies on any non-200). The
-// lookup uses the same normalized exact, alias, and directory-gated site
-// resolution as HTTP. Allowance follows the registry lifecycle and the
-// live direct-child gate: register → allowed; DELETE, TTL reap, or site
-// directory removal → denied. Heartbeat ≠ readiness: an alive app with
-// empty upstreams keeps its allowance — a reload never breaks TLS.
+// certificateAllowed is the on-demand TLS rule: a certificate may be
+// minted for a host claimed by a registered app, or for a cold browse
+// claim, and for nothing else. The lookup uses the same normalized
+// exact, alias, and directory-gated site resolution as HTTP. Allowance
+// follows the registry lifecycle and the live direct-child gate:
+// register → allowed; DELETE, TTL reap, or site directory removal →
+// denied. Heartbeat ≠ readiness: an alive app with empty upstreams keeps
+// its allowance — a reload never breaks TLS. Returns the app id, "" for
+// a cold claim. The tls.permission.janus module and GET /1.0/tls/ask are
+// the two callers.
+func (a *App) certificateAllowed(domain string) (appID string, err error) {
+	name := normalizeHostHeader(domain)
+	if rec, ok := a.appsRegistry().resolveRequestHost(domain); ok {
+		return rec.ID, nil
+	}
+	if a.state != nil && a.state.browse.coldClaim(name) {
+		return "", nil
+	}
+	return "", fmt.Errorf("domain %q is not a host of any registered app", name)
+}
+
+// handleTLSAsk answers an on_demand_tls ask URL over the control API:
+// 200 = allowed, 404 = not (Caddy denies on any non-200). The in-process
+// form is `permission janus`.
 func (a *App) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 	domain := r.URL.Query().Get("domain")
 	if domain == "" {
@@ -270,19 +286,16 @@ func (a *App) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := normalizeHostHeader(domain)
-	rec, ok := a.appsRegistry().resolveRequestHost(domain)
-	if !ok {
-		if a.state != nil && a.state.browse.coldClaim(name) {
-			writeJSON(w, http.StatusOK, map[string]string{"domain": name, "claim": "cold"})
-			return
-		}
-		writeAPIError(w, &apiError{
-			Status: http.StatusNotFound,
-			Msg:    fmt.Sprintf("domain %q is not a host of any registered app", name),
-		})
+	appID, err := a.certificateAllowed(domain)
+	if err != nil {
+		writeAPIError(w, &apiError{Status: http.StatusNotFound, Msg: err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"domain": name, "app": rec.ID})
+	if appID == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"domain": name, "claim": "cold"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"domain": name, "app": appID})
 }
 
 func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
