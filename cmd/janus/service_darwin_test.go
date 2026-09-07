@@ -19,6 +19,10 @@ func TestLaunchdPlist(t *testing.T) {
 		"<key>RunAtLoad</key>\n\t<true/>",
 		"<key>SuccessfulExit</key>\n\t\t<false/>",
 		"<integer>10</integer>",
+		// Normal scheduling priority: the browser is waiting on every
+		// request through the edge, and launchd's Background band would
+		// starve it under load.
+		"<key>ProcessType</key>\n\t<string>Standard</string>",
 		"<string>/Users/ann/.local/state/janus/log/supervisor.log</string>",
 	} {
 		if !strings.Contains(got, want) {

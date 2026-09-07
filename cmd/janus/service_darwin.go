@@ -161,7 +161,7 @@ func launchdPlist(label string, p servicePaths, exe string) string {
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Standard</string>
 	<key>StandardOutPath</key>
 	<string>%s</string>
 	<key>StandardErrorPath</key>

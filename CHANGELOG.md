@@ -62,6 +62,10 @@ entry; their changes ship in the next tag.
   and a site of your own covering it owns it. `GET /1.0/mdns/status` is
   the front door's status snapshot on the control API, for owners and
   operators.
+- The launchd item runs the edge at normal scheduling priority
+  (`ProcessType Standard`): the browser is waiting on every request
+  through it. `janus autostart` rewrites the installed item; `janus
+  restart` puts the running edge on it.
 
 ## 1.12.2 — 2026-09-06
 
