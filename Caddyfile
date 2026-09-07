@@ -25,9 +25,10 @@
 # on-demand tls (hot ask via /1.0) — minting gated by the registry
 #   Cold config owns the machinery (on_demand_tls global + per-site
 #   tls { on_demand }); the registry only answers "may we mint for
-#   this name?" via GET /1.0/tls/ask?domain=… (200 allow, 404 deny).
-#   The :8443 site below mints from Caddy's internal CA on demand:
-#   registered hosts complete the handshake, unknown names are denied.
+#   this name?" — in-process as `permission janus`, and over the control
+#   API as GET /1.0/tls/ask?domain=… (200 allow, 404 deny). The :8443
+#   site below mints from Caddy's internal CA on demand: registered
+#   hosts complete the handshake, unknown names are denied.
 #
 #   curl -s 'http://127.0.0.1:7600/1.0/tls/ask?domain=some.host'  → 404 until registered
 #
@@ -76,7 +77,7 @@
 	skip_install_trust
 
 	on_demand_tls {
-		ask http://127.0.0.1:7600/1.0/tls/ask
+		permission janus
 	}
 
 	janus {

@@ -229,7 +229,7 @@ var reloadEdge = func(caddyReload *cobra.Command, p servicePaths) error {
 var serveHandshake = func(host string) string {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", "127.0.0.1:443", &tls.Config{ServerName: host, InsecureSkipVerify: true})
 	if err != nil {
-		return fmt.Sprintf("the edge did not complete a TLS handshake for %s (%v); its Caddyfile must import the sites directory (import <sites>/*.caddy) and its on_demand_tls ask must admit registered names", host, err)
+		return fmt.Sprintf("the edge did not complete a TLS handshake for %s (%v); its Caddyfile must import the sites directory (import <sites>/*.caddy) and its on_demand_tls permission must be janus (or an ask that admits registered names)", host, err)
 	}
 	conn.Close()
 	return ""

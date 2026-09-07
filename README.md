@@ -8,7 +8,7 @@
 
 ---
 
-**Module names:** `janus` (app) · `http.handlers.janus` (HTTP handler) · `caddy.logging.encoders.janus` (access encoder)
+**Module names:** `janus` (app) · `http.handlers.janus` (HTTP handler) · `tls.permission.janus` (on-demand TLS permission) · `caddy.logging.encoders.janus` (access encoder)
 
 Janus is a Caddy module. Caddy provides listeners, HTTP/1–3, TLS, and ACME. Janus provides the inward face: a memory-resident registry and engines driven by the `/1.0` JSON API. Cold Caddyfile config sets capabilities (such as **control** reachability) and which sites admit traffic into Janus; hot `/1.0` calls decide how admitted hosts map to upstreams, health, certificate allowlisting, and realtime fan-out.
 
@@ -322,7 +322,7 @@ The service's files:
 
 `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` move the user's Caddyfile and
 state. `autostart` seeds the Caddyfile when there is none: the control
-plane on its unix socket and `http://127.0.0.1:7600`, Caddy's admin API on
+plane on its unix socket, Caddy's admin API on
 a socket only this edge's user can reach, `ping` on every site, the
 process log on a rolling file, and an `import` of the drop-in sites
 directory. It validates the Caddyfile before installing anything, so a bad

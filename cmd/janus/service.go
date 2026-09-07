@@ -103,8 +103,9 @@ func currentPaths() servicePaths {
 // the terminating NUL.
 const maxSocketPath = 103
 
-// localControlURL is the `control local` default the seed config enables.
-// A variable so tests can point it at a port nothing answers on.
+// localControlURL is the `control local` default, tried after the socket
+// for an edge whose Caddyfile opens it. A variable so tests can point it
+// at a port nothing answers on.
 var localControlURL = "http://127.0.0.1:7600"
 
 // seedConfig is the runnable Caddyfile `autostart` writes when none exists:
@@ -139,12 +140,14 @@ func seedConfig(p servicePaths) string {
 	# The local names below use the edge's own CA, one certificate per
 	# name, minted at the first handshake for names registered with the
 	# edge (a wildcard would not do: clients reject *.local and
-	# *.localhost, one label short of a real name). Nothing here tries to
-	# install the CA into the system trust store (that would prompt, and
-	# under the service there is no one to answer); 'janus trust' does.
+	# *.localhost, one label short of a real name). Janus itself is the
+	# permission: it answers from its registry, in-process. Nothing here
+	# tries to install the CA into the system trust store (that would
+	# prompt, and under the service there is no one to answer); 'janus
+	# trust' does.
 	skip_install_trust
 	on_demand_tls {
-		ask http://127.0.0.1:7600/1.0/tls/ask
+		permission janus
 	}
 
 	# The process log: startup, reloads, certificate events, data-plane
@@ -161,10 +164,9 @@ func seedConfig(p servicePaths) string {
 		# Every site answers GET /ping with pong.
 		ping
 
-		# The /1.0 control API tenants register into: a unix socket for
-		# processes on this host, and loopback HTTP.
+		# The /1.0 control API tenants register into: a unix socket, its
+		# permissions this user's.
 		control internal %s
-		control local
 
 		# Directory listings with the embedded theme, for the roots apps
 		# register and for 'janus serve'.
@@ -229,9 +231,9 @@ func localhostSitePath(p servicePaths) string { return filepath.Join(p.sites, "l
 func localhostSite() string {
 	return `# This machine's local names, <name>.localhost: what 'janus serve' opens
 # and what an app registers to be reached from this machine by name. The
-# edge's own CA signs each name at its first handshake, gated by the
-# Caddyfile's on_demand_tls ask ('janus trust' trusts the CA); browsers and
-# the system resolver take *.localhost to mean this machine.
+# edge's own CA signs each name at its first handshake, for registered
+# names only ('janus trust' trusts the CA); browsers and the system
+# resolver take *.localhost to mean this machine.
 *.localhost {
 	tls {
 		issuer internal

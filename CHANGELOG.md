@@ -62,6 +62,11 @@ entry; their changes ship in the next tag.
   and a site of your own covering it owns it. `GET /1.0/mdns/status` is
   the front door's status snapshot on the control API, for owners and
   operators.
+- `permission janus`: Caddy's on-demand TLS permission answered by the
+  janus app in-process, from its registry, with no listener to dial. The
+  seed uses it and opens no loopback control port; the control API is
+  the unix socket. `GET /1.0/tls/ask` remains for a Caddy that must use
+  `ask`.
 - The launchd item runs the edge at normal scheduling priority
   (`ProcessType Standard`): the browser is waiting on every request
   through it. `janus autostart` rewrites the installed item; `janus
