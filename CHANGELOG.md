@@ -4,7 +4,7 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
-## 1.14.0 — unreleased
+## 1.14.0 — 2026-09-07
 
 - In `wan` the local name families are off. Every janus site, the mdns
   front door included, answers 421 for a Host of `<name>.local`,
