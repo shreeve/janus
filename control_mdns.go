@@ -54,3 +54,16 @@ func (a *App) handleMdnsState(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, body)
 }
+
+// handleMdnsStatus is GET /1.0/mdns/status: the front door's status
+// snapshot (registry shape, worker health, heartbeat ages, hub counters,
+// launch links; socket paths redacted) on the control surface, for an
+// operator or a control plane that owns the announced name itself and
+// so never sees the front door. 404 when mDNS is off.
+func (a *App) handleMdnsStatus(w http.ResponseWriter, r *http.Request) {
+	if a.Mdns == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "mdns is off"})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.mdnsStatusSnapshot())
+}

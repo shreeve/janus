@@ -752,11 +752,12 @@ func (a *App) startMdns() error {
 
 	port := ms.listenPort()
 	if ms.shared() {
-		// Shared mode: the front door rides inside the HTTP app's
-		// plain-HTTP port server; the janus site handler is the
-		// per-request decider. A configuration with no janus site
-		// covering the configured name on that port would leave the
-		// front door silently unreachable — hard Start error instead.
+		// Shared mode: the announced name answers on the HTTP app's
+		// plain-HTTP port. Where a janus site covers it, that handler
+		// is the per-request front-door decider; where another site
+		// does, that site owns the name. A configuration where nothing
+		// on that port covers the name would announce a name that
+		// serves nothing — hard Start error instead.
 		sharedPort, err := a.checkMdnsSharedCoverage()
 		if err != nil {
 			return err
@@ -852,18 +853,21 @@ func (a *App) stopMdns() error {
 // operator config.
 const mdnsSharedPasteBlock = "http://*.local {\n\tjanus\n}"
 
-// mdnsSharedCoverageErr is the shared-mode hard Start error: no janus
-// site on the HTTP port covers the configured name, so the front door
-// would be silently unreachable.
+// mdnsSharedCoverageErr is the shared-mode hard Start error: nothing on
+// the HTTP port answers for the configured name, so the announcement
+// would point at a name that serves nothing.
 func mdnsSharedCoverageErr(httpPort int, name string) error {
-	return fmt.Errorf("janus mdns: shared front door: no janus site on the HTTP port (:%d) has a host matcher covering %s; add this site block:\n\n%s\n\nor pin a dedicated front-door address with `listen`",
+	return fmt.Errorf("janus mdns: shared front door: no site on the HTTP port (:%d) has a host matcher covering %s; a site of your own may own that name, or add this block for the built-in front door:\n\n%s\n\nor pin a dedicated front-door address with `listen`",
 		httpPort, name, mdnsSharedPasteBlock)
 }
 
 // checkMdnsSharedCoverage verifies at Start (the HTTP app is provisioned
-// by now — the hub site-table seam) that some janus site on the HTTP
-// app's plain-HTTP port covers the configured name, and returns that
-// port. Wildcard and explicit host matchers both satisfy it.
+// by now — the hub site-table seam) that some site on the HTTP app's
+// plain-HTTP port covers the configured name, and returns that port.
+// Wildcard and explicit host matchers both satisfy it, and the site need
+// not be a janus site: the announcement says "this name answers here",
+// and whoever answers for it owns it. The built-in front door is served
+// only where the covering site is a janus site.
 func (a *App) checkMdnsSharedCoverage() (int, error) {
 	httpAppI, err := a.ctx.AppIfConfigured("http")
 	if err != nil {
@@ -892,23 +896,43 @@ func (a *App) checkMdnsSharedCoverage() (int, error) {
 	return port, nil
 }
 
-// mdnsSharedSiteCovers reports whether any janus site route on a server
+// mdnsSharedSiteCovers reports whether any site route on a server
 // listening on the HTTP port has a host matcher covering name (a
-// catch-all janus route covers everything).
+// catch-all route covers everything).
 func mdnsSharedSiteCovers(ha *caddyhttp.App, httpPort int, name string) bool {
 	for _, srv := range ha.Servers {
 		if !mdnsServerListensOnPort(srv, httpPort) {
 			continue
 		}
-		var entries []hubSiteEntry
-		collectHubRoutes(srv.Routes, nil, &entries)
-		for _, e := range entries {
-			if entryMatchesHost(e, name) {
+		var sets [][]string
+		collectSiteHosts(srv.Routes, nil, &sets)
+		for _, patterns := range sets {
+			if entryMatchesHost(hubSiteEntry{patterns: patterns}, name) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// collectSiteHosts walks a route list the way collectHubRoutes does but
+// keeps the host patterns of every terminal route, janus handler or not
+// (subroutes carry a site's directive routes under its host-matched
+// wrapper, and inherit the wrapper's hosts).
+func collectSiteHosts(routes caddyhttp.RouteList, hosts []string, out *[][]string) {
+	for _, route := range routes {
+		routeHosts := hosts
+		if h := hostsFromMatcherSets(route.MatcherSets); len(h) > 0 {
+			routeHosts = h
+		}
+		for _, handler := range route.Handlers {
+			if sub, ok := handler.(*caddyhttp.Subroute); ok {
+				collectSiteHosts(sub.Routes, routeHosts, out)
+				continue
+			}
+			*out = append(*out, routeHosts)
+		}
+	}
 }
 
 // mdnsServerListensOnPort reports whether one HTTP server binds the
