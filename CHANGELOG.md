@@ -8,7 +8,8 @@ entry; their changes ship in the next tag.
 
 - In `wan` the local name families are off. Every janus site, the mdns
   front door included, answers 421 for a Host of `<name>.local`,
-  `<name>.localhost`, or `localhost`; the on-demand permission mints no
+  `<name>.localhost`, `localhost`, `via.rip`, or `<name>.via.rip`
+  (public DNS pins the via.rip names to 127.0.0.1); the on-demand permission mints no
   certificate for such a name; mdns announces nothing and `/1.0/mdns`
   says `"exposure":"wan"`; `janus serve` refuses with the reason. The
   service edge publishes its stored mode to the module at start and on
