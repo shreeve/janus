@@ -2167,6 +2167,27 @@ mdns_wait_gone() {
 	return 1
 }
 
+# mdns_wait_quiet — poll until the announce and withdraw counters hold
+# still for a second. An entry leaves /1.0/mdns the moment its withdrawal
+# is decided; the counter moves only after the responder's goodbye
+# returns, which can take seconds. A baseline read in that window is one
+# short and reads as a flap.
+mdns_wait_quiet() {
+	local i prev cur
+	prev="$(mdns_stat announces)/$(mdns_stat withdraws)"
+	for i in $(seq 1 30); do
+		sleep 1
+		mdns_hb
+		cur="$(mdns_stat announces)/$(mdns_stat withdraws)"
+		if [[ "$cur" == "$prev" ]]; then
+			return 0
+		fi
+		prev=$cur
+	done
+	echo "mdns counters never held still: $cur" >&2
+	return 1
+}
+
 # mdns_wait_settled — poll until no entry is still probing or awaiting
 # an Add retry (announces / withdraws quiesce so counter deltas are
 # attributable)
@@ -2437,6 +2458,7 @@ case_mdns_reap_withdraws() {
 
 case_mdns_reload_no_flap() {
 	mdns_wait_settled
+	mdns_wait_quiet
 	local a0 w0 adv0 adv1
 	a0="$(mdns_stat announces)"
 	w0="$(mdns_stat withdraws)"
