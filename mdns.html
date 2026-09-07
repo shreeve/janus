@@ -1,7 +1,8 @@
 <!doctype html>
 <!-- Janus mdns front door — embedded, self-contained (zero external
      resources; the offline-LAN story depends on it). Every dynamic value
-     renders as a DOM text node, never markup. -->
+     renders as a DOM text node, never markup. Light and dark follow the
+     device. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -9,131 +10,314 @@
 <title>Janus</title>
 <style>
   :root {
-    --bg: #0f1115; --panel: #171a21; --line: #262b36;
-    --text: #e6e9ef; --dim: #8b93a3; --accent: #7aa2f7;
-    --ok: #4fd6a5; --warn: #e8b75f; --bad: #f27878;
+    color-scheme: light dark;
+    --bg1: #eff6ff; --bg2: #eef2ff; --bg3: #faf5ff;
+    --panel: rgba(255,255,255,.72); --panel-solid: #ffffff; --line: rgba(255,255,255,.35);
+    --inner: rgba(249,250,251,.7); --inner-line: rgba(209,213,219,.5);
+    --text: #111827; --text-2: #4b5563; --dim: #6b7280;
+    --accent: #1d4ed8; --accent-bg: #eff6ff; --accent-line: #bfdbfe;
+    --ok: #16a34a; --ok-bg: #dcfce7; --ok-text: #166534;
+    --warn: #ca8a04; --warn-bg: #fef9c3; --warn-text: #854d0e;
+    --bad: #dc2626; --bad-bg: #fee2e2; --bad-text: #991b1b;
+    --indigo: #4f46e5; --indigo-bg: #e0e7ff; --indigo-text: #3730a3;
+    --purple-bg: #f3e8ff; --purple-text: #6b21a8;
+    --blue-bg: #dbeafe; --blue-text: #1e40af;
+    --gray-bg: #f3f4f6; --gray-text: #4b5563; --dot-off: #d1d5db;
+    --shadow: 0 10px 25px -8px rgba(0,0,0,.12);
+    --arc1: #8b5cf6; --arc2: #a78bfa; --arc3: #c4b5fd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg1: #0b1020; --bg2: #0f1115; --bg3: #150f22;
+      --panel: rgba(23,26,33,.82); --panel-solid: #171a21; --line: rgba(255,255,255,.08);
+      --inner: rgba(255,255,255,.03); --inner-line: rgba(255,255,255,.08);
+      --text: #e6e9ef; --text-2: #b6bdc9; --dim: #8b93a3;
+      --accent: #7aa2f7; --accent-bg: rgba(122,162,247,.12); --accent-line: rgba(122,162,247,.35);
+      --ok: #4fd6a5; --ok-bg: rgba(79,214,165,.16); --ok-text: #7fe3bf;
+      --warn: #e8b75f; --warn-bg: rgba(232,183,95,.16); --warn-text: #f0cc85;
+      --bad: #f27878; --bad-bg: rgba(242,120,120,.16); --bad-text: #f7a0a0;
+      --indigo: #a5b4fc; --indigo-bg: rgba(129,140,248,.16); --indigo-text: #c7d2fe;
+      --purple-bg: rgba(192,132,252,.16); --purple-text: #d8b4fe;
+      --blue-bg: rgba(96,165,250,.16); --blue-text: #93c5fd;
+      --gray-bg: rgba(255,255,255,.06); --gray-text: #b6bdc9; --dot-off: #3b4150;
+      --shadow: 0 10px 25px -8px rgba(0,0,0,.5);
+    }
   }
   * { box-sizing: border-box; }
+  html, body { min-height: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-      Helvetica, Arial, sans-serif;
+    margin: 0; color: var(--text);
+    background: linear-gradient(135deg, var(--bg1), var(--bg2) 50%, var(--bg3));
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column; min-height: 100vh;
   }
-  .wrap { max-width: 920px; margin: 0 auto; padding: 28px 20px 60px; }
-  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
-  header h1 { font-size: 22px; margin: 0; letter-spacing: .3px; }
-  header .name { color: var(--accent); font-family: ui-monospace, Menlo, monospace; }
-  .sub { color: var(--dim); margin: 0 0 22px; font-size: 13px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; padding: 16px 18px; margin-bottom: 16px;
-  }
-  .card h2 {
-    margin: 0 0 10px; font-size: 12px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: .12em; color: var(--dim);
-  }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { text-align: left; padding: 6px 10px 6px 0; vertical-align: top; }
-  th { color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--line); }
-  td { border-bottom: 1px solid var(--line); }
-  tr:last-child td { border-bottom: none; }
-  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
-  .dim { color: var(--dim); }
-  .ok { color: var(--ok); }
-  .warn { color: var(--warn); }
-  .bad { color: var(--bad); }
-  .badge {
-    display: inline-block; padding: 0 7px; margin-left: 6px;
-    border: 1px solid var(--line); border-radius: 999px;
-    font-size: 11px; color: var(--accent); vertical-align: 1px;
-  }
-  .stats { display: flex; flex-wrap: wrap; gap: 26px; }
-  .stat .v { font-size: 20px; font-weight: 600; }
-  .stat .k { font-size: 12px; color: var(--dim); }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .apps-grid { display: grid; gap: 12px; }
-  .app {
-    border: 1px solid var(--line); border-radius: 9px; padding: 14px;
-    min-width: 0;
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .bar { border-bottom: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(6px); }
+  .bar.foot { border-bottom: 0; border-top: 1px solid var(--line); margin-top: auto; }
+  .inner { max-width: 1120px; margin: 0 auto; padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .logo {
+    width: 48px; height: 48px; border-radius: 999px; flex: none;
+    background: var(--panel-solid); box-shadow: var(--shadow); border: 1px solid var(--inner-line);
+    display: flex; align-items: center; justify-content: center;
   }
-  .app-head { display: flex; justify-content: space-between; gap: 12px; }
-  .app-meta { color: var(--dim); font-size: 13px; margin: 8px 0; }
-  .launch { display: grid; gap: 8px; margin-top: 10px; }
-  .launch a {
-    display: flex; align-items: center; min-height: 44px; padding: 9px 12px;
-    border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere;
+  .logo svg { width: 30px; height: 30px; }
+  .brand h1 { margin: 0; font-size: 22px; font-weight: 700; }
+  .brand p { margin: 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+  .live { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--ok); animation: pulse 2s infinite; }
+  .dot.off { background: var(--bad); animation: none; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .refresh {
+    position: relative; width: 36px; height: 36px; border: 0; background: none; cursor: pointer;
+    color: var(--dim); padding: 0; display: flex; align-items: center; justify-content: center;
   }
-  .notice { color: var(--dim); font-size: 13px; margin: 0 0 14px; }
-  .empty { color: var(--dim); padding: 8px 0; }
-  #diagnostic { display: none; border-color: var(--warn); }
-  #diagnostic h2 { color: var(--warn); }
-  #diagnostic p { margin: 8px 0; }
-  #diagnostic table td { font-size: 13px; }
-  #stale { display: none; color: var(--bad); font-size: 13px; margin-bottom: 14px; }
+  .refresh:hover { color: var(--text); }
+  .refresh .icon { width: 18px; height: 18px; }
+  .refresh .arc { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); pointer-events: none; }
+  .arc .track { stroke: var(--arc3); opacity: .3; }
+  .arc .prog { stroke-dasharray: 100.53; stroke-dashoffset: 100.53; animation: countdown 10s linear infinite; }
+  .arc .prog.paused { animation-play-state: paused; opacity: .3; }
+  @keyframes countdown {
+    0%   { stroke-dashoffset: 100.53; stroke: var(--arc1); }
+    50%  { stroke-dashoffset: 50;     stroke: var(--arc2); }
+    100% { stroke-dashoffset: 0;      stroke: var(--arc3); opacity: .3; }
+  }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  main { width: 100%; max-width: 1120px; margin: 0 auto; padding: 28px 20px 40px; }
+  .grid { display: grid; gap: 20px; margin-bottom: 28px; grid-template-columns: repeat(4, 1fr); }
+  .card {
+    background: var(--panel); backdrop-filter: blur(6px); border: 1px solid var(--line);
+    border-radius: 14px; box-shadow: var(--shadow);
+  }
+  .stat { padding: 22px 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .stat .k { font-size: 13px; font-weight: 500; color: var(--text-2); margin: 0; }
+  .stat .v { font-size: 26px; font-weight: 700; margin: 2px 0 0; line-height: 1.2; }
+  .stat .v small { font-size: 17px; font-weight: 600; color: var(--dim); }
+  .stat .s { font-size: 12px; color: var(--dim); margin: 4px 0 0; }
+  .stat .ico { width: 48px; height: 48px; border-radius: 999px; display: flex; align-items: center; justify-content: center; flex: none; }
+  .stat .ico svg { width: 24px; height: 24px; }
+  .ok-t { color: var(--ok); } .ok-b { background: var(--ok-bg); }
+  .warn-t { color: var(--warn); } .warn-b { background: var(--warn-bg); }
+  .bad-t { color: var(--bad); } .bad-b { background: var(--bad-bg); }
+  .indigo-t { color: var(--indigo); } .indigo-b { background: var(--indigo-bg); }
+  .blue-t { color: var(--blue-text); } .blue-b { background: var(--blue-bg); }
+  .purple-t { color: var(--purple-text); } .purple-b { background: var(--purple-bg); }
+
+  .section { margin-bottom: 28px; }
+  .section .head { padding: 20px 24px; border-bottom: 1px solid var(--inner-line); display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .section .head h2 { margin: 0; font-size: 17px; font-weight: 600; }
+  .section .head p { margin: 0; font-size: 13px; color: var(--dim); }
+  .section .body { padding: 20px 24px; display: grid; gap: 14px; }
+  .app { padding: 16px; background: var(--inner); border: 1px solid var(--inner-line); border-radius: 10px; min-width: 0; }
+  .app .row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
+  .app .name { font-size: 17px; font-weight: 600; }
+  .sdot { width: 10px; height: 10px; border-radius: 999px; background: var(--dot-off); flex: none; }
+  .sdot.on { background: var(--ok); animation: pulse 2s infinite; }
+  .sdot.stale { background: var(--warn); }
+  .pill { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .pill.ok { background: var(--ok-bg); color: var(--ok-text); }
+  .pill.gray { background: var(--gray-bg); color: var(--gray-text); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn-text); }
+  .pill.bad { background: var(--bad-bg); color: var(--bad-text); }
+  .pill.blue { background: var(--blue-bg); color: var(--blue-text); }
+  .pill.purple { background: var(--purple-bg); color: var(--purple-text); }
+  .links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 8px 12px;
+    background: var(--panel-solid); border: 1px solid var(--inner-line); border-radius: 9px;
+    color: var(--accent); font-size: 14px; overflow-wrap: anywhere;
+  }
+  .chip:hover { background: var(--accent-bg); border-color: var(--accent-line); text-decoration: none; }
+  .chip svg { width: 14px; height: 14px; flex: none; }
+  .chip .tag { padding: 0 6px; border-radius: 999px; font-size: 10px; font-weight: 600; background: var(--blue-bg); color: var(--blue-text); }
+  .chip.dead { color: var(--dim); background: var(--gray-bg); border-style: dashed; }
+  .chip.pattern { color: var(--dim); background: var(--gray-bg); font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .empty { text-align: center; padding: 24px 0; color: var(--dim); }
+  .empty code { background: var(--gray-bg); padding: 2px 7px; border-radius: 5px; font-size: 13px; }
+  .notice { font-size: 13px; color: var(--dim); margin: 0; }
+  .two { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-bottom: 28px; }
+  .two .card { padding: 22px 24px; }
+  .two h3 { margin: 0 0 14px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .1em; color: var(--text-2); }
+  .counters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; text-align: center; }
+  .counters .v { font-size: 22px; font-weight: 700; margin: 0; }
+  .counters .k { font-size: 12px; color: var(--dim); margin: 0; }
+  .names { display: flex; flex-wrap: wrap; gap: 8px; }
+  .names a, .names span { padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; }
+  .names a { background: var(--blue-bg); color: var(--blue-text); }
+  .names a:hover { text-decoration: none; filter: brightness(.95); }
+  .names span { color: var(--dim); font-size: 14px; padding: 0; }
+  .trust { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; padding: 16px 24px; margin-bottom: 28px; }
+  .trust p { margin: 0; font-size: 14px; color: var(--text-2); }
+  .trust a.btn { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 16px; border-radius: 9px; background: var(--accent); color: #fff; font-weight: 600; }
+  .trust a.btn:hover { text-decoration: none; filter: brightness(1.08); }
+  #stale { display: none; margin-bottom: 20px; padding: 12px 16px; border-radius: 10px; background: var(--bad-bg); color: var(--bad-text); font-size: 13px; }
+  #diagnostic { display: none; margin-bottom: 28px; padding: 22px 24px; border-color: var(--warn); }
+  #diagnostic h2 { margin: 0 0 8px; font-size: 16px; color: var(--warn); }
+  #diagnostic p { margin: 8px 0; font-size: 14px; }
+  #diagnostic table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #diagnostic td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--inner-line); vertical-align: top; }
+  #diagnostic tr:last-child td { border-bottom: 0; }
+  .foot .inner { font-size: 13px; color: var(--text-2); }
+  [hidden] { display: none !important; }
+  @media (max-width: 960px) { .grid { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 600px) {
-    .wrap { padding: 18px 12px 40px; }
-    .card { padding: 14px; border-radius: 8px; }
-    .app-head { display: block; }
-    #diagnostic table, #diagnostic tbody, #diagnostic tr, #diagnostic td {
-      display: block; width: 100%;
-    }
+    .inner { padding: 12px 14px; }
+    main { padding: 18px 12px 30px; }
+    .grid { gap: 12px; margin-bottom: 20px; }
+    .stat { padding: 14px 16px; display: block; }
+    .stat .ico { display: none; }
+    .stat .v { font-size: 22px; }
+    .trust { margin-bottom: 20px; }
+    .section, .two { margin-bottom: 20px; }
+    .section .head, .section .body, .two .card, .trust { padding: 16px; }
+    #diagnostic table, #diagnostic tbody, #diagnostic tr, #diagnostic td { display: block; width: 100%; }
     #diagnostic td { border: 0; padding: 4px 0; }
   }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <h1>Janus <span class="name" id="hdr-name"></span></h1>
-  </header>
-  <p class="sub" id="hdr-sub">read-only status &middot; refreshes every 10s</p>
-  <p class="sub"><a href="/trust">Trust this edge on this device</a> &middot; the one-time setup that gives every local https name a real lock</p>
-  <div id="stale">status.json unreachable — showing the last snapshot</div>
-
-  <div class="card" id="diagnostic">
-    <h2>Canonical name unreachable from this device</h2>
-    <p>This page tried to reach <span class="mono" id="diag-target"></span>
-       and got no answer within a few seconds.</p>
-    <p>That name resolves to a <strong>private LAN address</strong>, and many
-       routers&rsquo; DNS-rebinding protection silently refuses exactly that —
-       the symptom is a timeout, never an error. The one-line fix, per router:</p>
-    <table>
-      <tr><td class="mono">Fritz!Box</td><td>Home Network &rarr; Network &rarr; Network Settings &rarr; DNS Rebind Protection &rarr; add the domain as an exception</td></tr>
-      <tr><td class="mono">pfSense / OPNsense</td><td>System &rarr; Advanced (Unbound: Services &rarr; DNS Resolver) &rarr; add a private-domains entry for the domain</td></tr>
-      <tr><td class="mono">OpenWrt</td><td>dnsmasq option <span class="mono">rebind_domain</span> (Network &rarr; DHCP and DNS &rarr; whitelist the domain)</td></tr>
-      <tr><td class="mono">Pi-hole</td><td><span class="mono">misc.dnsmasq_lines</span>: <span class="mono">rebind-domain-ok=/&lt;domain&gt;/</span></td></tr>
-      <tr><td class="mono">Google WiFi</td><td>No whitelist exists — keep using this .local page, or use Caddy&rsquo;s <span class="mono">tls internal</span> with a per-device trust install</td></tr>
-    </table>
-    <p class="dim">The dashboard below keeps working either way.</p>
+  <div class="bar">
+    <div class="inner">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+            <path d="M24 10 L10 32 L24 54" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M40 10 L54 32 L40 54" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M32 18 V38 a6 6 0 0 1 -12 0" fill="none" stroke="#bb0000" stroke-width="5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div>
+          <h1>Janus</h1>
+          <p id="hdr-sub">connecting…</p>
+        </div>
+      </div>
+      <div class="live">
+        <span class="dot" id="live-dot"></span>
+        <span id="live-text">edge</span>
+        <button class="refresh" id="refresh" title="Refresh" aria-label="Refresh">
+          <svg class="icon" id="refresh-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+          <svg class="arc" viewBox="0 0 36 36">
+            <circle class="track" cx="18" cy="18" r="16" fill="none" stroke-width="2.5"/>
+            <circle class="prog" id="arc" cx="18" cy="18" r="16" fill="none" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>Apps</h2>
-    <p class="notice">Launch links use HTTPS. A .local link needs this edge's
-      certificate authority trusted by this device (<a href="/trust">set that
-      up here</a>). A configured publicly trusted LAN hostname needs no
-      certificate install.</p>
-    <div id="apps"></div>
-  </div>
+  <main>
+    <div id="stale">status.json unreachable — showing the last snapshot</div>
 
-  <div class="card">
-    <h2>Hub</h2>
-    <div class="stats" id="hub-stats"></div>
-  </div>
+    <div class="card" id="diagnostic">
+      <h2>Canonical name unreachable from this device</h2>
+      <p>This page tried to reach <span class="mono" id="diag-target"></span>
+         and got no answer within a few seconds.</p>
+      <p>That name resolves to a <strong>private LAN address</strong>, and many
+         routers&rsquo; DNS-rebinding protection silently refuses exactly that —
+         the symptom is a timeout, never an error. The one-line fix, per router:</p>
+      <table>
+        <tr><td class="mono">Fritz!Box</td><td>Home Network &rarr; Network &rarr; Network Settings &rarr; DNS Rebind Protection &rarr; add the domain as an exception</td></tr>
+        <tr><td class="mono">pfSense / OPNsense</td><td>System &rarr; Advanced (Unbound: Services &rarr; DNS Resolver) &rarr; add a private-domains entry for the domain</td></tr>
+        <tr><td class="mono">OpenWrt</td><td>dnsmasq option <span class="mono">rebind_domain</span> (Network &rarr; DHCP and DNS &rarr; whitelist the domain)</td></tr>
+        <tr><td class="mono">Pi-hole</td><td><span class="mono">misc.dnsmasq_lines</span>: <span class="mono">rebind-domain-ok=/&lt;domain&gt;/</span></td></tr>
+        <tr><td class="mono">Google WiFi</td><td>No whitelist exists — keep using this .local page, or use Caddy&rsquo;s <span class="mono">tls internal</span> with a per-device trust install</td></tr>
+      </table>
+      <p class="notice">The dashboard below keeps working either way.</p>
+    </div>
 
-  <div class="card">
-    <h2>mDNS</h2>
-    <div class="stats" id="mdns-stats"></div>
-    <div id="mdns-names" style="margin-top:10px"></div>
+    <div class="grid">
+      <div class="card stat">
+        <div>
+          <p class="k">Edge</p>
+          <p class="v" id="st-edge">…</p>
+          <p class="s" id="st-edge-sub">mdns</p>
+        </div>
+        <div class="ico" id="st-edge-ico">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        </div>
+      </div>
+      <div class="card stat">
+        <div>
+          <p class="k">Apps</p>
+          <p class="v indigo-t"><span id="st-apps-live">0</span> <small>/ <span id="st-apps-total">0</span></small></p>
+          <p class="s">live</p>
+        </div>
+        <div class="ico indigo-b indigo-t">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+        </div>
+      </div>
+      <div class="card stat">
+        <div>
+          <p class="k">Workers</p>
+          <p class="v blue-t"><span id="st-workers-ok">0</span> <small>/ <span id="st-workers-total">0</span></small></p>
+          <p class="s">healthy</p>
+        </div>
+        <div class="ico blue-b blue-t">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+        </div>
+      </div>
+      <div class="card stat">
+        <div>
+          <p class="k">Bonjour</p>
+          <p class="v purple-t" id="st-names">0</p>
+          <p class="s" id="st-names-sub">names on the LAN</p>
+        </div>
+        <div class="ico purple-b purple-t">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/></svg>
+        </div>
+      </div>
+    </div>
+
+    <div class="card trust" id="trust">
+      <p><strong>New device?</strong> Trust this edge's certificate authority once and every local
+        https name gets a real lock. A configured publicly trusted LAN hostname needs no certificate install.</p>
+      <a class="btn" href="/trust">Trust this edge</a>
+    </div>
+
+    <div class="card section">
+      <div class="head">
+        <h2>Apps</h2>
+        <p>what is registered with this edge, and where it answers</p>
+      </div>
+      <div class="body" id="apps"></div>
+    </div>
+
+    <div class="two">
+      <div class="card">
+        <h3>Hub</h3>
+        <div class="counters">
+          <div><p class="v" id="hub-conns">0</p><p class="k">connections</p></div>
+          <div><p class="v" id="hub-channels">0</p><p class="k">channels</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Bonjour</h3>
+        <div class="names" id="mdns-names"></div>
+        <p class="notice" id="mdns-extra" style="margin-top:12px"></p>
+      </div>
+    </div>
+  </main>
+
+  <div class="bar foot">
+    <div class="inner">
+      <span>read-only · refreshes every 10s</span>
+      <span id="updated">Updated —</span>
+    </div>
   </div>
-</div>
 
 <script>
 "use strict";
 // Rendering discipline: every dynamic value lands via textContent (or an
 // element property like href built from a validated hostname), never as
 // raw markup — registry-derived strings cannot become HTML here.
+var HEARTBEAT_TTL_MS = 15000;
 
 function el(tag, cls, text) {
   var e = document.createElement(tag);
@@ -141,122 +325,189 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
-
-function stat(value, label, cls) {
-  var s = el("div", "stat");
-  s.appendChild(el("div", "v" + (cls ? " " + cls : ""), String(value)));
-  s.appendChild(el("div", "k", label));
-  return s;
-}
-
-function clearChildren(node) {
-  while (node.firstChild) node.removeChild(node.firstChild);
-}
+function clearChildren(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+function setText(id, text) { document.getElementById(id).textContent = text; }
 
 function fmtAge(ms) {
-  if (ms < 0) return "–";
-  if (ms < 1000) return "just now";
-  var s = Math.round(ms / 1000);
-  if (s < 90) return s + "s ago";
-  return Math.round(s / 60) + "m ago";
+  if (ms < 0) return "no heartbeat";
+  if (ms < 2000) return "❤️ now";
+  if (ms < 60000) return "❤️ " + Math.round(ms / 1000) + "s";
+  return "❤️ " + Math.round(ms / 60000) + "m";
+}
+// An app is live while its heartbeat is inside the lease, or while it has
+// a healthy worker; stale when the heartbeat has lapsed.
+function appState(app) {
+  var age = app.heartbeat_age_ms;
+  var healthy = (app.workers || {}).healthy || 0;
+  if (age >= 0 && age < HEARTBEAT_TTL_MS) return "live";
+  if (healthy > 0) return "live";
+  if (age >= HEARTBEAT_TTL_MS) return "stale";
+  return "idle";
+}
+// via.rip names publicly resolve to 127.0.0.1 by design — on any device
+// other than the machine running the edge they point at the device itself.
+function onLan() { return location.hostname.endsWith(".local"); }
+function deadHere(host) { return onLan() && /(^|\.)via\.rip$/.test(host || ""); }
+
+function linkIcon() {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("stroke-width", "2");
+  p.setAttribute("d", "M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14");
+  svg.appendChild(p);
+  return svg;
+}
+
+function launchChip(target) {
+  if (!target.url) {
+    var reason = target.host + " — " + target.mdns;
+    if (target.effective_name) reason += " as " + target.effective_name + "; launch disabled to avoid the wrong host";
+    var dead = el("span", "chip dead", target.host);
+    dead.title = reason;
+    return dead;
+  }
+  var a = el("a", "chip" + (deadHere(target.host) ? " dead" : ""));
+  a.href = target.url;
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.appendChild(linkIcon());
+  a.appendChild(document.createTextNode(target.host));
+  if (target.host.endsWith(".local")) a.appendChild(el("span", "tag", "mDNS"));
+  if (deadHere(target.host)) a.title = "loopback name — only works on the machine running the edge";
+  return a;
 }
 
 function renderApps(apps) {
   var root = document.getElementById("apps");
   clearChildren(root);
   if (!apps || apps.length === 0) {
-    root.appendChild(el("div", "empty",
-      "No apps registered — tenants register via POST /1.0/apps."));
+    var empty = el("div", "empty");
+    empty.appendChild(document.createTextNode("No apps registered. Tenants register with "));
+    empty.appendChild(el("code", null, "POST /1.0/apps"));
+    empty.appendChild(document.createTextNode("."));
+    root.appendChild(empty);
     return;
   }
-  var list = el("div", "apps-grid");
   apps.forEach(function (app) {
     var card = el("section", "app");
-    var head = el("div", "app-head");
-    var identity = el("div");
-    identity.appendChild(el("div", null, app.name));
-    identity.appendChild(el("div", "mono dim", app.id));
-    head.appendChild(identity);
-    head.appendChild(el("span", "badge", app.shape + " · " + app.admission));
-    card.appendChild(head);
+    var row = el("div", "row");
+    var state = appState(app);
+    row.appendChild(el("span", "sdot" + (state === "live" ? " on" : state === "stale" ? " stale" : "")));
+    row.appendChild(el("span", "name", app.name));
+    row.appendChild(el("span", "pill " + (state === "live" ? "ok" : state === "stale" ? "warn" : "gray"), state));
+    row.appendChild(el("span", "pill gray", app.shape + " · " + app.admission));
     var workers = app.workers || {};
-    card.appendChild(el("div", "app-meta",
-      (workers.healthy || 0) + " / " + (workers.total || 0) +
-      " workers healthy · heartbeat " + fmtAge(app.heartbeat_age_ms)));
-    if (app.site_pattern) {
-      card.appendChild(el("div", "mono dim", "pattern: " + app.site_pattern));
+    var w = el("span", "pill blue", "⚙️ " + (workers.healthy || 0) + "/" + (workers.total || 0));
+    w.title = (workers.healthy || 0) + " of " + (workers.total || 0) + " workers healthy";
+    row.appendChild(w);
+    var hb = el("span", "pill purple", fmtAge(app.heartbeat_age_ms));
+    hb.title = "last heartbeat";
+    row.appendChild(hb);
+    if (app.hub && (app.hub.conns || app.hub.channels)) {
+      row.appendChild(el("span", "pill purple", "hub " + app.hub.conns + " · " + app.hub.channels));
     }
-    var launches = app.launch || [];
-    var launch = el("div", "launch");
-    launches.forEach(function (target) {
-      if (target.url) {
-        var a = el("a", "mono", target.host);
-        a.href = target.url;
-        launch.appendChild(a);
-        return;
-      }
-      var reason = target.host + " — " + target.mdns;
-      if (target.effective_name) {
-        reason += " as " + target.effective_name + "; launch disabled to avoid the wrong host";
-      }
-      launch.appendChild(el("div", "mono bad", reason));
-    });
-    if (launches.length === 0) {
-      launch.appendChild(el("div", "warn",
-        "No concrete launch host configured. Add a concrete site.aliases entry."));
+    card.appendChild(row);
+
+    var links = el("div", "links");
+    var launches = (app.launch || []).slice();
+    // Viewing over mDNS means this is not the machine running the edge:
+    // lead with the links that work from here.
+    if (onLan()) launches.sort(function (a, b) { return (deadHere(a.host) ? 1 : 0) - (deadHere(b.host) ? 1 : 0); });
+    launches.forEach(function (target) { links.appendChild(launchChip(target)); });
+    if (app.site_pattern) links.appendChild(el("span", "chip pattern", app.site_pattern));
+    if (launches.length === 0 && !app.site_pattern) {
+      links.appendChild(el("span", "pill warn", "No concrete launch host configured. Add a concrete site.aliases entry."));
+    } else if (launches.length === 0) {
+      links.appendChild(el("span", "pill warn", "No concrete launch host configured"));
     }
-    card.appendChild(launch);
-    list.appendChild(card);
+    card.appendChild(links);
+    root.appendChild(card);
   });
-  root.appendChild(list);
 }
 
-function renderCounters(data) {
-  var h = document.getElementById("hub-stats");
-  clearChildren(h);
+function renderStats(data) {
+  var apps = data.apps || [];
+  var live = apps.filter(function (a) { return appState(a) === "live"; }).length;
+  var healthy = 0, total = 0;
+  apps.forEach(function (a) { healthy += (a.workers || {}).healthy || 0; total += (a.workers || {}).total || 0; });
+  setText("st-apps-live", live);
+  setText("st-apps-total", apps.length);
+  setText("st-workers-ok", healthy);
+  setText("st-workers-total", total);
+  var names = data.advertised || [];
+  setText("st-names", names.length);
+  setText("st-names-sub", data.skipped_hosts ? names.length === 1 ? "name on the LAN · " + data.skipped_hosts + " skipped" : "names on the LAN · " + data.skipped_hosts + " skipped" : names.length === 1 ? "name on the LAN" : "names on the LAN");
   var hub = data.hub || {};
-  h.appendChild(stat(hub.conns || 0, "connections"));
-  h.appendChild(stat(hub.channels || 0, "channels"));
-  var m = document.getElementById("mdns-stats");
-  clearChildren(m);
-  m.appendChild(stat((data.advertised || []).length, "advertised names"));
-  m.appendChild(stat(data.skipped_hosts || 0, "skipped hosts"));
-  var names = document.getElementById("mdns-names");
-  clearChildren(names);
-  (data.advertised || []).forEach(function (n) {
-    names.appendChild(el("span", "mono badge", n));
+  setText("hub-conns", hub.conns || 0);
+  setText("hub-channels", hub.channels || 0);
+
+  var list = document.getElementById("mdns-names");
+  clearChildren(list);
+  names.forEach(function (n) {
+    // The device trusts the CA once it loads this page over https, and the
+    // edge mints an on-demand cert for any registered .local name.
+    var a = el("a", null, n);
+    a.href = "https://" + n + "/";
+    a.target = "_blank";
+    a.rel = "noopener";
+    list.appendChild(a);
   });
+  if (names.length === 0) list.appendChild(el("span", null, "nothing advertised"));
+  var extra = document.getElementById("mdns-extra");
+  clearChildren(extra);
   if (data.canonical) {
-    var line = el("div", "dim");
-    line.style.marginTop = "8px";
-    line.appendChild(document.createTextNode("canonical: "));
-    var a = el("a", "mono", data.canonical);
-    a.href = data.canonical;
-    line.appendChild(a);
-    names.appendChild(line);
+    extra.appendChild(document.createTextNode("canonical: "));
+    var c = el("a", "mono", data.canonical);
+    c.href = data.canonical;
+    extra.appendChild(c);
   }
+}
+
+function setEdge(connected, data) {
+  var v = document.getElementById("st-edge"), ico = document.getElementById("st-edge-ico");
+  v.className = "v " + (connected ? "ok-t" : "bad-t");
+  ico.className = "ico " + (connected ? "ok-b ok-t" : "bad-b bad-t");
+  v.textContent = connected ? "running" : "offline";
+  var name = data ? (data.effective_name || data.name || "") : "";
+  setText("st-edge-sub", name || "mdns");
+  document.getElementById("live-dot").className = "dot" + (connected ? "" : " off");
+  setText("live-text", connected ? "edge running" : "offline");
+  document.getElementById("arc").className.baseVal = "prog" + (connected ? "" : " paused");
 }
 
 function render(data) {
-  document.getElementById("hdr-name").textContent = data.effective_name || data.name || "";
+  var name = data.effective_name || data.name || "";
+  var sub = name;
   if (data.effective_name && data.name && data.effective_name !== data.name) {
-    document.getElementById("hdr-sub").textContent =
-      "configured as " + data.name + " — renamed after an mDNS conflict · refreshes every 10s";
+    sub = name + " · configured as " + data.name + ", renamed after an mDNS conflict";
   }
+  setText("hdr-sub", sub);
   renderApps(data.apps);
-  renderCounters(data);
+  renderStats(data);
+  setText("updated", "Updated " + new Date().toLocaleTimeString());
 }
 
 var stale = document.getElementById("stale");
+var refreshing = false;
 function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  document.getElementById("refresh-icon").classList.add("spin");
   fetch("/status.json", { cache: "no-store" })
-    .then(function (r) { return r.json(); })
+    .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
     .then(function (data) {
       stale.style.display = "none";
+      setEdge(true, data);
       render(data);
       maybeHandoff(data.canonical);
     })
-    .catch(function () { stale.style.display = "block"; });
+    .catch(function () { stale.style.display = "block"; setEdge(false, null); })
+    .then(function () { refreshing = false; document.getElementById("refresh-icon").classList.remove("spin"); });
 }
 
 // Canonical hand-off: probe client-side (the server cannot know whether
@@ -284,6 +535,9 @@ function maybeHandoff(canonical) {
     });
 }
 
+// A device that loaded this page over https already trusts the CA.
+if (location.protocol === "https:") document.getElementById("trust").hidden = true;
+document.getElementById("refresh").addEventListener("click", refresh);
 refresh();
 setInterval(refresh, 10000);
 </script>

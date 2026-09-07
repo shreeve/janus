@@ -598,38 +598,6 @@ func TestMdnsPostAnnounceRenameSurfaces(t *testing.T) {
 	}
 }
 
-func TestMdnsCarriesDesiredHostWithoutScanningHandles(t *testing.T) {
-	reg := newAppRegistry()
-	if _, err := reg.create("shop", []string{"shop.local"}, ""); err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeResponder{}
-	adv := newTestAdvertiser(t, reg, fake)
-	if err := adv.configure(t, &mdnsConfig{name: "janus.local", port: 80, apps: true}); err != nil {
-		t.Fatal(err)
-	}
-	adv.reconcile()
-
-	fake.mu.Lock()
-	front, shop := fake.handles["janus"], fake.handles["shop"]
-	fake.mu.Unlock()
-	before := front.calls() + shop.calls()
-	if !adv.carriesHost("janus.local") || !adv.carriesHost("shop.local") {
-		t.Fatal("desired advertised host was not carried")
-	}
-	if after := front.calls() + shop.calls(); after != before {
-		t.Fatalf("desired-host lookup scanned live handles: calls %d -> %d", before, after)
-	}
-
-	front.rename("janus-2")
-	if !adv.carriesHost("janus-2.local") {
-		t.Fatal("post-announce effective name was not carried immediately")
-	}
-	if after := front.calls() + shop.calls(); after <= before {
-		t.Fatal("renamed-host fallback did not consult live handles")
-	}
-}
-
 // TestMdnsFailedAddRetries pins the must-fix: a failed responder.Add
 // leaves the entry visible on /1.0/mdns as "failed" (never silently
 // absent) and the next reconcile pass — the periodic cadence in
@@ -1330,7 +1298,7 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 	for _, required := range []string{
 		"/status.json", "No apps registered", "textContent", "no-cors", "location.replace",
 		"@media (max-width: 600px)", "min-height: 44px", `href="/trust"`, "publicly trusted LAN hostname",
-		"No concrete launch host configured",
+		"No concrete launch host configured", "prefers-color-scheme: dark",
 	} {
 		if !strings.Contains(page, required) {
 			t.Errorf("status page is missing %q", required)
@@ -1342,7 +1310,8 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 
 // newTestSharedMdnsApp wires a shared-mode app (no listen): the decider
 // compares against HTTP port 80, and the pooled advertiser carries a
-// conflict-renamed configured name plus one hot-advertised app host.
+// conflict-renamed configured name plus one advertised app host, which
+// is the app's, not the door's.
 func newTestSharedMdnsApp(t *testing.T) *App {
 	t.Helper()
 	app := newTestMdnsApp(t, &MdnsSettings{Canonical: "https://janus.lan.ripdev.io"})
@@ -1362,36 +1331,12 @@ func newTestSharedMdnsApp(t *testing.T) *App {
 	return app
 }
 
-// TestMdnsSharedHostMine pins the shared-mode live front-door set:
-// configured name, effective (renamed) name, currently-advertised
-// .local app hosts, and the canonical hostname are mine; IP literals
-// and every other host are someone else's turn (never 421 — the
-// decider passes them through).
-func TestMdnsSharedHostMine(t *testing.T) {
-	app := newTestSharedMdnsApp(t)
-	cases := map[string]bool{
-		"janus.local":         true,  // configured
-		"janus-2.local":       true,  // effective after a conflict rename
-		"shop.local":          true,  // hot-advertised app host
-		"janus.lan.ripdev.io": true,  // canonical hostname (loop-guard page serves there)
-		"127.0.0.1":           false, // IP literal: contract trade — pass-through in shared mode
-		"::1":                 false,
-		"192.168.1.10":        false,
-		"other.ripdev.io":     false,
-		"janus-3.local":       false,
-	}
-	for host, want := range cases {
-		if got := app.mdnsSharedHostMine(host); got != want {
-			t.Errorf("mine(%q) = %v, want %v", host, got, want)
-		}
-	}
-}
-
 // TestMdnsSharedDecider pins the janus site handler as the shared-mode
-// decider on the plain-HTTP port: front-door Hosts get the front door
-// exactly as the dedicated listener serves it (page, /status.json,
-// 404/405 discipline); everything else passes through to the next
-// handler on the same server (the auto-HTTPS redirects) — never 421.
+// decider on the plain-HTTP port: the door's own Hosts get the front
+// door exactly as the dedicated listener serves it (page, /status.json,
+// 404/405 discipline); everything else, app hosts included, passes
+// through to the next handler on the same server (the auto-HTTPS
+// redirects) — never 421.
 func TestMdnsSharedDecider(t *testing.T) {
 	app := newTestSharedMdnsApp(t)
 	h := &Handler{app: app, dp: app.dp, logger: zap.NewNop()}
@@ -1419,7 +1364,6 @@ func TestMdnsSharedDecider(t *testing.T) {
 		{"GET", "/status.json", "janus.local", 200},
 		{"HEAD", "/status.json", "janus.local", 200},
 		{"GET", "/", "janus-2.local", 200},       // renamed-mine
-		{"GET", "/", "shop.local", 200},          // hot-advertised-mine
 		{"GET", "/", "janus.lan.ripdev.io", 200}, // canonical-mine
 		{"GET", "/", "janus.local:80", 200},      // port stripped before the check
 		{"POST", "/status.json", "janus.local", 405},
@@ -1440,9 +1384,10 @@ func TestMdnsSharedDecider(t *testing.T) {
 		}
 	}
 
-	// Not mine: pass through to next — including IP literals (the
-	// shared-mode trade) — and never a 421.
-	for _, host := range []string{"other.ripdev.io", "evil.example.com", "a.b.local",
+	// Not mine: pass through to next — an app's advertised .local host
+	// (the redirect sends it to the app over HTTPS), IP literals (the
+	// shared-mode trade), and everyone else — and never a 421.
+	for _, host := range []string{"shop.local", "other.ripdev.io", "evil.example.com", "a.b.local",
 		"127.0.0.1", "192.168.1.10", "[::1]"} {
 		rr, nextCalled, err := serve("GET", "/", host, 80)
 		if err != nil {

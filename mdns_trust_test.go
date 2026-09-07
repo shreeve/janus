@@ -46,10 +46,10 @@ func testRootCert(t *testing.T, cn string) *x509.Certificate {
 	return cert
 }
 
-// The trust routes ride the front door: over plain HTTP on the shared
-// port for every front-door host, and over TLS for the door's own names
-// (the status page there, and /trust/check as the handshake the trust
-// page probes). An app's .local host over TLS is the app's.
+// The trust routes ride the front door, for the door's own names: over
+// plain HTTP on the shared port and over TLS (the status page there, and
+// /trust/check as the handshake the trust page probes). An app's .local
+// host is the app's on both.
 func TestTrustFrontDoor(t *testing.T) {
 	app := newTestSharedMdnsApp(t)
 	root := testRootCert(t, "Caddy Local Authority - 2026 ECC Root")
@@ -86,7 +86,6 @@ func TestTrustFrontDoor(t *testing.T) {
 		{"/trust/check", "janus.local", false, 204, ""},
 		{"/trust/ca.crt", "janus.local", false, 200, "-----BEGIN CERTIFICATE-----"},
 		{"/trust/ca.mobileconfig", "janus.local", false, 200, "com.apple.security.root"},
-		{"/trust", "shop.local", false, 200, "One-time setup"}, // any front-door host on the shared port
 		{"/", "janus.local", true, 200, "status"},
 		{"/trust/check", "janus.local", true, 204, ""},
 		{"/trust", "janus-2.local", true, 200, "One-time setup"},       // effective name
@@ -114,9 +113,14 @@ func TestTrustFrontDoor(t *testing.T) {
 		t.Errorf("check headers: %v", rr.Header())
 	}
 
-	// Over TLS, an app's host is the app's, not the door's: the data
-	// plane serves it (unknown app socket → its 404), next is never consulted.
-	rr, nextCalled, err := serve("/trust", "shop.local", true)
+	// An app's host is the app's, not the door's. On the shared HTTP port
+	// it passes through to the redirect; over TLS the data plane serves it
+	// (unknown app socket → its 404) and next is never consulted.
+	rr, nextCalled, err := serve("/trust", "shop.local", false)
+	if err != nil || !nextCalled || rr.Code != http.StatusTeapot {
+		t.Errorf("shop.local over HTTP: err %v code %d next %v, want pass-through", err, rr.Code, nextCalled)
+	}
+	rr, nextCalled, err = serve("/trust", "shop.local", true)
 	var herr caddyhttp.HandlerError
 	if !errors.As(err, &herr) || herr.StatusCode != 404 || nextCalled {
 		t.Errorf("shop.local over TLS: err %v code %d next %v", err, rr.Code, nextCalled)
