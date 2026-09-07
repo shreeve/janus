@@ -52,7 +52,7 @@ func TestHelpNamesJanusAsTheCommand(t *testing.T) {
 		}
 	})
 	rootHelp := helpOf(t, newRootCommand())
-	for _, want := range []string{"$ janus run", "'janus start'", "which janus", "janus janus-auth-hash", "caddyserver.com/docs/command-line"} {
+	for _, want := range []string{"the host's edge", "still work by name", "\n  passhash ", "caddyserver.com/docs/command-line", "Files: ~/.config/janus/Caddyfile"} {
 		if !strings.Contains(rootHelp, want) {
 			t.Errorf("root help lacks %q", want)
 		}
@@ -70,10 +70,35 @@ func TestEveryRegisteredCaddyCommandIsPresent(t *testing.T) {
 			t.Errorf("registered command %q missing from the janus tree", name)
 		}
 	}
-	for _, name := range []string{"manpage", "completion", "janus-auth-hash", "run", "adapt", "validate"} {
+	for _, name := range []string{"manpage", "completion", "passhash", "run", "adapt", "validate"} {
 		if !have[name] {
 			t.Errorf("expected command %q missing", name)
 		}
+	}
+	// What the help shows is the operator's set, sectioned; the rest
+	// still run by name.
+	help := helpOf(t, root)
+	for _, shown := range []string{"The edge:", "Exposure:", "Config and credentials:", "Tools:", "\n  mode ", "\n  file-server ", "\n  passhash "} {
+		if !strings.Contains(help, shown) {
+			t.Errorf("root help lacks %q:\n%s", shown, help)
+		}
+	}
+	for _, hidden := range []string{"\n  adapt ", "\n  fmt ", "\n  respond ", "\n  storage ", "\n  hash-password ", "\n  manpage ", "\n  reverse-proxy ", "\n  environ ", "\n  build-info "} {
+		if strings.Contains(help, hidden) {
+			t.Errorf("root help shows %q", strings.TrimSpace(hidden))
+		}
+	}
+	if strings.Contains(help, "Additional Commands") || strings.Contains(help, "\nFlags:") || strings.Contains(help, "Examples:") {
+		t.Errorf("root help carries a section it should not:\n%s", help)
+	}
+	for name, short := range shortOf {
+		if c, _, _ := root.Find([]string{name}); c == nil || c.Short != short {
+			t.Errorf("%s short: %q", name, c.Short)
+		}
+	}
+	fs, _, _ := root.Find([]string{"file-server"})
+	if f := fs.Flags().Lookup("listen"); f == nil || f.DefValue != ":8080" || f.Value.String() != ":8080" {
+		t.Error("file-server does not default to :8080")
 	}
 }
 

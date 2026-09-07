@@ -4,6 +4,59 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.13.0 — unreleased
+
+- Exposure modes. The service edge listens where its mode says:
+  `localhost` (127.0.0.1 and ::1, the default), `lan` (localhost plus the
+  default-route interface's private IPv4 address, unreachable from the
+  internet by addressing alone; `--interface` pins another), or `wan`
+  (every interface). `janus mode <scope>` sets it,
+  `janus autostart --scope` installs with it, setting it again follows a
+  moved address or default route, `janus firewall` re-applies the host
+  rule, and `janus status` reports scope, bind, firewall, and each
+  front-door address with how its reach is enforced — never claiming more
+  than it verified. The mode lives in `scope.json` under the state
+  directory, written only by its owner; the service Caddyfile binds
+  through `default_bind {$JANUS_BIND}`, which `run`, `reload`,
+  `validate`, and `adapt` fill in from the stored mode. On macOS the
+  socket stays the wildcard (an unprivileged process cannot bind an exact
+  low port) and a stateless pf anchor scopes it (blocking ports 80 and
+  443 for every destination, forwarded traffic included), enabled now
+  and at boot;
+  the one root step is `sudo janus firewall`, which the verbs run for you
+  on a terminal, and the edge refuses to serve a scoped mode until the
+  anchor is in place. On Linux the edge binds the exact addresses and no
+  firewall is involved. The running edge checks its own sockets against
+  the stored mode every two seconds and stops rather than serve wider.
+  The seed turns HTTP/3 off (UDP beside scoped TCP). The Linux system
+  unit never gives up restarting. Exposure modes are not supported on
+  Windows yet.
+- `janus passhash` is the auth credential minter, named for what it
+  mints; it replaces `janus janus-auth-hash`.
+- `janus serve [dir]` opens a directory through the running edge with the
+  browse capability, at `https://<name>.localhost/` on this machine and
+  `https://<name>.local/` on the LAN in lan mode; one heartbeat
+  registration, removed on Ctrl-C, nothing new listening. The seed turns
+  browse and mdns on and serves `*.local` with the edge's own CA
+  (`skip_install_trust`; `janus trust` installs it, and `trust`/`untrust`
+  now default to the service edge's admin socket); `*.localhost` is a
+  drop-in janus writes into the sites directory, so it holds on a host
+  whose Caddyfile another tool renders.
+- `janus apps` lists what is registered with the running edge: hosts,
+  what serves them, and leases; `--json` is the control API's answer.
+- `janus logs [-n N] [-f]` shows the edge's log live on a terminal,
+  following it across roll-overs, and prints the last lines when piped;
+  `--supervisor` reads the supervisor's capture of
+  stdout and stderr, which is also what prints when the edge has not
+  written a log yet.
+- The help is the operator's, in sections: the edge, exposure, config and
+  credentials, tools. `janus mode` with no argument shows the mode. Caddy's
+  developer tools, generators, the experimental storage shell, the ad hoc
+  `respond` and `reverse-proxy` servers, and `hash-password` (bcrypt for
+  basic_auth, not a Janus credential) still run by name and stay out of
+  the listing. `file-server` listens on :8080 by default, since 80 and 443
+  are the edge's.
+
 ## 1.12.2 — 2026-09-06
 
 - `janus status --json` reports the service's paths for tools that write

@@ -1,14 +1,13 @@
 package main
 
-// Exposure modes: the portable core of the localhost|lan|wan contract
-// (see EXPOSURE.md). A mode is a list of exact addresses to listen on. This
-// file is the shared spine every platform builds on — it plans the address
-// list, decides what a bound listener is allowed to be, verifies what
-// actually bound against the plan (fail-closed), and classifies each address
-// so status can tell the truth about reachability. Acquiring the listeners
-// (launchd sockets on macOS, capability binds on Linux, direct binds on
-// Windows) is the one platform-specific step and lives elsewhere; everything
-// here is deterministic and OS-independent.
+// Exposure modes: the portable core of the localhost|lan|wan contract. A
+// mode is a list of exact addresses to listen on. This file is the shared
+// spine every platform builds on — it plans the address list, decides what a
+// bound listener is allowed to be, verifies what actually bound against the
+// plan (fail-closed), and classifies each address so status can tell the
+// truth about reachability. The state lives in scope.json (scope.go), the
+// firewall in firewall.go and firewall_apply.go, the verbs in
+// exposure_verbs.go; everything here is deterministic and OS-independent.
 //
 // Mechanism, settled per platform:
 //   - Linux, Windows: bind the exact addresses directly (Linux needs
@@ -17,8 +16,10 @@ package main
 //     the wildcard and the host firewall (pf) enforces the scope. The mode is
 //     therefore invisible to the Caddyfile on macOS.
 //
-// A firewall is needed for lan on every platform (its IPv6 address is globally
-// routable), for localhost on macOS only, and for wan never. See firewall.go.
+// lan is IPv4: localhost plus one private (RFC1918) address of one interface.
+// A private address is unreachable from the internet by addressing alone, so
+// lan needs no firewall where the bind is exact; only macOS's wildcard socket
+// needs one. IPv6 stays on the loopback (::1) and on wan (::).
 
 import (
 	"fmt"
@@ -32,7 +33,7 @@ type Scope string
 
 const (
 	ScopeLocalhost Scope = "localhost" // 127.0.0.1 + ::1 only — absolute, host-enforced
-	ScopeLAN       Scope = "lan"       // localhost + the selected interface's address(es)
+	ScopeLAN       Scope = "lan"       // localhost + one interface's private IPv4 address
 	ScopeWAN       Scope = "wan"       // all interfaces (0.0.0.0 + ::)
 )
 
@@ -90,13 +91,6 @@ type ListenerSpec struct {
 	Addr netip.AddrPort
 }
 
-// LANAddrs are the selected interface's chosen unicast addresses for lan mode.
-// Either family may be zero (absent); at least one must be present.
-type LANAddrs struct {
-	V4 netip.Addr
-	V6 netip.Addr
-}
-
 func loopbackAddrs() []netip.Addr {
 	return []netip.Addr{
 		netip.AddrFrom4([4]byte{127, 0, 0, 1}),
@@ -105,30 +99,25 @@ func loopbackAddrs() []netip.Addr {
 }
 
 // PlanListeners turns a scope into the exact set of listeners to acquire. It is
-// pure and deterministic — the heart of the contract. It rejects anything that
+// pure and deterministic — the heart of the contract. lan is the selected
+// interface's private IPv4 address (zero for none). It rejects anything that
 // would silently widen the scope: an unspecified address outside wan, a
-// loopback/link-local/multicast/mapped address offered as a lan address, or a
-// lan mode with no interface address at all (which must fail closed, not decay
-// to localhost).
-func PlanListeners(scope Scope, lan LANAddrs) ([]ListenerSpec, error) {
+// loopback, link-local, multicast, IPv6, or public address offered as the lan
+// address, or a lan mode with no address at all (which must fail closed, not
+// decay to localhost).
+func PlanListeners(scope Scope, lan netip.Addr) ([]ListenerSpec, error) {
 	var addrs []netip.Addr
 	switch scope {
 	case ScopeLocalhost:
 		addrs = loopbackAddrs()
 	case ScopeLAN:
-		addrs = loopbackAddrs()
-		for _, a := range []netip.Addr{lan.V4, lan.V6} {
-			if !a.IsValid() {
-				continue
-			}
-			if err := validLANAddr(a); err != nil {
-				return nil, err
-			}
-			addrs = append(addrs, normalizeAddr(a))
+		if !lan.IsValid() {
+			return nil, fmt.Errorf("lan mode requires the selected interface's IPv4 address")
 		}
-		if !lan.V4.IsValid() && !lan.V6.IsValid() {
-			return nil, fmt.Errorf("lan mode requires at least one selected interface address")
+		if err := validLANAddr(lan); err != nil {
+			return nil, err
 		}
+		addrs = append(loopbackAddrs(), normalizeAddr(lan))
 	case ScopeWAN:
 		addrs = []netip.Addr{
 			netip.IPv4Unspecified(),
@@ -150,20 +139,26 @@ func PlanListeners(scope Scope, lan LANAddrs) ([]ListenerSpec, error) {
 	return specs, nil
 }
 
-// validLANAddr rejects addresses that must never be offered as a lan address.
-// Interface enumeration is expected to exclude these already; this is the
-// fail-closed backstop.
+// validLANAddr rejects addresses that must never be the lan address: only a
+// private IPv4 address is unreachable from the internet by addressing alone,
+// which is what lets lan need no firewall where the bind is exact. Interface
+// enumeration is expected to exclude these already; this is the fail-closed
+// backstop.
 func validLANAddr(a netip.Addr) error {
 	n := normalizeAddr(a)
 	switch {
 	case !n.IsValid():
 		return fmt.Errorf("lan address is not a valid IP")
+	case n.Is6():
+		return fmt.Errorf("lan address %s is IPv6; lan is IPv4 (a global IPv6 address is reachable from the internet)", a)
 	case n.IsUnspecified():
 		return fmt.Errorf("lan address %s is unspecified (wildcard) — not allowed outside wan", a)
 	case n.IsLoopback():
 		return fmt.Errorf("lan address %s is loopback — loopback is bound implicitly", a)
 	case n.IsLinkLocalUnicast(), n.IsLinkLocalMulticast(), n.IsMulticast():
 		return fmt.Errorf("lan address %s is link-local or multicast — not a usable front-door address", a)
+	case !isRFC1918(n):
+		return fmt.Errorf("lan address %s is public; lan is a private (RFC1918) address — a public address is wan", a)
 	}
 	return nil
 }
@@ -178,13 +173,14 @@ func normalizeAddr(a netip.Addr) netip.Addr {
 	return a
 }
 
-// VerifyBound checks the addresses that actually bound (from getsockname)
-// against the plan, fail-closed. Bound must be exactly the planned set: any
-// missing listener, any unexpected one, and any wildcard address outside wan
-// is a violation. A nil return means the bound set exactly realizes the scope.
-// Addresses are normalized first, so an IPv4-in-IPv6 mapped form can never
-// slip past as something other than its plain self.
-func VerifyBound(scope Scope, lan LANAddrs, bound []netip.AddrPort) error {
+// VerifyBound checks the front-door addresses that actually bound (from
+// getsockname) against the plan, fail-closed: every bound listener must be
+// in the plan, and no wildcard may appear outside wan. Fewer listeners than
+// the plan is never a violation — an empty sites directory binds nothing,
+// and less exposure is always allowed. Addresses are normalized first, so
+// an IPv4-in-IPv6 mapped form can never slip past as something other than
+// its plain self.
+func VerifyBound(scope Scope, lan netip.Addr, bound []netip.AddrPort) error {
 	plan, err := PlanListeners(scope, lan)
 	if err != nil {
 		return err
@@ -193,23 +189,15 @@ func VerifyBound(scope Scope, lan LANAddrs, bound []netip.AddrPort) error {
 	for _, s := range plan {
 		want[normalizeAddrPort(s.Addr)] = struct{}{}
 	}
-	got := map[netip.AddrPort]struct{}{}
 
 	var violations []string
 	for _, ap := range bound {
 		n := normalizeAddrPort(ap)
-		got[n] = struct{}{}
 		if n.Addr().IsUnspecified() && scope != ScopeWAN {
 			violations = append(violations, fmt.Sprintf("wildcard listener %s where %s allows none", ap, scope))
+			continue
 		}
-	}
-	for ap := range want {
-		if _, ok := got[ap]; !ok {
-			violations = append(violations, fmt.Sprintf("required listener %s is missing", ap))
-		}
-	}
-	for ap := range got {
-		if _, ok := want[ap]; !ok {
+		if _, ok := want[n]; !ok {
 			violations = append(violations, fmt.Sprintf("unexpected listener %s not in the %s plan", ap, scope))
 		}
 	}
@@ -221,12 +209,12 @@ func VerifyBound(scope Scope, lan LANAddrs, bound []netip.AddrPort) error {
 }
 
 // BindPlan returns the addresses Caddy's default_bind should listen on for a
-// scope on a given OS (goos = runtime.GOOS). macOS cannot bind an exact low
-// port unprivileged, so every mode binds the wildcard there and the host
-// firewall (pf) enforces the scope — the mode is invisible to the Caddyfile.
-// Linux and Windows bind the exact addresses directly. rip renders
-// default_bind from this value; it no longer decides the bind itself.
-func BindPlan(scope Scope, goos string, lan LANAddrs) ([]string, error) {
+// scope on a given OS (goos = runtime.GOOS): what JANUS_BIND carries. macOS
+// cannot bind an exact low port unprivileged, so every mode binds the
+// wildcard there and the host firewall (pf) enforces the scope — the mode is
+// invisible to the Caddyfile. Linux and Windows bind the exact addresses
+// directly.
+func BindPlan(scope Scope, goos string, lan netip.Addr) ([]string, error) {
 	if _, err := PlanListeners(scope, lan); err != nil {
 		return nil, err // validates inputs, e.g. lan requires an interface address
 	}
@@ -237,14 +225,7 @@ func BindPlan(scope Scope, goos string, lan LANAddrs) ([]string, error) {
 	case ScopeLocalhost:
 		return []string{"127.0.0.1", "::1"}, nil
 	case ScopeLAN:
-		hosts := []string{"127.0.0.1", "::1"}
-		if lan.V4.IsValid() {
-			hosts = append(hosts, lan.V4.String())
-		}
-		if lan.V6.IsValid() {
-			hosts = append(hosts, lan.V6.String())
-		}
-		return hosts, nil
+		return []string{"127.0.0.1", "::1", normalizeAddr(lan).String()}, nil
 	case ScopeWAN:
 		return []string{"0.0.0.0", "::"}, nil
 	}
@@ -255,29 +236,22 @@ func normalizeAddrPort(ap netip.AddrPort) netip.AddrPort {
 	return netip.AddrPortFrom(normalizeAddr(ap.Addr()), ap.Port())
 }
 
-// Reach classifies how an address's reachability is actually enforced, so
-// status never lets a mode name overclaim. lan over IPv6 binds a globally
-// routable address; only the on-link host firewall (not the host's addressing)
-// keeps the internet out, so it is labeled distinctly from RFC1918 lan-v4.
+// Reach says how an address's reachability is enforced, so status never
+// lets a mode name overclaim: the loopbacks and a private address by the
+// host's addressing alone, the wildcard by nothing but the network.
 type Reach string
 
 const (
 	ReachLoopback Reach = "host-enforced (loopback)"
 	ReachRFC1918  Reach = "host-enforced (RFC1918)"
-	ReachULA      Reach = "host-enforced (ULA)"
-	ReachFirewall Reach = "host-enforced (firewall)"     // lan global address + on-link rule
-	ReachRouter   Reach = "network-gated (router only)"  // global address, no host rule
-	ReachWildcard Reach = "network-gated (wildcard)"     // wan
+	ReachWildcard Reach = "network-gated (wildcard)" // wan
 )
 
-var (
-	rfc1918 = []netip.Prefix{
-		netip.MustParsePrefix("10.0.0.0/8"),
-		netip.MustParsePrefix("172.16.0.0/12"),
-		netip.MustParsePrefix("192.168.0.0/16"),
-	}
-	ulaV6 = netip.MustParsePrefix("fc00::/7")
-)
+var rfc1918 = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+}
 
 func isRFC1918(a netip.Addr) bool {
 	a = normalizeAddr(a)
@@ -289,28 +263,14 @@ func isRFC1918(a netip.Addr) bool {
 	return false
 }
 
-// classifyReach labels one bound address. lanFirewall reports whether the
-// on-link host firewall rule that scopes lan to the local subnet is in force;
-// it changes a global lan address from router-gated to host-enforced.
-func classifyReach(scope Scope, addr netip.Addr, lanFirewall bool) Reach {
+// classifyReach labels one planned address.
+func classifyReach(addr netip.Addr) Reach {
 	a := normalizeAddr(addr)
 	switch {
 	case a.IsUnspecified():
 		return ReachWildcard
 	case a.IsLoopback():
 		return ReachLoopback
-	case isRFC1918(a):
-		// RFC1918 is unroutable from the internet by addressing alone,
-		// firewall or not — always host-enforced.
-		return ReachRFC1918
-	case ulaV6.Contains(a):
-		return ReachULA
-	default:
-		// A global unicast address (typically IPv6 with no NAT). Its safety is
-		// the host firewall if present, otherwise only the network's.
-		if scope == ScopeLAN && lanFirewall {
-			return ReachFirewall
-		}
-		return ReachRouter
 	}
+	return ReachRFC1918
 }

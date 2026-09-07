@@ -29,7 +29,7 @@ func addrSet(specs []ListenerSpec) map[string]Role {
 }
 
 func TestPlanLocalhost(t *testing.T) {
-	specs, err := PlanListeners(ScopeLocalhost, LANAddrs{})
+	specs, err := PlanListeners(ScopeLocalhost, netip.Addr{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,52 +48,44 @@ func TestPlanLocalhost(t *testing.T) {
 }
 
 func TestPlanLAN(t *testing.T) {
-	lan := LANAddrs{V4: mustAddr("10.0.0.211"), V6: mustAddr("2601:680:8000:2330::906e")}
-	specs, err := PlanListeners(ScopeLAN, lan)
+	specs, err := PlanListeners(ScopeLAN, mustAddr("10.0.0.211"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(specs) != 8 {
-		t.Fatalf("lan v4+v6: want 8 listeners, got %d", len(specs))
+	if len(specs) != 6 { // loopback v4+v6 (4) + the lan v4 (2)
+		t.Fatalf("lan: want 6 listeners, got %d", len(specs))
 	}
 	got := addrSet(specs)
-	for _, want := range []string{"10.0.0.211:443", "[2601:680:8000:2330::906e]:443"} {
+	for _, want := range []string{"10.0.0.211:80", "10.0.0.211:443", "[::1]:443"} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("lan: missing %s", want)
 		}
 	}
 }
 
-func TestPlanLANv4Only(t *testing.T) {
-	specs, err := PlanListeners(ScopeLAN, LANAddrs{V4: mustAddr("192.168.1.42")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(specs) != 6 { // loopback v4+v6 (4) + one lan v4 (2)
-		t.Fatalf("lan v4 only: want 6 listeners, got %d", len(specs))
-	}
-}
-
 func TestPlanLANRequiresAddress(t *testing.T) {
-	if _, err := PlanListeners(ScopeLAN, LANAddrs{}); err == nil {
+	if _, err := PlanListeners(ScopeLAN, netip.Addr{}); err == nil {
 		t.Fatal("lan with no interface address must fail closed, not decay to localhost")
 	}
 }
 
+// Only a private IPv4 address may be the lan address: loopback, wildcard,
+// link-local, any IPv6 (globally routable or not), and public IPv4 are all
+// refused by the backstop.
 func TestPlanLANRejectsBadAddrs(t *testing.T) {
-	for _, bad := range []string{"127.0.0.1", "::1", "fe80::1", "0.0.0.0"} {
-		if _, err := PlanListeners(ScopeLAN, LANAddrs{V4: mustAddr("10.0.0.5"), V6: mustAddr(bad)}); err == nil {
-			// bad supplied via V6 slot for link-local/loopback cases; v4 ones via V4 below
+	for _, bad := range []string{"127.0.0.1", "0.0.0.0", "169.254.3.4", "224.0.0.1", "::1", "fe80::1", "2601:680:8000:2330::906e", "fd42:a6fc:fdc:d768::1", "::ffff:8.8.8.8", "8.8.8.8", "34.22.36.78"} {
+		if _, err := PlanListeners(ScopeLAN, mustAddr(bad)); err == nil {
 			t.Errorf("lan accepted disallowed address %s", bad)
 		}
 	}
-	if _, err := PlanListeners(ScopeLAN, LANAddrs{V4: mustAddr("127.0.0.1")}); err == nil {
-		t.Error("lan accepted loopback v4 as an interface address")
+	// A mapped private address is its plain self.
+	if specs, err := PlanListeners(ScopeLAN, mustAddr("::ffff:192.168.1.9")); err != nil || addrSet(specs)["192.168.1.9:443"] != RoleHTTPS {
+		t.Errorf("mapped private address: %v %v", err, specs)
 	}
 }
 
 func TestPlanWAN(t *testing.T) {
-	specs, err := PlanListeners(ScopeWAN, LANAddrs{})
+	specs, err := PlanListeners(ScopeWAN, netip.Addr{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +120,7 @@ func eqStrs(a, b []string) bool {
 }
 
 func TestBindPlan(t *testing.T) {
-	lan := LANAddrs{V4: mustAddr("10.0.0.211"), V6: mustAddr("2601:680:8000:2330::906e")}
+	lan := mustAddr("10.0.0.211")
 	wild := []string{"0.0.0.0", "::"}
 
 	// macOS: every mode binds the wildcard; pf enforces the scope.
@@ -142,18 +134,18 @@ func TestBindPlan(t *testing.T) {
 		}
 	}
 	// Linux/Windows bind the exact addresses.
-	if got, _ := BindPlan(ScopeLocalhost, "linux", LANAddrs{}); !eqStrs(got, []string{"127.0.0.1", "::1"}) {
+	if got, _ := BindPlan(ScopeLocalhost, "linux", netip.Addr{}); !eqStrs(got, []string{"127.0.0.1", "::1"}) {
 		t.Errorf("linux localhost: %v", got)
 	}
-	if got, _ := BindPlan(ScopeLAN, "linux", lan); !eqStrs(got, []string{"127.0.0.1", "::1", "10.0.0.211", "2601:680:8000:2330::906e"}) {
+	if got, _ := BindPlan(ScopeLAN, "linux", lan); !eqStrs(got, []string{"127.0.0.1", "::1", "10.0.0.211"}) {
 		t.Errorf("linux lan: %v", got)
 	}
-	if got, _ := BindPlan(ScopeWAN, "windows", LANAddrs{}); !eqStrs(got, wild) {
+	if got, _ := BindPlan(ScopeWAN, "windows", netip.Addr{}); !eqStrs(got, wild) {
 		t.Errorf("windows wan: %v", got)
 	}
 	// lan requires an interface address on every OS — on macOS the pf on-link
 	// rule needs it even though the bind is wildcard.
-	if _, err := BindPlan(ScopeLAN, "darwin", LANAddrs{}); err == nil {
+	if _, err := BindPlan(ScopeLAN, "darwin", netip.Addr{}); err == nil {
 		t.Error("lan with no interface address must fail, even on darwin")
 	}
 }
@@ -168,14 +160,14 @@ func aps(ss ...string) []netip.AddrPort {
 
 func TestVerifyBoundExact(t *testing.T) {
 	bound := aps("127.0.0.1:80", "127.0.0.1:443", "[::1]:80", "[::1]:443")
-	if err := VerifyBound(ScopeLocalhost, LANAddrs{}, bound); err != nil {
+	if err := VerifyBound(ScopeLocalhost, netip.Addr{}, bound); err != nil {
 		t.Errorf("exact localhost bind should verify: %v", err)
 	}
 }
 
 func TestVerifyBoundRejectsWildcardInLocalhost(t *testing.T) {
 	bound := aps("127.0.0.1:80", "127.0.0.1:443", "[::1]:80", "0.0.0.0:443")
-	if err := VerifyBound(ScopeLocalhost, LANAddrs{}, bound); err == nil {
+	if err := VerifyBound(ScopeLocalhost, netip.Addr{}, bound); err == nil {
 		t.Error("a wildcard listener in localhost scope must fail verification")
 	}
 }
@@ -184,54 +176,56 @@ func TestVerifyBoundRejectsMappedWildcardLeak(t *testing.T) {
 	// A v6 wildcard answering v4 is the canonical dual-stack leak; even its
 	// mapped-unspecified form must be rejected outside wan.
 	bound := aps("127.0.0.1:80", "127.0.0.1:443", "[::1]:80", "[::]:443")
-	if err := VerifyBound(ScopeLocalhost, LANAddrs{}, bound); err == nil {
+	if err := VerifyBound(ScopeLocalhost, netip.Addr{}, bound); err == nil {
 		t.Error("a v6 wildcard in localhost scope must fail verification")
 	}
 }
 
-func TestVerifyBoundMissingRequired(t *testing.T) {
-	bound := aps("127.0.0.1:80", "127.0.0.1:443", "[::1]:80") // missing [::1]:443
-	if err := VerifyBound(ScopeLocalhost, LANAddrs{}, bound); err == nil {
-		t.Error("a missing required listener must fail verification")
+// Fewer listeners than the plan is less exposure, never a violation: an
+// empty sites directory binds nothing at all.
+func TestVerifyBoundFewerIsFine(t *testing.T) {
+	bound := aps("127.0.0.1:80", "127.0.0.1:443", "[::1]:80") // no [::1]:443
+	if err := VerifyBound(ScopeLocalhost, netip.Addr{}, bound); err != nil {
+		t.Errorf("a subset of the plan must verify: %v", err)
+	}
+	if err := VerifyBound(ScopeLAN, mustAddr("10.0.0.211"), nil); err != nil {
+		t.Errorf("nothing bound must verify: %v", err)
 	}
 }
 
 func TestVerifyBoundSurplus(t *testing.T) {
-	lan := LANAddrs{V4: mustAddr("10.0.0.211")}
-	// surplus: an in-set address bound on an unexpected port (8443)
-	bound := aps("127.0.0.1:80", "127.0.0.1:443", "[::1]:80", "[::1]:443",
-		"10.0.0.211:80", "10.0.0.211:443", "10.0.0.211:8443")
-	if err := VerifyBound(ScopeLAN, lan, bound); err == nil {
-		t.Error("a surplus listener must fail verification")
+	lan := mustAddr("10.0.0.211")
+	// surplus: an in-set address bound on an unexpected port (8443), and a
+	// lan edge that also bound the interface's IPv6 address
+	for _, bound := range [][]netip.AddrPort{
+		aps("127.0.0.1:80", "127.0.0.1:443", "[::1]:80", "[::1]:443", "10.0.0.211:80", "10.0.0.211:443", "10.0.0.211:8443"),
+		aps("10.0.0.211:443", "[2601:680:8000:2330::906e]:443"),
+	} {
+		if err := VerifyBound(ScopeLAN, lan, bound); err == nil {
+			t.Errorf("a surplus listener must fail verification: %v", bound)
+		}
 	}
 }
 
 func TestVerifyBoundWANAcceptsWildcard(t *testing.T) {
 	bound := aps("0.0.0.0:80", "0.0.0.0:443", "[::]:80", "[::]:443")
-	if err := VerifyBound(ScopeWAN, LANAddrs{}, bound); err != nil {
+	if err := VerifyBound(ScopeWAN, netip.Addr{}, bound); err != nil {
 		t.Errorf("wan wildcard bind should verify: %v", err)
 	}
 }
 
 func TestClassifyReach(t *testing.T) {
-	cases := []struct {
-		scope       Scope
-		addr        string
-		lanFirewall bool
-		want        Reach
-	}{
-		{ScopeLocalhost, "127.0.0.1", false, ReachLoopback},
-		{ScopeLocalhost, "::1", false, ReachLoopback},
-		{ScopeLAN, "10.0.0.211", true, ReachRFC1918},
-		{ScopeLAN, "2601:680:8000:2330::906e", false, ReachRouter},   // global v6, no host rule
-		{ScopeLAN, "2601:680:8000:2330::906e", true, ReachFirewall},  // global v6, on-link rule
-		{ScopeLAN, "fd42:a6fc:fdc:d768::1", false, ReachULA},
-		{ScopeWAN, "0.0.0.0", false, ReachWildcard},
-		{ScopeWAN, "::", false, ReachWildcard},
+	cases := map[string]Reach{
+		"127.0.0.1":    ReachLoopback,
+		"::1":          ReachLoopback,
+		"10.0.0.211":   ReachRFC1918,
+		"192.168.1.42": ReachRFC1918,
+		"0.0.0.0":      ReachWildcard,
+		"::":           ReachWildcard,
 	}
-	for _, c := range cases {
-		if got := classifyReach(c.scope, mustAddr(c.addr), c.lanFirewall); got != c.want {
-			t.Errorf("classifyReach(%s, %s, fw=%v) = %q, want %q", c.scope, c.addr, c.lanFirewall, got, c.want)
+	for addr, want := range cases {
+		if got := classifyReach(mustAddr(addr)); got != want {
+			t.Errorf("classifyReach(%s) = %q, want %q", addr, got, want)
 		}
 	}
 }

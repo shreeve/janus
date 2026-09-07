@@ -9,8 +9,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 	"time"
 )
 
@@ -193,7 +196,28 @@ func isolatedHome(t *testing.T) servicePaths {
 	prev := localControlURL
 	localControlURL = "http://127.0.0.1:1"
 	t.Cleanup(func() { localControlURL = prev })
+	fakeHostPf(t)
+	// Nothing holds a front-door port as far as a verb under test can
+	// tell, whatever this machine's real edge is doing.
+	prevDial := dialTCP
+	dialTCP = func(string, time.Duration) (net.Conn, error) { return nil, errors.New("connection refused") }
+	t.Cleanup(func() { dialTCP = prevDial })
 	return currentPaths()
+}
+
+// fakeHostPf stands a fake host in for this machine's pf and default
+// route, so no verb under test reads /etc or the routing table: the pf
+// files for localhost in place (what a finished install looks like, so
+// the edge may start), and en0 as the default route's interface.
+func fakeHostPf(t *testing.T) *fakeHost {
+	t.Helper()
+	h, ops := newFakeHost(runtime.GOOS)
+	h.installed(scopeState{Scope: ScopeLocalhost})
+	prevOps, prevIface := hostFwOps, defaultInterface
+	hostFwOps = func() fwOps { return ops }
+	defaultInterface = func() (string, error) { return "en0", nil }
+	t.Cleanup(func() { hostFwOps, defaultInterface = prevOps, prevIface })
+	return h
 }
 
 func seedAt(t *testing.T, p servicePaths) {
@@ -438,6 +462,43 @@ func controlServer(t *testing.T, p servicePaths, apps string) {
 	srv.Listener = ln
 	srv.Start()
 	t.Cleanup(srv.Close)
+}
+
+// trust and untrust default --address to the service edge's admin socket
+// when it exists, and leave Caddy's default alone otherwise.
+func TestTrustDefaultsToAdminSocket(t *testing.T) {
+	p := isolatedHome(t)
+	address := func(verb string) string {
+		t.Helper()
+		root := newRootCommand()
+		cmd, _, _ := root.Find([]string{verb})
+		got := "unset"
+		cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+			got, _ = cmd.Flags().GetString("address")
+			return nil
+		}
+		root.SetArgs([]string{verb})
+		if err := root.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := address("trust"); got != "" {
+		t.Errorf("no socket: address %q", got)
+	}
+	if err := os.MkdirAll(p.run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", p.admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	for _, verb := range []string{"trust", "untrust"} {
+		if got := address(verb); got != "unix/"+p.admin {
+			t.Errorf("%s with socket: address %q", verb, got)
+		}
+	}
 }
 
 // status reads the control plane for the app count, over the socket.

@@ -31,11 +31,25 @@ func TestSystemdUnit(t *testing.T) {
 	if item.unit != "/home/ann/.config/systemd/user/janus.service" || !item.user {
 		t.Errorf("user item: %+v", item)
 	}
+	// The drift-recovery loop must never give up: no start limit.
+	if !strings.Contains(got, "[Unit]\nDescription=Janus edge\nStartLimitIntervalSec=0\n") {
+		t.Errorf("user unit lacks StartLimitIntervalSec=0 in [Unit]:\n%s", got)
+	}
 	rp := servicePathsFor(true, "/root", func(string) string { return "" })
 	rootUnit := systemdUnitFile(rp, "/usr/local/bin/janus")
-	for _, want := range []string{"WantedBy=multi-user.target", "After=network-online.target", "Wants=network-online.target", `Environment="HOME=/var/lib/janus"`} {
+	for _, want := range []string{
+		"WantedBy=multi-user.target", "After=network-online.target", "Wants=network-online.target", `Environment="HOME=/var/lib/janus"`,
+		"[Unit]\nDescription=Janus edge\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=0\n",
+	} {
 		if !strings.Contains(rootUnit, want) {
-			t.Errorf("root unit lacks %q", want)
+			t.Errorf("root unit lacks %q:\n%s", want, rootUnit)
+		}
+	}
+	// The system edge runs as root, as its paths (/etc, /var) require; no
+	// identity or sandboxing directive changes that under it.
+	for _, no := range []string{"DynamicUser", "User=", "StateDirectory", "AmbientCapabilities", "NoNewPrivileges"} {
+		if strings.Contains(rootUnit, no) || strings.Contains(got, no) {
+			t.Errorf("unit carries %s:\n%s\n%s", no, rootUnit, got)
 		}
 	}
 	root := newServiceItem(rp).(*systemdItem)

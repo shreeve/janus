@@ -3149,7 +3149,7 @@ case_auth_minter_and_dead_wall() {
 	# The minter reads stdin when piped (no argv, no echo) and prints one
 	# version-a passhash under the fixed constants.
 	local blob
-	blob="$(printf 'mint-pass\n' | "$CADDY_BIN" janus-auth-hash)"
+	blob="$(printf 'mint-pass\n' | "$CADDY_BIN" passhash)"
 	if [[ ! "$blob" =~ ^a[0-9A-Za-z]{31}$ ]]; then
 		printf 'minted blob %q is not a 32-char version-a passhash' "$blob" >&2
 		return 1
@@ -3993,7 +3993,7 @@ test "cascade: site users replace global; sessions authorized per request" case_
 test "reload keeps sessions (pooled store)" case_auth_reload_keeps_sessions
 test "reload revokes the removed user, keeps the rest" case_auth_reload_revokes_removed_user
 test "hot surface: list, revoke one, wipe all" case_auth_hot_revoke
-test "janus-auth-hash mints; minted cred opens a wall; plain HTTP → 421" case_auth_minter_and_dead_wall
+test "passhash mints; minted cred opens a wall; plain HTTP → 421" case_auth_minter_and_dead_wall
 test "restart wipes every session" case_auth_restart_wipes
 test "zero-users lockout fails janus validate" case_auth_zero_users_lockout
 test "parse rejections: every auth hard error fails janus adapt" case_auth_parse_rejections
