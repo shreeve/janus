@@ -46,6 +46,9 @@ func (a *App) handleMdnsState(w http.ResponseWriter, r *http.Request) {
 		"announces":      snap.announces,
 		"withdraws":      snap.withdraws,
 	}
+	if wanExposure() {
+		body["exposure"] = "wan" // nothing is announced or served on local names
+	}
 	if ms.Canonical != "" {
 		body["canonical"] = ms.Canonical
 	}

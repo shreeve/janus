@@ -4,6 +4,18 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.14.0 — unreleased
+
+- In `wan` the local name families are off. Every janus site, the mdns
+  front door included, answers 421 for a Host of `<name>.local`,
+  `<name>.localhost`, or `localhost`; the on-demand permission mints no
+  certificate for such a name; mdns announces nothing and `/1.0/mdns`
+  says `"exposure":"wan"`; `janus serve` refuses with the reason. The
+  service edge publishes its stored mode to the module at start and on
+  every pass of the exposure watch, so `janus mode` takes effect on the
+  running edge within a tick. A Caddyfile run some other way is
+  localhost by default and keeps its local names.
+
 ## 1.13.0 — 2026-09-07
 
 - Exposure modes. The service edge listens where its mode says:
