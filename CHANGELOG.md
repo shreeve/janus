@@ -4,7 +4,7 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
-## 1.13.0 — unreleased
+## 1.13.0 — 2026-09-07
 
 - Exposure modes. The service edge listens where its mode says:
   `localhost` (127.0.0.1 and ::1, the default), `lan` (localhost plus the
