@@ -173,20 +173,21 @@ func (h *Handler) provisionBrowse() error {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	r.Header.Del(ripSiteHeader)
 	if h.app != nil && h.app.mdnsSharedRoutes != nil {
-		if r.TLS == nil && requestLocalPort(r) == h.app.mdnsSharedPort {
-			if h.app.mdnsSharedHostMine(normalizeHostHeader(r.Host)) {
-				h.app.mdnsSharedRoutes.ServeHTTP(w, r)
-				return nil
-			}
-			return next.ServeHTTP(w, r)
-		}
-		// Over TLS the front door answers for its own name only (an
-		// app's .local host is the app's): https://janus.local/ is the
+		// The front door answers for its own names only: the configured
+		// name, the effective (post-conflict) name, and the canonical
+		// hostname. On the shared HTTP port every other Host — an app's
+		// .local host included — passes to the next route, the redirect
+		// to HTTPS, so the name a person types is the app they get. Over
+		// TLS the door's names serve too: https://janus.local/ is the
 		// status page, and /trust/check there is the handshake the trust
 		// page probes from plain HTTP.
-		if r.TLS != nil && h.app.mdnsFrontDoorName(normalizeHostHeader(r.Host)) {
+		shared := r.TLS == nil && requestLocalPort(r) == h.app.mdnsSharedPort
+		if (shared || r.TLS != nil) && h.app.mdnsFrontDoorName(normalizeHostHeader(r.Host)) {
 			h.app.mdnsSharedRoutes.ServeHTTP(w, r)
 			return nil
+		}
+		if shared {
+			return next.ServeHTTP(w, r)
 		}
 	}
 	r, facts := attachAccessFactsRequest(r)

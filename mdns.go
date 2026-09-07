@@ -645,34 +645,6 @@ func (a *mdnsAdvertiser) desiredLocked(cfg *mdnsConfig) map[string]*mdnsEntry {
 	return out
 }
 
-// carriesHost reports whether the advertiser currently carries host —
-// as a desired name or as an observed on-air identity (a conflict
-// rename answers to the renamed name). The shared-mode front-door
-// decider reads this per request, so a hot registration is claimed the
-// moment its entry lands and released the moment it withdraws.
-func (a *mdnsAdvertiser) carriesHost(host string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	// The overwhelmingly common case is a configured identity: the front-door
-	// name or an app's desired .local name. Entries are already keyed by type,
-	// name, and port, so answer those in constant time. Only an effective name
-	// produced by a conflict rename needs the live-handle scan below; reading the
-	// handle here preserves the contract that a post-announce rename is visible
-	// immediately, before the next reconcile pass.
-	if a.cfg != nil {
-		if a.entries[mdnsEntryKey(mdnsTypeFrontDoor, host, a.cfg.port)] != nil ||
-			a.entries[mdnsEntryKey(mdnsTypeAppHost, host, 443)] != nil {
-			return true
-		}
-	}
-	for _, e := range a.entries {
-		if eff, _ := e.observed(); eff == host {
-			return true
-		}
-	}
-	return false
-}
-
 // effectiveName is the configured name's post-conflict identity (the
 // configured name itself until probing settles or when mdns is off).
 // Derived from the live handle so a post-announce rename is reflected
@@ -976,24 +948,6 @@ func requestLocalPort(r *http.Request) int {
 	}
 	port, _ := strconv.Atoi(portStr)
 	return port
-}
-
-// mdnsSharedHostMine is the shared-mode decider's Host membership: the
-// live front-door set is the configured name, the effective
-// (post-conflict) name, every currently-carried .local app host, and
-// the canonical hostname when set (the redirect loop guard serves the
-// page at the canonical name too). IP literals are deliberately NOT
-// mine — http://<lan-ip>/ passes through to the HTTP server's other
-// routes (contract trade; dedicated mode serves IP literals).
-func (a *App) mdnsSharedHostMine(host string) bool {
-	ms := a.Mdns
-	if host == ms.Name {
-		return true
-	}
-	if ms.canonicalHost != "" && host == ms.canonicalHost {
-		return true
-	}
-	return a.state.mdns.carriesHost(host)
 }
 
 // checkMdnsListenCollision refuses a dedicated front-door address that

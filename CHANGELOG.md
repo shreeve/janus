@@ -56,6 +56,18 @@ entry; their changes ship in the next tag.
   basic_auth, not a Janus credential) still run by name and stay out of
   the listing. `file-server` listens on :8080 by default, since 80 and 443
   are the edge's.
+- On the shared HTTP port the mdns front door answers for its own names
+  only — the configured, effective, and canonical names. An app's
+  `.local` host takes the redirect to HTTPS like any other site, so the
+  name a person types is the app they get; the dashboard and the trust
+  page are at `janus.local`.
+- The mdns front door's status page is a dashboard in light and dark:
+  stat cards (edge, apps live, workers healthy, names on the LAN), a
+  trust card for a new device, each app as a card with state, worker
+  and heartbeat pills, and launch-link chips, then Hub and Bonjour.
+  Still one embedded file with zero external resources, still every
+  value a text node, still read-only: Janus links to apps, it does not
+  start or stop them.
 - The mdns front door carries trust: `http://janus.local/trust` walks a
   phone or another machine through trusting the edge's own CA (device
   detection, an iOS configuration profile at `/trust/ca.mobileconfig`,
