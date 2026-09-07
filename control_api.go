@@ -235,9 +235,11 @@ func (a *App) controlMuxAt(base string) *http.ServeMux {
 	mux.HandleFunc("GET "+base+"/1.0/hub/{$}", a.handleHubStats)
 
 	// mDNS advertiser state, always on: {"enabled": false} when the
-	// capability is off, the full advertiser view when on.
+	// capability is off, the full advertiser view when on; the front
+	// door's status snapshot beside it.
 	mux.HandleFunc("GET "+base+"/1.0/mdns", a.handleMdnsState)
 	mux.HandleFunc("GET "+base+"/1.0/mdns/{$}", a.handleMdnsState)
+	mux.HandleFunc("GET "+base+"/1.0/mdns/status", a.handleMdnsStatus)
 
 	// Auth wall state, always on: {"enabled": false} when no site's
 	// effective auth is on; counters, the session list, and

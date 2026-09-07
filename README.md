@@ -189,11 +189,12 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 ### 4. mdns
 
-Opt-in LAN presence: `janus.local` (and every registered single-label `.local` host) answers over multicast DNS with no DNS server or client install, and a plain-HTTP front door serves a read-only, self-contained status page — registry, worker health, heartbeat freshness, and hub counters, with socket paths redacted. An optional `canonical` origin turns the page into a hand-off ramp to real HTTPS, with a built-in diagnostic for router DNS-rebinding filters.
+Opt-in LAN presence: `janus.local` (and every registered single-label `.local` host) answers over multicast DNS with no DNS server or client install, and a plain-HTTP front door serves a read-only, self-contained status page — registry, worker health, heartbeat freshness, and hub counters, with socket paths redacted. An optional `canonical` origin turns the page into a hand-off ramp to real HTTPS, with a built-in diagnostic for router DNS-rebinding filters. The announced name must answer on the HTTP port; where a `janus` site covers it, that site serves the front door, and where a site of your own covers it, your site owns the name.
 
 ```bash
-curl -s http://127.0.0.1:7600/1.0/mdns      # advertiser state (names, states, counters)
-curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
+curl -s http://127.0.0.1:7600/1.0/mdns          # advertiser state (names, states, counters)
+curl -s http://127.0.0.1:7600/1.0/mdns/status   # the front door's status snapshot
+curl -s -H 'Host: janus.local' http://127.0.0.1/status.json
 ```
 
 ### 5. auth

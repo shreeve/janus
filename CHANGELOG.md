@@ -56,6 +56,12 @@ entry; their changes ship in the next tag.
   basic_auth, not a Janus credential) still run by name and stay out of
   the listing. `file-server` listens on :8080 by default, since 80 and 443
   are the edge's.
+- mdns shared mode: any site on the HTTP port may own the announced
+  name. The coverage check asks whether the name answers there; the
+  built-in front door is served where the covering site is a janus site,
+  and a site of your own covering it owns it. `GET /1.0/mdns/status` is
+  the front door's status snapshot on the control API, for owners and
+  operators.
 
 ## 1.12.2 — 2026-09-06
 

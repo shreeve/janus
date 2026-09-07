@@ -1157,6 +1157,33 @@ func TestMdnsHostAllowlistEffectiveName(t *testing.T) {
 	}
 }
 
+// The front door's snapshot is also on the control surface, for a
+// control plane that owns the announced name and never sees the door.
+func TestMdnsStatusOnControlSurface(t *testing.T) {
+	app := newTestMdnsApp(t, &MdnsSettings{})
+	if _, err := app.appsReg.create("shop", []string{"shop.local"}, "/rt/bridge"); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	app.handleMdnsStatus(rec, httptest.NewRequest("GET", "/1.0/mdns/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var snap mdnsStatusSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Apps) != 1 || snap.Apps[0].Name != "shop" || snap.Name != "janus.local" {
+		t.Errorf("snapshot: %+v", snap)
+	}
+	off := &App{}
+	rec = httptest.NewRecorder()
+	off.handleMdnsStatus(rec, httptest.NewRequest("GET", "/1.0/mdns/status", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("mdns off: status %d, want 404", rec.Code)
+	}
+}
+
 func TestMdnsSnapshotRedaction(t *testing.T) {
 	app := newTestMdnsApp(t, &MdnsSettings{})
 	rec, err := app.appsReg.create("shop", []string{"shop.local"}, "/rt/SECRET-bridge")
@@ -1442,9 +1469,10 @@ func TestMdnsSharedDecider(t *testing.T) {
 }
 
 // TestMdnsSharedCoverage pins the hard Start error: shared mode with no
-// http-port janus route whose host matcher covers the configured name
-// refuses the config, and the error names the exact block to paste.
-// Wildcard, explicit, and catch-all matchers all satisfy the check.
+// http-port route whose host matcher covers the configured name refuses
+// the config, and the error names the exact block to paste. Wildcard,
+// explicit, and catch-all matchers all satisfy the check, and so does a
+// site that is not a janus site: whoever answers for the name owns it.
 func TestMdnsSharedCoverage(t *testing.T) {
 	server := func(listen string, patterns ...string) *caddyhttp.Server {
 		var sets caddyhttp.MatcherSets
@@ -1456,6 +1484,22 @@ func TestMdnsSharedCoverage(t *testing.T) {
 			Routes: caddyhttp.RouteList{{
 				MatcherSets: sets,
 				Handlers:    []caddyhttp.MiddlewareHandler{&Handler{}},
+			}},
+		}
+	}
+	// A plain site: host-matched wrapper route around a subroute whose
+	// directive routes carry no host of their own, as the Caddyfile
+	// adapter emits for `http://janus.local { respond ... }`.
+	plainSite := func(listen string, pattern string) *caddyhttp.Server {
+		return &caddyhttp.Server{
+			Listen: []string{listen},
+			Routes: caddyhttp.RouteList{{
+				MatcherSets: caddyhttp.MatcherSets{{caddyhttp.MatchHost{pattern}}},
+				Handlers: []caddyhttp.MiddlewareHandler{&caddyhttp.Subroute{
+					Routes: caddyhttp.RouteList{{
+						Handlers: []caddyhttp.MiddlewareHandler{&caddyhttp.StaticResponse{Body: "trust page"}},
+					}},
+				}},
 			}},
 		}
 	}
@@ -1489,8 +1533,14 @@ func TestMdnsSharedCoverage(t *testing.T) {
 				}},
 			}}}, false},
 		{"no servers at all", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{}}, false},
-		{"no janus route on the http port", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+		{"no route on the http port", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
 			"srv0": {Listen: []string{":80"}, Routes: caddyhttp.RouteList{}}}}, false},
+		{"a plain site owning the name covers", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": plainSite(":80", "janus.local")}}, true},
+		{"a plain site on another name does not cover", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": plainSite(":80", "other.local")}}, false},
+		{"a plain site on another port does not cover", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
+			"srv0": plainSite(":8080", "janus.local")}}, false},
 	}
 	for _, tc := range cases {
 		if got := mdnsSharedSiteCovers(tc.ha, 80, "janus.local"); got != tc.want {
