@@ -127,6 +127,11 @@ func systemdUnitFile(p servicePaths, exe string) string {
 	// pulls the unit in with Wants=, which implies After=janus.service,
 	// and the pair is an ordering cycle systemd resolves by dropping the
 	// unit's start job at login.
+	//
+	// StartLimitIntervalSec=0: a lan edge whose interface address moved
+	// cannot bind and exits; it must keep retrying every ten seconds until
+	// the address is back or 'janus mode lan' stores the new one. systemd's
+	// default burst limit would give up after five tries and leave it down.
 	unit, wanted := "", "default.target"
 	if p.root {
 		unit = "After=network-online.target\nWants=network-online.target\n"
@@ -141,7 +146,8 @@ func systemdUnitFile(p servicePaths, exe string) string {
 	}
 	return fmt.Sprintf(`[Unit]
 Description=Janus edge
-%s
+%sStartLimitIntervalSec=0
+
 [Service]
 Type=simple
 ExecStart=%q run --config %q --adapter caddyfile

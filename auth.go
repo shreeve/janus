@@ -54,7 +54,7 @@ type authPageData struct {
 
 // --- the passhash codec (version a; shared with Zift) -------------------------
 //
-// Exactly one definition in the codebase: janus-auth-hash mints with the
+// Exactly one definition in the codebase: janus passhash mints with the
 // same constants the verifier runs. Wire form is `a` + 31 base62 chars.
 
 // passKDF runs the fixed-parameter argon2id derivation. Every execution is

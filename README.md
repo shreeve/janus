@@ -198,10 +198,10 @@ curl -s -H 'Host: janus.local' http://127.0.0.1:7680/status.json
 
 ### 5. auth
 
-URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `janus janus-auth-hash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: unchanged reloads keep eligible sessions, removing a user or host revokes its sessions after commit, and a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
+URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `janus passhash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: unchanged reloads keep eligible sessions, removing a user or host revokes its sessions after commit, and a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.
 
 ```bash
-./bin/janus janus-auth-hash                 # mint a version-a passhash (password prompted, never argv)
+./bin/janus passhash                        # mint a version-a passhash (password prompted, never argv)
 curl -s http://127.0.0.1:7600/1.0/auth      # wall counters + session count
 curl -s http://127.0.0.1:7600/1.0/auth/sessions
 ```
@@ -254,7 +254,7 @@ Caddy (xcaddy or a custom main) add `github.com/shreeve/janus` like any
 other plugin.
 
 `janus help` lists every command. Most are Caddy's, under the `janus`
-name: `janus adapt`, `janus trust`, `janus fmt`, and the rest behave as
+name: `janus trust`, `janus adapt`, `janus fmt`, and the rest behave as
 Caddy's reference documents them, and there is no separate `caddy` command
 on a Janus host. The service verbs below are Janus's own, and `run`,
 `start`, `stop`, `reload`, and `validate` default to the service Caddyfile.
@@ -277,8 +277,14 @@ verbs as [Harbor](https://github.com/shreeve/duckdb-harbor):
 | `janus start` / `janus stop` | Start or stop that edge. A stop is clean, so it stays stopped until the next login or boot. Stopping a stopped edge is a quiet no-op. |
 | `janus restart` | Stop and start again. This is how an installed upgrade takes effect. The Caddyfile is validated first, so a broken one leaves the edge as it is. |
 | `janus reload` | Apply an edited Caddyfile in place, keeping every connection. |
-| `janus status [--json]` | Running or not, under what, which binary and version, whether the binary is newer than the running edge, and how many apps are registered. Exit 3 when stopped. |
+| `janus status [--json]` | Running or not, under what, which binary and version, whether the binary is newer than the running edge, how many apps are registered, and the exposure mode: scope, bind, firewall, and each front-door address with how its reach is enforced. Exit 3 when stopped. |
+| `janus serve [dir] [--name N]` | Open a directory through the running edge with the browse capability, at `https://<name>.localhost/` here and `https://<name>.local/` on the LAN in `lan` mode (mdns). One registration, heartbeats while it runs, removed on Ctrl-C; nothing new listens. |
+| `janus apps [--json]` | What is registered with the running edge: each app's hosts, what serves them (workers, a files root, a site directory), and its lease. Exit 3 when no edge answers. |
+| `janus logs [-n N] [-f]` | The edge's log, live: the last lines, then each line as it arrives, across roll-overs, until Ctrl-C. Piped, it prints the last lines and exits (`-f` follows anyway). `--supervisor` reads the supervisor's capture, where a start that failed before the log opened left its reason; that is also what prints when the edge has no log yet. |
 | `janus validate` | Check the service Caddyfile without touching the running edge. |
+| `janus trust` / `janus untrust` | Install (or remove) the edge's own CA in this machine's trust stores, through the service edge's admin socket. |
+| `janus mode [localhost\|lan\|wan]` | Show the exposure mode, or set it (below) and put the edge on it; the same mode again re-resolves it after the lan address or default route moved. |
+| `janus firewall` | Re-apply the host firewall rule the mode needs (root); after a macOS update rewrites `/etc/pf.conf`. |
 
 Run it as yourself on a machine you log in to. Run it as root (`sudo janus
 autostart`, with `janus` installed where root finds it: the installer puts
@@ -286,6 +292,14 @@ it in `/usr/local/bin` when run as root) for a server: ports 80 and 443
 with no setcap, up before anyone logs in, unaffected by logouts. One or
 the other on a host, never both, since two edges would contend for the
 same ports.
+
+The seeded Caddyfile serves nothing of its own except the LAN's local
+names, `*.local` (announced by mdns), with the edge's own CA, which `janus
+trust` installs, one certificate per registered name at its first handshake. This machine's own names, `*.localhost`, are a drop-in
+janus writes into the sites directory (`sites/localhost.caddy`) and leaves
+to you afterwards; being a drop-in, it survives a Caddyfile rendered by
+another tool, so `janus serve` works on any host. Apps register hosts under
+both, and everything else is a drop-in `*.caddy` file of your own.
 
 The supervisor is launchd on macOS and systemd on Linux. As a user the
 service is a login item (`~/Library/LaunchAgents/janus.edge.plist`, or a
@@ -342,6 +356,70 @@ that edge needs its own ports in its own Caddyfile.
 
 Rip's `rip sites` registers apps with this edge and drops its site files
 into the sites directory; the edge itself is Janus's to run.
+
+### Exposure modes
+
+The edge listens where its exposure mode says, on ports 80 and 443, IPv4
+and IPv6 as separate sockets:
+
+| Mode | Listens on | Reachable by |
+| --- | --- | --- |
+| `localhost` | `127.0.0.1` and `::1` | this machine only — the default |
+| `lan` | localhost plus one interface's private IPv4 address | this machine and its local network; a private address is unreachable from the internet by addressing alone |
+| `wan` | every interface | anyone the network lets through |
+
+`janus autostart --scope lan` installs with a mode, `janus mode <scope>`
+changes it later, and `janus status` reports it. `lan` uses the interface
+the default route leaves through, the one this host reaches its network
+by; `--interface <name>` pins another (`--interface auto` returns to the
+default route), and when the interface has several private addresses
+`--v4` names the one to use — the address is never guessed among
+several. `lan` is IPv4 only: a public address is `wan`, and IPv6 (whose
+interface addresses are globally routable) stays on the loopback and on
+`wan`. Link-local addresses and tunnel, bridge, and VM interfaces are
+never candidates.
+
+The mode is stored in `scope.json` under the state directory, and the
+service Caddyfile binds through `default_bind {$JANUS_BIND}`, which `run`,
+`reload`, `validate`, and `adapt` fill in from the stored mode; the mode
+is the one source of that value. The running edge checks its own sockets
+against the mode every few seconds and stops, loudly, rather than serve
+wider than the mode allows. HTTP/3 stays off in the seed: it would open UDP
+listeners beside the scoped TCP ones.
+
+What enforces a mode differs by platform, and `status` says which:
+
+- **macOS** cannot bind an exact low port without root, so the socket is
+  always the wildcard and a pf anchor (`/etc/pf.anchors/janus`, loaded
+  from `/etc/pf.conf` ahead of Apple's anchors) scopes it to the
+  loopbacks, plus the on-link subnet for `lan`. The rules are stateless,
+  so narrowing the mode cuts the connections the wider mode admitted, and
+  the block covers every destination, so an address the host gains later
+  is covered too; the cost is that in `localhost` and `lan` the host also
+  stops forwarding ports 80 and 443 for others (Internet Sharing, VMs on
+  shared networking). pf is enabled by reference token, now and at boot by a small
+  LaunchDaemon, since macOS loads pf rules at boot but leaves pf off.
+  Loading the anchor is the one step that needs root, and it is the only
+  thing root does: `janus mode` and `autostart` write their
+  files as you and run `sudo janus firewall` when a terminal can prompt
+  (without one they refuse, exit 4, before changing anything); `sudo
+  janus firewall` and `sudo janus status` act on your edge when root has
+  none of its own. The edge refuses to serve `localhost` or `lan` until
+  the anchor is in place, so a wildcard socket is never open unscoped.
+- **Linux** binds the exact addresses (the low ports need
+  `cap_net_bind_service` for a user's edge) and needs no firewall in any
+  mode, since `lan`'s address is private. The system unit never stops
+  retrying: a lan edge whose DHCP address moved comes back the moment
+  `janus mode lan` stores the new one.
+- **Windows**: exposure modes are not supported yet; the verbs refuse.
+
+`janus status` never claims more than it verified. On macOS without root
+the firewall shows as `missing` when the anchor files are not in place and
+otherwise `unverified (run: sudo janus status)`; with root it verifies
+that pf is enabled and holds exactly the anchor's rules. Each address says
+what enforces its reach: the loopbacks are `host-enforced (loopback)`, a
+private address `host-enforced (RFC1918)` by addressing alone, and `wan`
+is `network-gated (wildcard)`.
 
 ### Prebuilt releases
 
@@ -462,7 +540,7 @@ sendfile is always on and has no config key.
 | `control_mdns.go` | mDNS control surface (`GET /1.0/mdns`) |
 | `auth.go` | Auth wall: gates, pooled sessions, throttle ladder, CSRF, login doors |
 | `auth_config.go` | `auth` directive: users, gates, parse, cascade, passhash codec, site table |
-| `auth_cmd.go` | `janus janus-auth-hash` credential minter |
+| `auth_cmd.go` | `janus passhash` credential minter |
 | `auth.html` | Embedded login/status page (self-contained; zero external resources) |
 | `control_auth.go` | Auth control surface (`GET /1.0/auth`, session list + revocation) |
 | `access.go` | Pooled access bridge, registration sequence state, bounded event schema |

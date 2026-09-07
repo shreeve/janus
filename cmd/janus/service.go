@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,11 +53,16 @@ type servicePaths struct {
 	pid    string // pidfile for a bare start
 	sock   string // control internal socket
 	admin  string // Caddy admin socket, so stop/reload can only ever reach this edge
+	scope  string // state/scope.json: the exposure mode
+	// uid and gid are the edge's owner when a verb runs as root on a
+	// user's behalf (delegatedPaths); -1 when the verb runs as the owner.
+	uid, gid int
 }
 
 func servicePathsFor(root bool, home string, getenv func(string) string) servicePaths {
 	var p servicePaths
 	p.root = root
+	p.uid, p.gid = -1, -1
 	if root {
 		p.config = "/etc/janus/Caddyfile"
 		p.state = "/var/lib/janus"
@@ -84,6 +90,7 @@ func servicePathsFor(root bool, home string, getenv func(string) string) service
 	p.pid = filepath.Join(p.run, "janus.pid")
 	p.sock = filepath.Join(p.run, "janus.sock")
 	p.admin = filepath.Join(p.run, "admin.sock")
+	p.scope = scopeFile(p)
 	return p
 }
 
@@ -116,6 +123,30 @@ func seedConfig(p servicePaths) string {
 	# 'janus stop', 'reload', and 'restart' talk to it; leave it on.
 	admin unix/%s
 
+	# The front door listens where the exposure mode says ('janus mode':
+	# localhost, lan, or wan). Janus supplies JANUS_BIND from the stored
+	# mode whenever it runs, reloads, validates, or adapts this file, and
+	# the running edge checks its own sockets against the mode. No default
+	# here on purpose: nothing but the stored mode fills it in.
+	default_bind {$JANUS_BIND}
+
+	# HTTP/1.1 and HTTP/2 only. HTTP/3 would open UDP listeners beside
+	# the scoped TCP ones, which the exposure mode does not cover.
+	servers {
+		protocols h1 h2
+	}
+
+	# The local names below use the edge's own CA, one certificate per
+	# name, minted at the first handshake for names registered with the
+	# edge (a wildcard would not do: clients reject *.local and
+	# *.localhost, one label short of a real name). Nothing here tries to
+	# install the CA into the system trust store (that would prompt, and
+	# under the service there is no one to answer); 'janus trust' does.
+	skip_install_trust
+	on_demand_tls {
+		ask http://127.0.0.1:7600/1.0/tls/ask
+	}
+
 	# The process log: startup, reloads, certificate events, data-plane
 	# warnings. Rolled so it never grows without bound. Access logs are
 	# separate — each site names its own below.
@@ -134,6 +165,39 @@ func seedConfig(p servicePaths) string {
 		# processes on this host, and loopback HTTP.
 		control internal %s
 		control local
+
+		# Directory listings with the embedded theme, for the roots apps
+		# register and for 'janus serve'.
+		browse
+
+		# janus.local and every registered <name>.local, announced on the
+		# LAN; that is how a phone finds a lan-mode edge by name.
+		mdns
+	}
+}
+
+# The network's local names: <name>.local, announced by mdns above. Apps
+# register them; 'janus serve' opens a directory on them in lan mode. The
+# edge's CA signs each name; 'janus trust' trusts it. This machine's own
+# names, <name>.localhost, are the drop-in sites/localhost.caddy.
+*.local {
+	tls {
+		issuer internal
+		on_demand
+	}
+	janus {
+		hub off
+		auth off
+	}
+}
+
+# mdns's shared front door: janus.local answers here with the status
+# page; every other .local name is sent to HTTPS.
+http://*.local {
+	janus {
+		auth off
+		files off
+		browse off
 	}
 }
 
@@ -152,6 +216,46 @@ func seedConfig(p servicePaths) string {
 # }
 import %s/*.caddy
 `, p.admin, p.log, p.sock, filepath.Join(filepath.Dir(p.log), "access.json"), p.sites)
+}
+
+// localhostSite is the drop-in that serves this machine's own names,
+// <name>.localhost, with the edge's CA. It is a drop-in rather than a line
+// in the Caddyfile because the Caddyfile may be another tool's to render
+// (rip renders one from its templates); the sites directory is the
+// operator's and survives every render, so janus can own this one file
+// on any host. Written once; an edited copy is left alone.
+func localhostSitePath(p servicePaths) string { return filepath.Join(p.sites, "localhost.caddy") }
+
+func localhostSite() string {
+	return `# This machine's local names, <name>.localhost: what 'janus serve' opens
+# and what an app registers to be reached from this machine by name. The
+# edge's own CA signs each name at its first handshake, gated by the
+# Caddyfile's on_demand_tls ask ('janus trust' trusts the CA); browsers and
+# the system resolver take *.localhost to mean this machine.
+*.localhost {
+	tls {
+		issuer internal
+		on_demand
+	}
+	janus {
+		hub off
+		auth off
+	}
+}
+`
+}
+
+// ensureLocalhostSite writes the drop-in when it is absent. Reports
+// whether it wrote.
+func ensureLocalhostSite(p servicePaths) (bool, error) {
+	path := localhostSitePath(p)
+	if fileExists(path) {
+		return false, nil
+	}
+	if err := os.MkdirAll(p.sites, 0o755); err != nil {
+		return false, err
+	}
+	return true, os.WriteFile(path, []byte(localhostSite()), 0o644)
 }
 
 // serviceItem is the supervisor-side half: one login item or system
@@ -230,7 +334,7 @@ func serviceEnv(p servicePaths, exe string) map[string]string {
 
 // --- verbs -------------------------------------------------------------------
 
-func serviceCommands(caddyRun, caddyStart, caddyStop, caddyReload, caddyValidate *cobra.Command) []*cobra.Command {
+func serviceCommands(caddyRun, caddyStart, caddyStop, caddyReload, caddyValidate, caddyAdapt, caddyTrust, caddyUntrust *cobra.Command) []*cobra.Command {
 	p := currentPaths()
 
 	wrap := func(cmd *cobra.Command, fn func(orig runFunc, cmd *cobra.Command, args []string) error) {
@@ -251,12 +355,41 @@ default when it exists, and the service env file is loaded beside it.
 			}
 		}
 		setEnvfile(cmd, p)
+		st, err := setBindEnv(p)
+		if err != nil {
+			return err
+		}
+		if cfg, _ := cmd.Flags().GetString("config"); cfg == p.config {
+			// The service edge: the mode must be enforceable here, the
+			// host rule it needs must be in place before a wildcard
+			// socket opens, nothing else may already answer on its
+			// ports, and what it binds is watched against the mode for
+			// as long as it runs.
+			if err := serviceEdgeReady(st); err != nil {
+				return err
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go exposureWatch(ctx, p)
+		}
 		return orig(cmd, args)
 	})
+	// adapt reads the Caddyfile too: the bind must be in its environment,
+	// or {$JANUS_BIND} adapts to Caddy's own default, the wildcard.
+	wrap(caddyAdapt, func(orig runFunc, cmd *cobra.Command, args []string) error {
+		if _, err := setBindEnv(p); err != nil {
+			return err
+		}
+		return orig(cmd, args)
+	})
+	hiddenScopeFlags(caddyReload)
 	for _, c := range []*cobra.Command{caddyReload, caddyValidate} {
 		c.Use = strings.Replace(c.Use, "--config <path>", "[--config <path>]", 1)
 		c.Long = janusify(c.Long) + serviceDefault
 		wrap(c, func(orig runFunc, cmd *cobra.Command, args []string) error {
+			if err := refuseScopeFlags(cmd); err != nil {
+				return err
+			}
 			// Only the service edge is known to be running or not; a
 			// --config or --address names some other edge.
 			if cmd.Name() == "reload" && targetsService(cmd) && runningPID(p) == 0 && !controlReachable(p) {
@@ -264,6 +397,16 @@ default when it exists, and the service env file is loaded beside it.
 			}
 			if !cmd.Flags().Changed("config") && fileExists(p.config) {
 				setConfig(cmd, p.config)
+			}
+			// The Caddyfile is adapted here, in this process: the service
+			// env file and the mode's bind must be in the environment.
+			if cfg, _ := cmd.Flags().GetString("config"); cfg == p.config {
+				if err := loadEnvFile(p.env); err != nil {
+					return err
+				}
+			}
+			if _, err := setBindEnv(p); err != nil {
+				return err
 			}
 			return orig(cmd, args)
 		})
@@ -284,9 +427,23 @@ nothing is running this is a quiet no-op.
 		return orig(cmd, args)
 	})
 
+	// trust and untrust talk to the admin API, which the service edge keeps
+	// on its own socket rather than Caddy's default port; when that socket
+	// is there, it is the address.
+	for _, c := range []*cobra.Command{caddyTrust, caddyUntrust} {
+		c.Long = janusify(c.Long) + `
+The running service edge's admin socket is the default --address.
+`
+		c.PreRunE = func(cmd *cobra.Command, _ []string) error {
+			if !cmd.Flags().Changed("address") && socketExists(p.admin) {
+				return cmd.Flags().Set("address", "unix/"+p.admin)
+			}
+			return nil
+		}
+	}
+
 	// start: under the item when there is one, else Caddy's background
 	// start with the service's Caddyfile and pidfile as defaults.
-	caddyStart.Short = "Starts the edge in the background (under its autostart item when there is one)"
 	caddyStart.Long = `
 Starts the edge in the background and returns.
 
@@ -299,13 +456,16 @@ and records its pid so 'janus status' and 'janus restart' can find it.
 The service Caddyfile is the default --config when it exists, and the
 service env file is loaded beside it.
 `
+	hiddenScopeFlags(caddyStart)
 	wrap(caddyStart, func(orig runFunc, cmd *cobra.Command, args []string) error {
+		if err := refuseScopeFlags(cmd); err != nil {
+			return err
+		}
 		return startEdge(orig, cmd, args, p)
 	})
 
 	restart := &cobra.Command{
-		Use:   "restart",
-		Short: "Stops the edge and starts it again (the upgrade path)",
+		Use: "restart",
 		Long: `
 Stops the running edge gracefully, waits for it to exit (up to 10 s), and
 starts it again, under its autostart item when there is one. Connections
@@ -322,8 +482,7 @@ then 'janus restart'.
 	}
 
 	autostart := &cobra.Command{
-		Use:   "autostart [off [stop]]",
-		Short: "Keeps the edge running: now, at every login (root: boot), and after a crash",
+		Use: "autostart [off [stop]]",
 		Long: `
 Installs the edge as a service under the platform's manager — a launchd
 item on macOS, a systemd unit on Linux — and starts it now. From then on it
@@ -344,16 +503,20 @@ env file beside it (KEY=value lines) is loaded into the edge at start.
 'janus autostart off' removes the item and leaves a running edge alone;
 'janus autostart off stop' takes both down. Run again after changing the
 binary and the item is rewritten; 'janus restart' applies it.
+
+--scope sets the exposure mode the edge is installed with (localhost, the
+default when none is stored; lan takes --interface to pin one).
+Without --scope a stored mode is kept. 'janus mode' changes it later.
 `,
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return autostartEdge(caddyStop, p, args, cmd)
 		},
 	}
+	addScopeFlags(autostart, true)
 
 	status := &cobra.Command{
-		Use:   "status",
-		Short: "Shows the edge: running or not, under what, and how many apps are registered",
+		Use: "status",
 		Long: `
 Shows the edge: running or stopped (and under what: the autostart item, a
 pidfile, or nothing), this binary and its version, whether the binary is
@@ -361,22 +524,30 @@ newer than the edge that is running, the service Caddyfile, sites
 directory, and log, and the control endpoint with how many apps are
 registered on it.
 
+Then the exposure mode: scope, the bind the Caddyfile gets through
+JANUS_BIND, whether the host firewall rule the mode needs is in force
+(root sees the firewall; run under sudo to verify it), and each front-door
+address with how its reach is enforced — by the host (loopback, a private
+address, a verified firewall) or only by the network.
+
 Exits 3 when the edge is not running. --json prints the same as one
 object, plus the service's paths for tools that write site files or
 register with the edge: running, pid, uptime, supervisor, autostart,
 loaded, binary, version, janus, caddy, binary_newer, config, sites, env,
 state, socket (the control socket), admin (Caddy's admin socket), log,
-and control with apps (present only when control answered).
+scope, interface, bind, firewall, listeners, and control with apps
+(present only when control answered).
 `,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			asJSON, _ := cmd.Flags().GetBool("json")
-			return statusEdge(p, cmd, asJSON)
+			sp, note := delegatedPaths()
+			return statusEdge(sp, cmd, asJSON, note)
 		},
 	}
 	status.Flags().Bool("json", false, "Print the status as JSON")
 
-	return []*cobra.Command{restart, autostart, status}
+	return []*cobra.Command{restart, autostart, status, appsCommand(), logsCommand(), serveCommand(caddyReload), modeCommand(caddyReload), firewallCommand()}
 }
 
 type runFunc = func(cmd *cobra.Command, args []string) error
@@ -424,6 +595,11 @@ func startEdge(orig runFunc, cmd *cobra.Command, args []string, p servicePaths) 
 		if _, pid := item.loaded(); pid > 0 && processAlive(pid) {
 			fmt.Fprintf(out, "janus is already running (pid %d) under %s\n", pid, item.name())
 			return nil
+		}
+		if st, err := readScope(p); err != nil {
+			return err
+		} else if err := serviceEdgeReady(st); err != nil {
+			return err
 		}
 		if err := item.load(); err != nil {
 			return err
@@ -584,6 +760,18 @@ func autostartEdge(caddyStop *cobra.Command, p servicePaths, args []string, cmd 
 			return err
 		}
 	}
+	if written, err := ensureLocalhostSite(p); err != nil {
+		return err
+	} else if written {
+		fmt.Fprintf(out, "seeded %s\n", localhostSitePath(p))
+	}
+	prev, scope, err := autostartScope(cmd, p)
+	if err != nil {
+		return err
+	}
+	if err := writeScope(p, scope); err != nil {
+		return err
+	}
 	if !fileExists(p.config) {
 		if err := os.WriteFile(p.config, []byte(seedConfig(p)), 0o644); err != nil {
 			return err
@@ -594,6 +782,7 @@ func autostartEdge(caddyStop *cobra.Command, p servicePaths, args []string, cmd 
 	// Validate first: under a crash-only item a bad config is a restart
 	// loop every ten seconds, forever.
 	if err := validateConfig(p.config); err != nil {
+		_ = writeScope(p, prev)
 		return fmt.Errorf("%s does not validate; nothing installed:\n%v", p.config, err)
 	}
 
@@ -605,18 +794,32 @@ func autostartEdge(caddyStop *cobra.Command, p servicePaths, args []string, cmd 
 	for _, warn := range platformNotes(p, exe) {
 		fmt.Fprintln(out, warn)
 	}
+	// The host rule before the edge, so the wildcard socket on macOS is
+	// never open unscoped.
+	ready, err := autostartFirewall(cmd, p, scope)
+	if err != nil {
+		return err
+	}
 
 	_, pid := item.loaded()
 	switch {
+	case !ready:
+		fmt.Fprintln(out, "not started: the edge refuses to serve until the rule is in place; then 'janus start'")
 	case pid > 0 && processAlive(pid):
 		if changed {
 			fmt.Fprintf(out, "janus is running (pid %d) under the previous item; 'janus restart' applies the new one\n", pid)
 		} else {
 			fmt.Fprintf(out, "janus is already running (pid %d) under %s\n", pid, item.name())
 		}
+		if scope != prev {
+			fmt.Fprintln(out, "the mode changed; 'janus reload' puts the running edge on it")
+		}
 	case runningPID(p) > 0 || controlReachable(p):
 		fmt.Fprintln(out, "something already serves this edge outside the item; 'janus restart' hands it over")
 	default:
+		if err := foreignListener(scope, runtime.GOOS, dialTCP); err != nil {
+			return err
+		}
 		if err := item.load(); err != nil {
 			return err
 		}
@@ -624,6 +827,59 @@ func autostartEdge(caddyStop *cobra.Command, p servicePaths, args []string, cmd 
 	}
 	fmt.Fprintf(out, "config %s\nsites  %s\nlog    %s\n", p.config, p.sites, p.log)
 	return nil
+}
+
+// autostartFirewall applies the mode's host firewall rule: directly with
+// root, through 'sudo janus firewall' on a terminal, and otherwise it says
+// what does and reports the edge not ready — it refuses to serve a scoped
+// mode until the rule is in place.
+func autostartFirewall(cmd *cobra.Command, p servicePaths, st scopeState) (ready bool, err error) {
+	out := cmd.OutOrStdout()
+	bind, err := st.bind(runtime.GOOS)
+	if err != nil {
+		return false, err
+	}
+	fmt.Fprintf(out, "scope  %s%s\nbind   %s\n", st.Scope, ifaceSuffix(st), strings.Join(bind, " "))
+	if st.Scope == ScopeWAN {
+		fmt.Fprintln(out, "wildcard exposure active: the edge answers on every interface")
+	}
+	if !NeedsFirewall(st.Scope, runtime.GOOS) {
+		return true, nil
+	}
+	switch {
+	case os.Geteuid() == 0:
+		v, err := applyFirewall(hostFwOps(), st)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(out, "firewall %s\n", v)
+	case canSudo():
+		if err := sudoFirewall(cmd, "the firewall step for "+string(st.Scope)); err != nil {
+			return false, err
+		}
+	case pfInstalled(hostFwOps(), st) == "":
+		fmt.Fprintln(out, "firewall unverified (run: sudo janus status)")
+	default:
+		fmt.Fprintf(out, "firewall: %s is enforced by the host firewall, which needs root to load. Run:\n  sudo janus firewall\n", st.Scope)
+		return false, nil
+	}
+	return true, nil
+}
+
+// serviceEdgeReady is what the service edge checks before it serves: the
+// mode is one this OS enforces, the host rule a scoped mode needs is in
+// place (the files; pf itself is root's to see), and nothing else answers
+// on its ports.
+func serviceEdgeReady(st scopeState) error {
+	if err := platformExposure(servicePaths{}, st); err != nil {
+		return err
+	}
+	if NeedsFirewall(st.Scope, runtime.GOOS) {
+		if detail := pfInstalled(hostFwOps(), st); detail != "" {
+			return fmt.Errorf("the host firewall for %s is not in place (%s); the edge refuses to open a wildcard socket unscoped. Run: sudo janus firewall", st.Scope, detail)
+		}
+	}
+	return foreignListener(st, runtime.GOOS, dialTCP)
 }
 
 // installedExe is the binary the item runs: this one, by the path it was
@@ -681,6 +937,9 @@ var validateConfig = func(path string) error {
 
 // validateInProcess is what 'janus validate' does, without the process.
 func validateInProcess(path string) error {
+	if _, err := setBindEnv(currentPaths()); err != nil {
+		return err
+	}
 	cfgJSON, _, _, err := caddycmd.LoadConfig(path, "caddyfile")
 	if err != nil {
 		return err
@@ -716,11 +975,27 @@ type edgeStatus struct {
 	Log         string `json:"log"`
 	Control     string `json:"control,omitempty"`
 	Apps        *int   `json:"apps,omitempty"` // only when control answered
+	// The exposure mode. Bind is what JANUS_BIND carries; Firewall is
+	// verified / missing / unverified / none; Listeners are the front-door
+	// addresses the mode admits, each with how its reach is enforced.
+	Scope      string           `json:"scope"`
+	Interface  string           `json:"interface,omitempty"`
+	Bind       []string         `json:"bind"`
+	Firewall   string           `json:"firewall"`
+	Listeners  []listenerStatus `json:"listeners,omitempty"`
+	ScopeError string           `json:"scope_error,omitempty"` // scope.json is unusable
+}
+
+type listenerStatus struct {
+	Role  string `json:"role"`
+	Addr  string `json:"addr"`
+	Reach Reach  `json:"reach"`
 }
 
 func gatherStatus(p servicePaths) edgeStatus {
 	st := edgeStatus{Config: p.config, Sites: p.sites, Env: p.env, State: p.state, Socket: p.sock, Admin: p.admin, Log: p.log, Version: versionLine(), Janus: janusVersion(), Caddy: caddyVersion()}
 	st.Binary, _ = os.Executable()
+	gatherExposure(&st, p)
 	if item := itemFor(p); item != nil {
 		st.Autostart = item.registered()
 		st.Loaded, st.PID = item.loaded()
@@ -749,7 +1024,33 @@ func gatherStatus(p servicePaths) edgeStatus {
 	return st
 }
 
-func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool) error {
+// gatherExposure fills the mode fields: the stored scope, its bind on this
+// OS, the firewall as far as this invocation can see it (root verifies;
+// anyone else gets "unverified", never a claim), and the admitted
+// addresses labeled by what enforces their reach.
+func gatherExposure(st *edgeStatus, p servicePaths) {
+	st.Bind = []string{}
+	sc, err := readScope(p)
+	if err != nil {
+		st.ScopeError = err.Error()
+		st.Firewall = "unknown (scope unusable)"
+		return
+	}
+	st.Scope, st.Interface = string(sc.Scope), sc.Interface
+	st.Bind, _ = sc.bind(runtime.GOOS)
+	verdict := checkFirewallVerdict(sc)
+	st.Firewall = verdict.String()
+	plan, err := PlanListeners(sc.Scope, sc.lan())
+	if err != nil {
+		st.ScopeError = err.Error()
+		return
+	}
+	for _, l := range plan {
+		st.Listeners = append(st.Listeners, listenerStatus{Role: l.Role.String(), Addr: l.Addr.String(), Reach: classifyReach(l.Addr.Addr())})
+	}
+}
+
+func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool, note string) error {
 	out := cmd.OutOrStdout()
 	st := gatherStatus(p)
 	if asJSON {
@@ -759,6 +1060,9 @@ func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool) error {
 			return err
 		}
 	} else {
+		if note != "" {
+			fmt.Fprintln(out, note)
+		}
 		printStatus(out, p, st)
 	}
 	if !st.Running {
@@ -807,6 +1111,36 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 		fmt.Fprintf(out, "control  %s (%d app%s registered)\n", st.Control, *st.Apps, plural(*st.Apps))
 	case st.Running:
 		fmt.Fprintf(out, "control  unreachable at %s and %s\n", p.sock, localControlURL)
+	}
+	printExposure(out, st)
+}
+
+func printExposure(out io.Writer, st edgeStatus) {
+	if st.ScopeError != "" {
+		fmt.Fprintf(out, "scope    UNUSABLE: %s\n", st.ScopeError)
+		return
+	}
+	scope := st.Scope
+	if st.Interface != "" {
+		scope += " (" + st.Interface + ")"
+	}
+	fmt.Fprintf(out, "scope    %s\n", scope)
+	bind := strings.Join(st.Bind, " ")
+	if runtime.GOOS == "darwin" && st.Scope != string(ScopeWAN) {
+		bind += "  (wildcard socket; pf scopes it)"
+	}
+	fmt.Fprintf(out, "bind     %s\n", bind)
+	fmt.Fprintf(out, "firewall %s\n", st.Firewall)
+	label := "https    "
+	for _, l := range st.Listeners {
+		if l.Role != "https" {
+			continue
+		}
+		fmt.Fprintf(out, "%s%-24s %s\n", label, l.Addr, l.Reach)
+		label = "         "
+	}
+	if len(st.Listeners) > 0 {
+		fmt.Fprintln(out, "http     the same addresses on port 80")
 	}
 }
 

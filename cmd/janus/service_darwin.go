@@ -29,9 +29,13 @@ func newServiceItem(p servicePaths) serviceItem {
 	if p.root {
 		return &launchdItem{label: label, domain: "system", plist: "/Library/LaunchDaemons/" + label + ".plist"}
 	}
+	uid := os.Getuid()
+	if p.uid >= 0 {
+		uid = p.uid // a verb acting on a user's edge as root
+	}
 	return &launchdItem{
 		label:  label,
-		domain: "gui/" + strconv.Itoa(os.Getuid()),
+		domain: "gui/" + strconv.Itoa(uid),
 		plist:  filepath.Join(p.home, "Library", "LaunchAgents", label+".plist"),
 	}
 }
