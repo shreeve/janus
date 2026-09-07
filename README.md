@@ -295,6 +295,10 @@ edge survives logout); as root it is a system service
 `janus run --config <Caddyfile>` in the foreground, restarts it after a
 crash, and never after a clean exit.
 
+Explicit exposure modes — binding the edge to `localhost`, `lan`, or `wan`
+on ports 80 and 443 under a fail-closed, per-platform contract — are
+specified in [`EXPOSURE.md`](EXPOSURE.md) (design; being built).
+
 The service's files:
 
 | | User | Root |
