@@ -43,7 +43,7 @@ func TestWanExposureRefusesLocalNames(t *testing.T) {
 		err := h.ServeHTTP(rr, req, next)
 		return rr.Code, nextCalled, err
 	}
-	for _, host := range []string{"janus.local", "janus-2.local", "shop.local", "shop.localhost", "localhost"} {
+	for _, host := range []string{"janus.local", "janus-2.local", "shop.local", "shop.localhost", "localhost", "via.rip", "shop.via.rip"} {
 		for _, secure := range []bool{false, true} {
 			_, nextCalled, err := serve(host, secure)
 			var herr caddyhttp.HandlerError
@@ -121,8 +121,8 @@ func TestWanExposureWithdrawsAdvertising(t *testing.T) {
 
 func TestLocalFamilyHost(t *testing.T) {
 	for host, want := range map[string]bool{
-		"janus.local": true, "shop.localhost": true, "localhost": true, "a.b.local": true,
-		"shop.example.com": false, "local": false, "localhost.example.com": false, "127.0.0.1": false,
+		"janus.local": true, "shop.localhost": true, "localhost": true, "a.b.local": true, "via.rip": true, "shop.via.rip": true,
+		"shop.example.com": false, "local": false, "localhost.example.com": false, "127.0.0.1": false, "via.rip.example.com": false,
 	} {
 		if got := localFamilyHost(host); got != want {
 			t.Errorf("localFamilyHost(%q) = %v, want %v", host, got, want)
