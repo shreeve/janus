@@ -189,12 +189,13 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 ### 4. mdns
 
-Opt-in LAN presence: `janus.local` (and every registered single-label `.local` host) answers over multicast DNS with no DNS server or client install, and a plain-HTTP front door serves a read-only, self-contained status page — registry, worker health, heartbeat freshness, and hub counters, with socket paths redacted. An optional `canonical` origin turns the page into a hand-off ramp to real HTTPS, with a built-in diagnostic for router DNS-rebinding filters. The announced name must answer on the HTTP port; where a `janus` site covers it, that site serves the front door, and where a site of your own covers it, your site owns the name.
+Opt-in LAN presence: `janus.local` (and every registered single-label `.local` host) answers over multicast DNS with no DNS server or client install, and a plain-HTTP front door serves a read-only, self-contained status page — registry, worker health, heartbeat freshness, and hub counters, with socket paths redacted — and the trust page, `http://janus.local/trust`: the one-time setup that has a phone or another machine trust the edge's own CA, so every `.local` name it serves gets a real lock. The page detects the device, hands iOS a configuration profile (`/trust/ca.mobileconfig`) and everything else the root certificate (`/trust/ca.crt`), and watches for the moment trust lands (`/trust/check` over HTTPS) to move the device on. The front door's own name also answers over HTTPS. An optional `canonical` origin turns the page into a hand-off ramp to real HTTPS, with a built-in diagnostic for router DNS-rebinding filters. The announced name must answer on the HTTP port; where a `janus` site covers it, that site serves the front door, and where a site of your own covers it, your site owns the name.
 
 ```bash
-curl -s http://127.0.0.1:7600/1.0/mdns          # advertiser state (names, states, counters)
-curl -s http://127.0.0.1:7600/1.0/mdns/status   # the front door's status snapshot
+curl -s --unix-socket ~/.local/state/janus/run/control.sock http://janus/1.0/mdns          # advertiser state
+curl -s --unix-socket ~/.local/state/janus/run/control.sock http://janus/1.0/mdns/status   # the front door's snapshot
 curl -s -H 'Host: janus.local' http://127.0.0.1/status.json
+curl -s -H 'Host: janus.local' http://127.0.0.1/trust/ca.crt                                # the CA, as a phone fetches it
 ```
 
 ### 5. auth
@@ -278,12 +279,12 @@ verbs as [Harbor](https://github.com/shreeve/duckdb-harbor):
 | `janus start` / `janus stop` | Start or stop that edge. A stop is clean, so it stays stopped until the next login or boot. Stopping a stopped edge is a quiet no-op. |
 | `janus restart` | Stop and start again. This is how an installed upgrade takes effect. The Caddyfile is validated first, so a broken one leaves the edge as it is. |
 | `janus reload` | Apply an edited Caddyfile in place, keeping every connection. |
-| `janus status [--json]` | Running or not, under what, which binary and version, whether the binary is newer than the running edge, how many apps are registered, and the exposure mode: scope, bind, firewall, and each front-door address with how its reach is enforced. Exit 3 when stopped. |
+| `janus status [--json]` | Running or not, under what, which binary and version, whether the binary is newer than the running edge, how many apps are registered, whether this machine trusts the edge's CA and where a phone trusts it, and the exposure mode: scope, bind, firewall, and each front-door address with how its reach is enforced. Exit 3 when stopped. |
 | `janus serve [dir] [--name N]` | Open a directory through the running edge with the browse capability, at `https://<name>.localhost/` here and `https://<name>.local/` on the LAN in `lan` mode (mdns). One registration, heartbeats while it runs, removed on Ctrl-C; nothing new listens. |
 | `janus apps [--json]` | What is registered with the running edge: each app's hosts, what serves them (workers, a files root, a site directory), and its lease. Exit 3 when no edge answers. |
 | `janus logs [-n N] [-f]` | The edge's log, live: the last lines, then each line as it arrives, across roll-overs, until Ctrl-C. Piped, it prints the last lines and exits (`-f` follows anyway). `--supervisor` reads the supervisor's capture, where a start that failed before the log opened left its reason; that is also what prints when the edge has no log yet. |
 | `janus validate` | Check the service Caddyfile without touching the running edge. |
-| `janus trust` / `janus untrust` | Install (or remove) the edge's own CA in this machine's trust stores, through the service edge's admin socket. |
+| `janus trust [--export FILE]` / `janus untrust` | Install (or remove) the edge's own CA in this machine's trust stores, through the service edge's admin socket. `--export` writes the root certificate (PEM) instead, for another machine's trust store; phones take it from `http://janus.local/trust`. |
 | `janus mode [localhost\|lan\|wan]` | Show the exposure mode, or set it (below) and put the edge on it; the same mode again re-resolves it after the lan address or default route moved. |
 | `janus firewall` | Re-apply the host firewall rule the mode needs (root); after a macOS update rewrites `/etc/pf.conf`. |
 
@@ -296,10 +297,14 @@ same ports.
 
 The seeded Caddyfile serves nothing of its own except the LAN's local
 names, `*.local` (announced by mdns), with the edge's own CA, which `janus
-trust` installs, one certificate per registered name at its first handshake. This machine's own names, `*.localhost`, are a drop-in
-janus writes into the sites directory (`sites/localhost.caddy`) and leaves
-to you afterwards; being a drop-in, it survives a Caddyfile rendered by
-another tool, so `janus serve` works on any host. Apps register hosts under
+trust` installs here and `http://janus.local/trust` installs on a phone,
+one certificate per registered name at its first handshake. This machine's
+own names, `*.localhost`, are a drop-in janus writes into the sites
+directory (`sites/localhost.caddy`) and leaves to you afterwards; being a
+drop-in, it survives a Caddyfile rendered by another tool, so `janus serve`
+works on any host. Both sites carry the seed's defaults for an app: the
+hub (bridge mode, same-origin pages), precompressed files, and an access
+log in the janus format beside the process log. Apps register hosts under
 both, and everything else is a drop-in `*.caddy` file of your own.
 
 The supervisor is launchd on macOS and systemd on Linux. As a user the

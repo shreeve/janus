@@ -56,6 +56,19 @@ entry; their changes ship in the next tag.
   basic_auth, not a Janus credential) still run by name and stay out of
   the listing. `file-server` listens on :8080 by default, since 80 and 443
   are the edge's.
+- The mdns front door carries trust: `http://janus.local/trust` walks a
+  phone or another machine through trusting the edge's own CA (device
+  detection, an iOS configuration profile at `/trust/ca.mobileconfig`,
+  the root certificate at `/trust/ca.crt`, a Safari hand-off for iOS
+  browsers that cannot install profiles, and a probe of `/trust/check`
+  over HTTPS that moves the device on the moment trust lands). The
+  front door's own name answers over HTTPS too, and the on-demand
+  permission admits it. `janus trust --export FILE` writes the root
+  certificate for another machine; `janus status` reports whether this
+  machine trusts the CA and where a phone does. The seed carries an
+  app's defaults on its local sites: the hub in bridge mode with
+  same-origin pages, precompressed files, and a janus-format access log
+  beside the process log.
 - mdns shared mode: any site on the HTTP port may own the announced
   name. The coverage check asks whether the name answers there; the
   built-in front door is served where the covering site is a janus site,
