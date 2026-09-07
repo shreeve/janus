@@ -115,21 +115,46 @@ func TestNormalizeMapped(t *testing.T) {
 	}
 }
 
-func TestAllowedSet(t *testing.T) {
-	local := NewAllowedSet(ScopeLocalhost, LANAddrs{})
-	if !local.Contains(mustAddr("127.0.0.1")) || !local.Contains(mustAddr("::1")) {
-		t.Error("localhost allowed set must contain the loopbacks")
+func eqStrs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	if local.Contains(mustAddr("10.0.0.211")) {
-		t.Error("localhost allowed set must not contain a LAN address")
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
 	}
-	// mapped form of an allowed loopback is judged as its plain self
-	if !local.Contains(netip.MustParseAddr("::ffff:127.0.0.1")) {
-		t.Error("allowed set must normalize v4-mapped before membership")
+	return true
+}
+
+func TestBindPlan(t *testing.T) {
+	lan := LANAddrs{V4: mustAddr("10.0.0.211"), V6: mustAddr("2601:680:8000:2330::906e")}
+	wild := []string{"0.0.0.0", "::"}
+
+	// macOS: every mode binds the wildcard; pf enforces the scope.
+	for _, sc := range []Scope{ScopeLocalhost, ScopeLAN, ScopeWAN} {
+		got, err := BindPlan(sc, "darwin", lan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !eqStrs(got, wild) {
+			t.Errorf("darwin %s: got %v, want wildcard", sc, got)
+		}
 	}
-	wan := NewAllowedSet(ScopeWAN, LANAddrs{})
-	if !wan.Contains(netip.IPv4Unspecified()) || !wan.Contains(netip.IPv6Unspecified()) {
-		t.Error("wan allowed set must contain the unspecified addresses")
+	// Linux/Windows bind the exact addresses.
+	if got, _ := BindPlan(ScopeLocalhost, "linux", LANAddrs{}); !eqStrs(got, []string{"127.0.0.1", "::1"}) {
+		t.Errorf("linux localhost: %v", got)
+	}
+	if got, _ := BindPlan(ScopeLAN, "linux", lan); !eqStrs(got, []string{"127.0.0.1", "::1", "10.0.0.211", "2601:680:8000:2330::906e"}) {
+		t.Errorf("linux lan: %v", got)
+	}
+	if got, _ := BindPlan(ScopeWAN, "windows", LANAddrs{}); !eqStrs(got, wild) {
+		t.Errorf("windows wan: %v", got)
+	}
+	// lan requires an interface address on every OS — on macOS the pf on-link
+	// rule needs it even though the bind is wildcard.
+	if _, err := BindPlan(ScopeLAN, "darwin", LANAddrs{}); err == nil {
+		t.Error("lan with no interface address must fail, even on darwin")
 	}
 }
 

@@ -9,6 +9,16 @@ package main
 // (launchd sockets on macOS, capability binds on Linux, direct binds on
 // Windows) is the one platform-specific step and lives elsewhere; everything
 // here is deterministic and OS-independent.
+//
+// Mechanism, settled per platform:
+//   - Linux, Windows: bind the exact addresses directly (Linux needs
+//     CAP_NET_BIND_SERVICE for the low ports; Windows needs nothing).
+//   - macOS: cannot bind an exact low port unprivileged, so every mode binds
+//     the wildcard and the host firewall (pf) enforces the scope. The mode is
+//     therefore invisible to the Caddyfile on macOS.
+//
+// A firewall is needed for lan on every platform (its IPv6 address is globally
+// routable), for localhost on macOS only, and for wan never. See firewall.go.
 
 import (
 	"fmt"
@@ -168,59 +178,17 @@ func normalizeAddr(a netip.Addr) netip.Addr {
 	return a
 }
 
-// AllowedSet is the set of local addresses a scope permits a listener to be
-// bound to. WAN permits the two unspecified addresses; localhost and lan permit
-// an explicit, closed set. Used to verify what actually bound.
-type AllowedSet struct {
-	scope Scope
-	addrs map[netip.Addr]struct{}
-}
-
-// NewAllowedSet builds the allowed address set for a scope.
-func NewAllowedSet(scope Scope, lan LANAddrs) AllowedSet {
-	set := AllowedSet{scope: scope, addrs: map[netip.Addr]struct{}{}}
-	add := func(a netip.Addr) {
-		if a.IsValid() {
-			set.addrs[normalizeAddr(a)] = struct{}{}
-		}
-	}
-	switch scope {
-	case ScopeLocalhost:
-		for _, a := range loopbackAddrs() {
-			add(a)
-		}
-	case ScopeLAN:
-		for _, a := range loopbackAddrs() {
-			add(a)
-		}
-		add(lan.V4)
-		add(lan.V6)
-	case ScopeWAN:
-		add(netip.IPv4Unspecified())
-		add(netip.IPv6Unspecified())
-	}
-	return set
-}
-
-// Contains reports whether an address is permitted in this scope. The address
-// is normalized first, so a mapped v4 form is judged as its plain v4 self.
-func (a AllowedSet) Contains(addr netip.Addr) bool {
-	_, ok := a.addrs[normalizeAddr(addr)]
-	return ok
-}
-
 // VerifyBound checks the addresses that actually bound (from getsockname)
-// against the plan, fail-closed. It returns an error describing every
-// violation: an address outside the allowed set, an unspecified address in a
-// non-wan scope, a required listener missing, or an unexplained surplus
-// listener. A nil return means the bound set exactly realizes the scope.
+// against the plan, fail-closed. Bound must be exactly the planned set: any
+// missing listener, any unexpected one, and any wildcard address outside wan
+// is a violation. A nil return means the bound set exactly realizes the scope.
+// Addresses are normalized first, so an IPv4-in-IPv6 mapped form can never
+// slip past as something other than its plain self.
 func VerifyBound(scope Scope, lan LANAddrs, bound []netip.AddrPort) error {
 	plan, err := PlanListeners(scope, lan)
 	if err != nil {
 		return err
 	}
-	allowed := NewAllowedSet(scope, lan)
-
 	want := map[netip.AddrPort]struct{}{}
 	for _, s := range plan {
 		want[normalizeAddrPort(s.Addr)] = struct{}{}
@@ -231,13 +199,8 @@ func VerifyBound(scope Scope, lan LANAddrs, bound []netip.AddrPort) error {
 	for _, ap := range bound {
 		n := normalizeAddrPort(ap)
 		got[n] = struct{}{}
-		addr := n.Addr()
-		if addr.IsUnspecified() && scope != ScopeWAN {
+		if n.Addr().IsUnspecified() && scope != ScopeWAN {
 			violations = append(violations, fmt.Sprintf("wildcard listener %s where %s allows none", ap, scope))
-			continue
-		}
-		if !allowed.Contains(addr) {
-			violations = append(violations, fmt.Sprintf("listener %s is outside the %s allowed set", ap, scope))
 		}
 	}
 	for ap := range want {
@@ -247,11 +210,7 @@ func VerifyBound(scope Scope, lan LANAddrs, bound []netip.AddrPort) error {
 	}
 	for ap := range got {
 		if _, ok := want[ap]; !ok {
-			// Outside-allowed-set surplus is already reported above; only
-			// flag an in-set address bound on an unexpected port here.
-			if allowed.Contains(ap.Addr()) && !ap.Addr().IsUnspecified() {
-				violations = append(violations, fmt.Sprintf("surplus listener %s not in the plan", ap))
-			}
+			violations = append(violations, fmt.Sprintf("unexpected listener %s not in the %s plan", ap, scope))
 		}
 	}
 	if len(violations) > 0 {
@@ -259,6 +218,37 @@ func VerifyBound(scope Scope, lan LANAddrs, bound []netip.AddrPort) error {
 		return fmt.Errorf("exposure verification failed for scope %s: %s", scope, strings.Join(violations, "; "))
 	}
 	return nil
+}
+
+// BindPlan returns the addresses Caddy's default_bind should listen on for a
+// scope on a given OS (goos = runtime.GOOS). macOS cannot bind an exact low
+// port unprivileged, so every mode binds the wildcard there and the host
+// firewall (pf) enforces the scope — the mode is invisible to the Caddyfile.
+// Linux and Windows bind the exact addresses directly. rip renders
+// default_bind from this value; it no longer decides the bind itself.
+func BindPlan(scope Scope, goos string, lan LANAddrs) ([]string, error) {
+	if _, err := PlanListeners(scope, lan); err != nil {
+		return nil, err // validates inputs, e.g. lan requires an interface address
+	}
+	if goos == "darwin" {
+		return []string{"0.0.0.0", "::"}, nil
+	}
+	switch scope {
+	case ScopeLocalhost:
+		return []string{"127.0.0.1", "::1"}, nil
+	case ScopeLAN:
+		hosts := []string{"127.0.0.1", "::1"}
+		if lan.V4.IsValid() {
+			hosts = append(hosts, lan.V4.String())
+		}
+		if lan.V6.IsValid() {
+			hosts = append(hosts, lan.V6.String())
+		}
+		return hosts, nil
+	case ScopeWAN:
+		return []string{"0.0.0.0", "::"}, nil
+	}
+	return nil, fmt.Errorf("unknown exposure mode %q", scope)
 }
 
 func normalizeAddrPort(ap netip.AddrPort) netip.AddrPort {
@@ -310,9 +300,8 @@ func classifyReach(scope Scope, addr netip.Addr, lanFirewall bool) Reach {
 	case a.IsLoopback():
 		return ReachLoopback
 	case isRFC1918(a):
-		if scope == ScopeLAN && lanFirewall {
-			return ReachRFC1918 // RFC1918 + firewall; addressing alone already suffices
-		}
+		// RFC1918 is unroutable from the internet by addressing alone,
+		// firewall or not — always host-enforced.
 		return ReachRFC1918
 	case ulaV6.Contains(a):
 		return ReachULA
