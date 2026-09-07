@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -126,16 +127,18 @@ func waitFor(t *testing.T, ok func() bool) {
 }
 
 type syncBuffer struct {
-	mu  chan struct{}
+	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
-func (b *syncBuffer) lock() func() {
-	if b.mu == nil {
-		b.mu = make(chan struct{}, 1)
-	}
-	b.mu <- struct{}{}
-	return func() { <-b.mu }
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
 }
-func (b *syncBuffer) Write(p []byte) (int, error) { defer b.lock()(); return b.buf.Write(p) }
-func (b *syncBuffer) String() string              { defer b.lock()(); return b.buf.String() }
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}

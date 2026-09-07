@@ -115,10 +115,16 @@ func TestExposureWatchExitsOnViolation(t *testing.T) {
 	prevPorts := edgePorts
 	edgePorts = []uint16{port}
 	t.Cleanup(func() { edgePorts = prevPorts })
+	// Each watch is joined before the test moves on: the goroutine reads
+	// the package variables the test swaps.
+	watch := func(ctx context.Context) <-chan struct{} {
+		done := make(chan struct{})
+		go func() { exposureWatch(ctx, p); close(done) }()
+		return done
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
 	start := time.Now()
-	go exposureWatch(ctx, p)
+	done := watch(ctx)
 	select {
 	case <-exited:
 		if time.Since(start) < 1500*time.Millisecond {
@@ -127,18 +133,21 @@ func TestExposureWatchExitsOnViolation(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("the watch did not end the process on a violation")
 	}
+	cancel()
+	<-done
 	// A clean process is left alone.
 	udp.Close()
 	exited2 := make(chan struct{}, 1)
 	exitExposure = func() { exited2 <- struct{}{} }
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel2()
-	go exposureWatch(ctx2, p)
+	done2 := watch(ctx2)
 	select {
 	case <-exited2:
 		t.Fatal("the watch ended a compliant process")
 	case <-ctx2.Done():
 	}
+	cancel2()
+	<-done2
 }
 
 func TestForeignListener(t *testing.T) {
