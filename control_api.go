@@ -267,6 +267,9 @@ func (a *App) controlMuxAt(base string) *http.ServeMux {
 // the two callers.
 func (a *App) certificateAllowed(domain string) (appID string, err error) {
 	name := normalizeHostHeader(domain)
+	if wanExposure() && localFamilyHost(name) {
+		return "", fmt.Errorf("domain %q is a local name; the edge is in wan mode", name)
+	}
 	if rec, ok := a.appsRegistry().resolveRequestHost(domain); ok {
 		return rec.ID, nil
 	}

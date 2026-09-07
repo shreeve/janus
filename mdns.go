@@ -617,6 +617,12 @@ func (a *mdnsAdvertiser) markFailed(e *mdnsEntry, epoch uint64) {
 // once per registration.
 func (a *mdnsAdvertiser) desiredLocked(cfg *mdnsConfig) map[string]*mdnsEntry {
 	out := map[string]*mdnsEntry{}
+	// In wan mode nothing is announced: the periodic pass withdraws what
+	// is on the air, with goodbyes, and re-announces when the mode returns.
+	if wanExposure() {
+		a.skipped = map[string]bool{}
+		return out
+	}
 	front := &mdnsEntry{name: cfg.name, typ: mdnsTypeFrontDoor, port: cfg.port}
 	out[front.key()] = front
 	if !cfg.apps || a.registry == nil {

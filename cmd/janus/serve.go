@@ -80,6 +80,10 @@ trust' installs the edge's CA on this machine.
 			if note != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), note)
 			}
+			// Local names are not served in wan mode; there is nothing to open.
+			if st, err := readScope(p); err == nil && st.Scope == ScopeWAN {
+				return errors.New("the edge is in wan mode, and local names (<name>.localhost, <name>.local) are not served there; 'janus mode localhost' or 'janus mode lan' first")
+			}
 			return serveDir(cmd, caddyReload, p, abs, name)
 		},
 	}

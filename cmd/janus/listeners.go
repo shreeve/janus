@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/shreeve/janus"
 	"go.uber.org/zap"
 )
 
@@ -84,6 +85,7 @@ func exposureWatch(ctx context.Context, p servicePaths) {
 			logger.Error("the exposure mode is unreadable; refusing to serve unverified", zap.Error(err))
 			exitExposure()
 		}
+		janus.SetExposureScope(string(st.Scope))
 		socks, err := ownSockets()
 		if err != nil {
 			logger.Error("cannot read the edge's own sockets; refusing to serve unverified", zap.Error(err))

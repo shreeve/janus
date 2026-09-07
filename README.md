@@ -393,6 +393,16 @@ against the mode every few seconds and stops, loudly, rather than serve
 wider than the mode allows. HTTP/3 stays off in the seed: it would open UDP
 listeners beside the scoped TCP ones.
 
+In `wan` the local name families are off: a request whose Host is
+`<name>.local`, `<name>.localhost`, or `localhost` is refused (421) by
+every janus site, the front door included, no certificate is minted for
+such a name, mdns announces nothing, and `janus serve` says why it has
+nothing to open. Those names belong to a machine you sit at and a
+network you are on; a public address has neither, and the seed's local
+sites need no editing to be safe there. The mode governs the service
+edge; a Caddyfile run some other way is localhost by default and keeps
+its local names.
+
 What enforces a mode differs by platform, and `status` says which:
 
 - **macOS** cannot bind an exact low port without root, so the socket is

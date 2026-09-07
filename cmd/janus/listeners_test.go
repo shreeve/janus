@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/shreeve/janus"
 	"net"
 	"net/netip"
 	"strings"
@@ -175,5 +176,42 @@ func TestForeignListener(t *testing.T) {
 	ln.Close()
 	if err := foreignListener(scopeState{Scope: ScopeLocalhost}, "linux", held); err != nil {
 		t.Errorf("free port refused: %v", err)
+	}
+}
+
+// The watch publishes the stored mode to the module on every pass, so
+// the edge refuses local names the moment the mode is wan.
+func TestExposureWatchPublishesScope(t *testing.T) {
+	p := isolatedHome(t)
+	t.Cleanup(func() { janus.SetExposureScope("") })
+	if err := writeScope(p, scopeState{Scope: ScopeWAN}); err != nil {
+		t.Fatal(err)
+	}
+	prevPorts := edgePorts
+	edgePorts = []uint16{}
+	t.Cleanup(func() { edgePorts = prevPorts })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { exposureWatch(ctx, p); close(done) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for janus.ExposureScope() != "wan" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if janus.ExposureScope() != "wan" {
+		t.Fatalf("published scope %q, want wan", janus.ExposureScope())
+	}
+}
+
+// janus serve has nothing to open in wan mode: local names are not served.
+func TestServeRefusesInWan(t *testing.T) {
+	p := isolatedHome(t)
+	if err := writeScope(p, scopeState{Scope: ScopeWAN}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, "serve", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "wan mode") {
+		t.Fatalf("serve in wan: err %v\n%s", err, out)
 	}
 }

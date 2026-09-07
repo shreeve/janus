@@ -172,6 +172,10 @@ func (h *Handler) provisionBrowse() error {
 // upstreams; unknown hosts → 404).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	r.Header.Del(ripSiteHeader)
+	// A local name in wan mode: not served here, front door included.
+	if wanExposure() && localFamilyHost(normalizeHostHeader(r.Host)) {
+		return caddyhttp.Error(http.StatusMisdirectedRequest, fmt.Errorf("janus: %s is a local name; the edge is in wan mode", r.Host))
+	}
 	if h.app != nil && h.app.mdnsSharedRoutes != nil {
 		// The front door answers for its own names only: the configured
 		// name, the effective (post-conflict) name, and the canonical
