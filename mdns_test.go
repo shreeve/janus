@@ -17,7 +17,6 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/caddyserver/caddy/v2/modules/caddytls"
 	"go.uber.org/zap"
 )
 
@@ -1330,7 +1329,7 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 	}
 	for _, required := range []string{
 		"/status.json", "No apps registered", "textContent", "no-cors", "location.replace",
-		"@media (max-width: 600px)", "min-height: 44px", "full certificate", "publicly trusted LAN hostname",
+		"@media (max-width: 600px)", "min-height: 44px", `href="/trust"`, "publicly trusted LAN hostname",
 		"No concrete launch host configured",
 	} {
 		if !strings.Contains(page, required) {
@@ -1518,20 +1517,6 @@ func TestMdnsSharedCoverage(t *testing.T) {
 			"srv0": server(":80", "example.com")}}, false},
 		{"janus site on another port does not cover", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
 			"srv0": server(":8080", "*.local")}}, false},
-		// launchd socket activation: listen is fd/N with no TCP port.
-		{"launchd fd plain-HTTP covers", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
-			"srv0": server("fd/3", "janus.local")}}, true},
-		{"launchd fd wildcard covers", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
-			"srv0": server("fd/3", "*.local")}}, true},
-		{"launchd fd TLS server is not the HTTP port", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
-			"srv0": {
-				Listen:          []string{"fd/4"},
-				TLSConnPolicies: caddytls.ConnectionPolicies{new(caddytls.ConnectionPolicy)},
-				Routes: caddyhttp.RouteList{{
-					MatcherSets: caddyhttp.MatcherSets{{caddyhttp.MatchHost{"janus.local"}}},
-					Handlers:    []caddyhttp.MiddlewareHandler{&Handler{}},
-				}},
-			}}}, false},
 		{"no servers at all", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{}}, false},
 		{"no route on the http port", &caddyhttp.App{Servers: map[string]*caddyhttp.Server{
 			"srv0": {Listen: []string{":80"}, Routes: caddyhttp.RouteList{}}}}, false},

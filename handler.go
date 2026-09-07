@@ -172,13 +172,22 @@ func (h *Handler) provisionBrowse() error {
 // upstreams; unknown hosts → 404).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	r.Header.Del(ripSiteHeader)
-	if h.app != nil && h.app.mdnsSharedRoutes != nil &&
-		r.TLS == nil && requestLocalPort(r) == h.app.mdnsSharedPort {
-		if h.app.mdnsSharedHostMine(normalizeHostHeader(r.Host)) {
+	if h.app != nil && h.app.mdnsSharedRoutes != nil {
+		if r.TLS == nil && requestLocalPort(r) == h.app.mdnsSharedPort {
+			if h.app.mdnsSharedHostMine(normalizeHostHeader(r.Host)) {
+				h.app.mdnsSharedRoutes.ServeHTTP(w, r)
+				return nil
+			}
+			return next.ServeHTTP(w, r)
+		}
+		// Over TLS the front door answers for its own name only (an
+		// app's .local host is the app's): https://janus.local/ is the
+		// status page, and /trust/check there is the handshake the trust
+		// page probes from plain HTTP.
+		if r.TLS != nil && h.app.mdnsFrontDoorName(normalizeHostHeader(r.Host)) {
 			h.app.mdnsSharedRoutes.ServeHTTP(w, r)
 			return nil
 		}
-		return next.ServeHTTP(w, r)
 	}
 	r, facts := attachAccessFactsRequest(r)
 	if facts != nil {

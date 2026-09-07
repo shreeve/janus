@@ -88,6 +88,7 @@
     <h1>Janus <span class="name" id="hdr-name"></span></h1>
   </header>
   <p class="sub" id="hdr-sub">read-only status &middot; refreshes every 10s</p>
+  <p class="sub"><a href="/trust">Trust this edge on this device</a> &middot; the one-time setup that gives every local https name a real lock</p>
   <div id="stale">status.json unreachable — showing the last snapshot</div>
 
   <div class="card" id="diagnostic">
@@ -109,10 +110,10 @@
 
   <div class="card">
     <h2>Apps</h2>
-    <p class="notice">Launch links use HTTPS. A .local link needs a local
-      certificate authority trusted by this phone, including full certificate
-      trust in the device settings. A configured publicly trusted LAN hostname
-      needs no certificate install.</p>
+    <p class="notice">Launch links use HTTPS. A .local link needs this edge's
+      certificate authority trusted by this device (<a href="/trust">set that
+      up here</a>). A configured publicly trusted LAN hostname needs no
+      certificate install.</p>
     <div id="apps"></div>
   </div>
 

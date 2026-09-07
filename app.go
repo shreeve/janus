@@ -2,6 +2,7 @@ package janus
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -63,9 +64,12 @@ type App struct {
 	// variable is honored as a fallback when this is unset.
 	HeartbeatTTL caddy.Duration `json:"heartbeat_ttl,omitempty"`
 
-	logger      *zap.Logger
-	hubLog      *zap.Logger // named child logger for the hub subsystem
-	ctx         caddy.Context
+	logger *zap.Logger
+	hubLog *zap.Logger // named child logger for the hub subsystem
+	ctx    caddy.Context
+	// rootCAFor overrides where the trust routes find the local CA;
+	// tests set it, production resolves the pki app.
+	rootCAFor   func() (*x509.Certificate, error)
 	controlSrvs []*controlServer
 
 	// state is the pooled process state (caddy.UsagePool): registry, data

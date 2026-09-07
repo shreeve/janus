@@ -2,8 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -84,10 +91,19 @@ func TestSeedConfigValidates(t *testing.T) {
 		}
 	}
 	seed := seedConfig(p)
-	for _, want := range []string{"control internal " + p.sock, "output file " + p.log, "import " + p.sites + "/*.caddy", "admin unix/" + p.admin} {
+	for _, want := range []string{"control internal " + p.sock, "output file " + p.log, "import " + p.sites + "/*.caddy", "admin unix/" + p.admin,
+		"permission janus", "mode bridge", "origin same", "precompressed", "output file " + accessLogPath(p), "/trust"} {
 		if !strings.Contains(seed, want) {
 			t.Errorf("seed lacks %q", want)
 		}
+	}
+	for _, reject := range []string{"hub off", "control local", "ask http"} {
+		if strings.Contains(seed, reject) {
+			t.Errorf("seed carries %q", reject)
+		}
+	}
+	if site := localhostSite(p); !strings.Contains(site, "output file "+accessLogPath(p)) || strings.Contains(site, "hub off") {
+		t.Errorf("localhost drop-in:\n%s", site)
 	}
 	if err := os.WriteFile(p.config, []byte(seed), 0o644); err != nil {
 		t.Fatal(err)
@@ -451,6 +467,8 @@ func controlServer(t *testing.T, p servicePaths, apps string) {
 			_, _ = w.Write([]byte(`{"type":"janus","control":[{"mode":"internal","listen":"` + p.sock + `"}]}`))
 		case "/1.0/apps":
 			_, _ = w.Write([]byte(apps))
+		case "/1.0/mdns/status":
+			_, _ = w.Write([]byte(`{"name":"janus.local","effective_name":"janus-2.local"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -498,6 +516,103 @@ func TestTrustDefaultsToAdminSocket(t *testing.T) {
 		if got := address(verb); got != "unix/"+p.admin {
 			t.Errorf("%s with socket: address %q", verb, got)
 		}
+	}
+}
+
+// status reports whether this machine trusts the local CA, and where a
+// phone trusts it: the mdns front door by its effective name.
+func TestStatusShowsCA(t *testing.T) {
+	p := isolatedHome(t)
+	withFakeItem(t, &fakeItem{})
+	controlServer(t, p, `[]`)
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	root := localCARoot()
+	if !strings.HasPrefix(root, data) {
+		t.Fatalf("root %s outside the isolated data dir", root)
+	}
+	out, err := run(t, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "\nca ") {
+		t.Errorf("no root on disk, yet a ca line:\n%s", out)
+	}
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root, testRootPEM(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := verifyCA
+	t.Cleanup(func() { verifyCA = prev })
+	verifyCA = func(*x509.Certificate) error { return nil }
+	out, err = run(t, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "ca       trusted on this machine") || !strings.Contains(out, "http://janus-2.local/trust") {
+		t.Errorf("trusted:\n%s", out)
+	}
+	verifyCA = func(*x509.Certificate) error { return errors.New("unknown authority") }
+	out, _ = run(t, "status")
+	if !strings.Contains(out, "ca       not trusted on this machine") || !strings.Contains(out, "'janus trust'") {
+		t.Errorf("untrusted:\n%s", out)
+	}
+	out, _ = run(t, "status", "--json")
+	if !strings.Contains(out, `"ca_trusted": false`) || !strings.Contains(out, `"trust_url": "http://janus-2.local/trust"`) {
+		t.Errorf("json:\n%s", out)
+	}
+}
+
+func testRootPEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Caddy Local Authority"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// trust --export writes the root certificate the admin API hands out, over
+// the service edge's admin socket, instead of trusting it here.
+func TestTrustExport(t *testing.T) {
+	p := isolatedHome(t)
+	if err := os.MkdirAll(p.run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootPEM := string(testRootPEM(t))
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/pki/ca/local" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "local", "root_certificate": rootPEM})
+	}))
+	ln, err := net.Listen("unix", p.admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	dest := filepath.Join(t.TempDir(), "ca.crt")
+	out, err := run(t, "trust", "--export", dest)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil || string(got) != rootPEM {
+		t.Errorf("exported %q (%v), want the root", got, err)
+	}
+	if !strings.Contains(out, "wrote "+dest) {
+		t.Errorf("out: %s", out)
 	}
 }
 

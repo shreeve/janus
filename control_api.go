@@ -273,6 +273,11 @@ func (a *App) certificateAllowed(domain string) (appID string, err error) {
 	if a.state != nil && a.state.browse.coldClaim(name) {
 		return "", nil
 	}
+	// The front door's own name: its status page and the trust probe
+	// answer over HTTPS too.
+	if a.mdnsFrontDoorName(name) {
+		return "", nil
+	}
 	return "", fmt.Errorf("domain %q is not a host of any registered app", name)
 }
 

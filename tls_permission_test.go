@@ -24,6 +24,15 @@ func TestPermissionByJanus(t *testing.T) {
 	if err := p.CertificateAllowed(context.Background(), "nobody.local"); err == nil {
 		t.Error("unregistered host allowed")
 	}
+	// The mdns front door's own name is admitted too: its status page
+	// and /trust/check answer over HTTPS.
+	if err := p.CertificateAllowed(context.Background(), "janus.local"); err == nil {
+		t.Error("front-door name minted with mdns off")
+	}
+	app.Mdns = &MdnsSettings{Name: "janus.local"}
+	if err := p.CertificateAllowed(context.Background(), "janus.local"); err != nil {
+		t.Errorf("front-door name denied: %v", err)
+	}
 	none := &PermissionByJanus{app: func() (*App, error) { return nil, errors.New("no janus app") }}
 	if err := none.CertificateAllowed(context.Background(), "shop.local"); err == nil {
 		t.Error("a config without the janus app minted")

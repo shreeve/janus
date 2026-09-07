@@ -1,0 +1,59 @@
+<!doctype html>
+<!-- Janus trust onboarding, Safari landing: the x-safari-https jump from
+     another iOS browser lands here. It starts the profile download and
+     keeps the Settings steps on screen; a raw-file target would strand
+     the user on a blank page after the prompts. Self-contained. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Janus — install trust</title>
+<style>
+  :root { --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e9ef; --dim: #8b93a3; --accent: #7aa2f7; --ok: #4fd6a5; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 520px; margin: 0 auto; padding: 28px 20px 60px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  p { margin: 8px 0; }
+  .dim { color: var(--dim); font-size: 13px; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ol { margin: 14px 0 0; padding: 0; list-style: none; }
+  ol li { display: flex; gap: 12px; margin: 14px 0; }
+  .n { flex: none; width: 24px; height: 24px; border-radius: 999px; border: 1px solid var(--line); color: var(--accent); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .n.done { color: var(--ok); border-color: var(--ok); }
+  footer { color: var(--dim); font-size: 12px; margin-top: 18px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Almost there</h1>
+    <p class="dim">The trust profile is downloading — allow it, then two quick steps in Settings.</p>
+    <ol>
+      <li><span class="n">1</span>
+        <div>Tap <strong>Allow</strong> when Safari asks about the configuration profile.
+          <div><a href="/trust/ca.mobileconfig">Didn't see it? Download again</a></div></div></li>
+      <li><span class="n">2</span>
+        <div>Open the <strong>Settings</strong> app and tap the <strong>Janus local HTTPS</strong>
+          profile — under <strong>Profile Downloaded</strong> near the top, or <strong>General → VPN &amp;
+          Device Management</strong> — then <strong>Install</strong>.</div></li>
+      <li><span class="n">3</span>
+        <div>Still in Settings: <strong>General → About</strong>, scroll to <strong>Certificate Trust Settings</strong>, and switch <strong>on</strong> the certificate named
+          <span class="mono">Caddy Local Authority</span>. <span class="dim">(The step everyone misses.)</span></div></li>
+      <li><span class="n done">✓</span>
+        <div>Go back to your browser — it notices within seconds and takes you to the status page, lock and all.</div></li>
+    </ol>
+  </div>
+  <footer>iOS discards a downloaded profile after 8 minutes — if you wandered off, download again.</footer>
+</div>
+<script>
+"use strict";
+// Start the download once the page has painted, so the steps stay visible
+// underneath Safari's prompts.
+setTimeout(function () { location.href = "/trust/ca.mobileconfig"; }, 700);
+</script>
+</body>
+</html>

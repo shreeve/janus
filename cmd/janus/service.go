@@ -17,7 +17,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -172,25 +174,41 @@ func seedConfig(p servicePaths) string {
 		# register and for 'janus serve'.
 		browse
 
+		# The per-app WebSocket hub, admitted by the app (bridge) and
+		# open to pages the edge itself served (origin same).
+		hub {
+			mode bridge
+			origin same
+		}
+
+		# Serve a file's .br or .gz sibling when the client accepts it.
+		files {
+			precompressed
+		}
+
 		# janus.local and every registered <name>.local, announced on the
-		# LAN; that is how a phone finds a lan-mode edge by name.
+		# LAN; that is how a phone finds a lan-mode edge by name. Its
+		# front door, http://janus.local, carries the status page and
+		# /trust, the one-time setup that has a device trust the CA.
 		mdns
 	}
 }
 
 # The network's local names: <name>.local, announced by mdns above. Apps
 # register them; 'janus serve' opens a directory on them in lan mode. The
-# edge's CA signs each name; 'janus trust' trusts it. This machine's own
-# names, <name>.localhost, are the drop-in sites/localhost.caddy.
+# edge's CA signs each name; 'janus trust' trusts it here and
+# http://janus.local/trust trusts it on a phone. This machine's own names,
+# <name>.localhost, are the drop-in sites/localhost.caddy.
 *.local {
 	tls {
 		issuer internal
 		on_demand
 	}
-	janus {
-		hub off
-		auth off
+	log {
+		output file %s
+		format janus
 	}
+	janus
 }
 
 # mdns's shared front door: janus.local answers here with the status
@@ -217,8 +235,12 @@ http://*.local {
 # 	janus
 # }
 import %s/*.caddy
-`, p.admin, p.log, p.sock, filepath.Join(filepath.Dir(p.log), "access.json"), p.sites)
+`, p.admin, p.log, p.sock, accessLogPath(p), accessLogPath(p), p.sites)
 }
+
+// accessLogPath is the access log the seed's own sites write, beside the
+// process log.
+func accessLogPath(p servicePaths) string { return filepath.Join(filepath.Dir(p.log), "access.json") }
 
 // localhostSite is the drop-in that serves this machine's own names,
 // <name>.localhost, with the edge's CA. It is a drop-in rather than a line
@@ -228,8 +250,8 @@ import %s/*.caddy
 // on any host. Written once; an edited copy is left alone.
 func localhostSitePath(p servicePaths) string { return filepath.Join(p.sites, "localhost.caddy") }
 
-func localhostSite() string {
-	return `# This machine's local names, <name>.localhost: what 'janus serve' opens
+func localhostSite(p servicePaths) string {
+	return fmt.Sprintf(`# This machine's local names, <name>.localhost: what 'janus serve' opens
 # and what an app registers to be reached from this machine by name. The
 # edge's own CA signs each name at its first handshake, for registered
 # names only ('janus trust' trusts the CA); browsers and the system
@@ -239,12 +261,13 @@ func localhostSite() string {
 		issuer internal
 		on_demand
 	}
-	janus {
-		hub off
-		auth off
+	log {
+		output file %s
+		format janus
 	}
+	janus
 }
-`
+`, accessLogPath(p))
 }
 
 // ensureLocalhostSite writes the drop-in when it is absent. Reports
@@ -257,7 +280,7 @@ func ensureLocalhostSite(p servicePaths) (bool, error) {
 	if err := os.MkdirAll(p.sites, 0o755); err != nil {
 		return false, err
 	}
-	return true, os.WriteFile(path, []byte(localhostSite()), 0o644)
+	return true, os.WriteFile(path, []byte(localhostSite(p)), 0o644)
 }
 
 // serviceItem is the supervisor-side half: one login item or system
@@ -443,6 +466,20 @@ The running service edge's admin socket is the default --address.
 			return nil
 		}
 	}
+	caddyTrust.Long += `
+--export writes the CA's root certificate to a file (PEM) instead of
+trusting it here: for another machine's trust store. A phone takes it
+from the edge itself, at http://<mdns name>/trust.
+`
+	caddyTrust.Flags().String("export", "", "write the root certificate (PEM) to this file instead of trusting it")
+	wrap(caddyTrust, func(orig runFunc, cmd *cobra.Command, args []string) error {
+		path, _ := cmd.Flags().GetString("export")
+		if path == "" {
+			return orig(cmd, args)
+		}
+		address, _ := cmd.Flags().GetString("address")
+		return exportRootCA(cmd, address, path)
+	})
 
 	// start: under the item when there is one, else Caddy's background
 	// start with the service's Caddyfile and pidfile as defaults.
@@ -953,6 +990,45 @@ func validateInProcess(path string) error {
 	return caddy.Validate(&cfg)
 }
 
+// exportRootCA fetches the local CA from the admin API at address (Caddy's
+// address syntax: unix/<path> or host:port; empty is Caddy's default) and
+// writes its root certificate, PEM, to path.
+func exportRootCA(cmd *cobra.Command, address, path string) error {
+	client, base := adminClient(address)
+	resp, err := client.Get(base + "/pki/ca/local")
+	if err != nil {
+		return fmt.Errorf("admin API: %w (is the edge running?)", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("admin API: %s from /pki/ca/local", resp.Status)
+	}
+	var ca struct {
+		Root string `json:"root_certificate"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ca); err != nil || ca.Root == "" {
+		return errors.New("admin API: /pki/ca/local carried no root certificate")
+	}
+	if err := os.WriteFile(path, []byte(ca.Root), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
+	return nil
+}
+
+func adminClient(address string) (*http.Client, string) {
+	if sock, ok := strings.CutPrefix(address, "unix/"); ok {
+		return controlClient(func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sock)
+		}), "http://caddy"
+	}
+	if address == "" {
+		address = caddy.DefaultAdminListen
+	}
+	return controlClient(nil), "http://" + strings.TrimPrefix(address, "http://")
+}
+
 // --- status --------------------------------------------------------------------
 
 // edgeStatus is what 'janus status' knows, in one value.
@@ -977,6 +1053,12 @@ type edgeStatus struct {
 	Log         string `json:"log"`
 	Control     string `json:"control,omitempty"`
 	Apps        *int   `json:"apps,omitempty"` // only when control answered
+	// The local CA that signs .local and .localhost names: its root
+	// certificate on disk, whether this machine's trust store accepts it,
+	// and the front door a phone trusts it from (when mdns answered).
+	CA        string `json:"ca,omitempty"`
+	CATrusted *bool  `json:"ca_trusted,omitempty"`
+	TrustURL  string `json:"trust_url,omitempty"`
 	// The exposure mode. Bind is what JANUS_BIND carries; Firewall is
 	// verified / missing / unverified / none; Listeners are the front-door
 	// addresses the mode admits, each with how its reach is enforced.
@@ -1017,8 +1099,10 @@ func gatherStatus(p servicePaths) edgeStatus {
 	if n, at := probeControl(p); at != "" {
 		st.Control = at
 		st.Apps = &n
+		st.TrustURL = trustURL(p)
 	}
 	st.Running = st.PID > 0 || st.Control != ""
+	gatherCA(&st)
 	if st.PID > 0 {
 		st.Uptime = elapsed(st.PID)
 		st.BinaryNewer = binaryNewerThan(st.Binary, st.PID)
@@ -1050,6 +1134,73 @@ func gatherExposure(st *edgeStatus, p servicePaths) {
 	for _, l := range plan {
 		st.Listeners = append(st.Listeners, listenerStatus{Role: l.Role.String(), Addr: l.Addr.String(), Reach: classifyReach(l.Addr.Addr())})
 	}
+}
+
+// localCARoot is the root certificate of Caddy's internal CA, where the
+// pki app keeps it.
+func localCARoot() string {
+	return filepath.Join(caddy.AppDataDir(), "pki", "authorities", "local", "root.crt")
+}
+
+// verifyCA asks this machine's trust store whether it accepts the root:
+// an empty verify against the system roots. Tests substitute it.
+var verifyCA = func(root *x509.Certificate) error {
+	_, err := root.Verify(x509.VerifyOptions{})
+	return err
+}
+
+func gatherCA(st *edgeStatus) {
+	path := localCARoot()
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return
+	}
+	root, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return
+	}
+	st.CA = path
+	trusted := verifyCA(root) == nil
+	st.CATrusted = &trusted
+}
+
+// trustURL is where a phone trusts the CA: the mdns front door, by its
+// effective name, when the edge announces one.
+func trustURL(p servicePaths) string {
+	if !socketExists(p.sock) {
+		return ""
+	}
+	client := controlClient(func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", p.sock)
+	})
+	resp, err := client.Get("http://janus/1.0/mdns/status")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var snap struct {
+		Name          string `json:"name"`
+		EffectiveName string `json:"effective_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		return ""
+	}
+	name := snap.EffectiveName
+	if name == "" {
+		name = snap.Name
+	}
+	if name == "" {
+		return ""
+	}
+	return "http://" + name + "/trust"
 }
 
 func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool, note string) error {
@@ -1113,6 +1264,15 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 		fmt.Fprintf(out, "control  %s (%d app%s registered)\n", st.Control, *st.Apps, plural(*st.Apps))
 	case st.Running:
 		fmt.Fprintf(out, "control  unreachable at %s and %s\n", p.sock, localControlURL)
+	}
+	switch {
+	case st.CATrusted != nil && *st.CATrusted:
+		fmt.Fprintln(out, "ca       trusted on this machine")
+	case st.CATrusted != nil:
+		fmt.Fprintln(out, "ca       not trusted on this machine: browsers warn on its https names ('janus trust')")
+	}
+	if st.TrustURL != "" {
+		fmt.Fprintf(out, "         phones and other devices trust it at %s\n", st.TrustURL)
 	}
 	printExposure(out, st)
 }

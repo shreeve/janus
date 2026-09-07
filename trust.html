@@ -1,0 +1,253 @@
+<!doctype html>
+<!-- Janus trust onboarding — embedded, self-contained (zero external
+     resources). Served on the mdns front door over plain HTTP, the CA
+     bootstrap a device can load before it trusts anything, and over
+     HTTPS once it does. Every dynamic value renders as a text node. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Janus — trust this edge</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --text: #e6e9ef; --dim: #8b93a3; --accent: #7aa2f7;
+    --ok: #4fd6a5; --warn: #e8b75f; --bad: #f27878;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  header h1 { font-size: 22px; margin: 0; letter-spacing: .3px; }
+  header .name { color: var(--accent); font-family: ui-monospace, Menlo, monospace; }
+  .sub { color: var(--dim); margin: 0 0 22px; font-size: 13px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px 20px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 8px; font-size: 17px; }
+  .card h3 {
+    margin: 0 0 12px; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .12em; color: var(--dim);
+  }
+  p { margin: 8px 0; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .dim { color: var(--dim); }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .btn {
+    display: inline-flex; align-items: center; min-height: 44px; padding: 9px 16px;
+    border: 1px solid var(--accent); border-radius: 8px; color: var(--accent);
+    font-weight: 600;
+  }
+  .btn:hover { background: rgba(122,162,247,.1); text-decoration: none; }
+  ol { margin: 0; padding: 0; list-style: none; }
+  ol li { display: flex; gap: 12px; margin: 14px 0; }
+  .n {
+    flex: none; width: 24px; height: 24px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--accent);
+    font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  }
+  .n.done { color: var(--ok); border-color: var(--ok); }
+  .note { color: var(--dim); font-size: 13px; margin-top: 6px; }
+  .switch { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; font-size: 13px; color: var(--dim); }
+  .switch button {
+    background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer;
+  }
+  .switch button:hover { text-decoration: underline; }
+  .probe { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); margin-left: auto; }
+  .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--warn); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  footer { color: var(--dim); font-size: 12px; margin-top: 28px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 600px) { .wrap { padding: 18px 12px 40px; } .card { padding: 14px; border-radius: 8px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Janus <span class="name" id="hdr-name"></span></h1>
+  </header>
+  <p class="sub">trust this edge's certificate authority on this device</p>
+
+  <div class="card" id="probing">
+    <p>Checking whether this device is set up…</p>
+  </div>
+
+  <div class="card" id="trusted" hidden>
+    <h2 class="ok">This device is all set</h2>
+    <p>It trusts this edge's local certificate authority, so every
+      <span class="mono">https://</span> name here verifies cleanly.</p>
+    <p><a class="btn" href="/">Open the status page</a></p>
+    <p class="note">Setting up another device? On that device, open
+      <span class="mono" id="self-url"></span> — it walks itself through this.</p>
+  </div>
+
+  <div id="onboard" hidden>
+    <div class="card">
+      <h2>One-time setup for this device</h2>
+      <p>Names served here use a private certificate authority that lives only on
+        this edge. Teach this device to trust it once, and every local site gets
+        a real lock — no warnings, in any browser.</p>
+    </div>
+
+    <div class="card" id="ios" hidden>
+      <h3>iPhone / iPad</h3>
+      <p id="ios-not-safari" class="note" hidden><strong>One Safari step.</strong> iOS lets only
+        Safari hand a trust profile to Settings; every other browser can only save it as a dead
+        file. The button below jumps you there.</p>
+      <ol>
+        <li><span class="n">1</span>
+          <div>
+            <div id="ios-safari-step"><a class="btn" href="/trust/ca.mobileconfig">Download trust profile</a>
+              <div class="note">Safari asks to allow a configuration profile — tap <strong>Allow</strong>.</div></div>
+            <div id="ios-other-step" hidden><a class="btn" id="safari-jump" href="#">Open in Safari &amp; download</a>
+              <div class="note">Tap <strong>Open</strong> when your browser asks. Safari will warn
+                “This Connection Is Not Private” — expected; the trust you are installing is what
+                fixes it. Tap <strong>Show Details → visit this website</strong>, then
+                <strong>Allow</strong> the download.</div>
+              <div class="note">Nothing happen? Open Safari yourself and go to
+                <span class="mono" id="self-host"></span> — this page appears there with a direct button.</div></div>
+          </div></li>
+        <li><span class="n">2</span>
+          <div>Open the <strong>Settings</strong> app and tap the downloaded profile — under
+            <strong>Profile Downloaded</strong> near the top, or in <strong>General → VPN &amp;
+            Device Management</strong> — then <strong>Install</strong>.</div></li>
+        <li><span class="n">3</span>
+          <div>Still in Settings: <strong>General → About</strong>, scroll to <strong>Certificate Trust Settings</strong>, and switch <strong>on</strong> the certificate named
+            <span class="mono" id="ca-name-ios">Caddy Local Authority</span>.
+            <span class="dim">(This is the step everyone misses — HTTPS does not work without it.)</span></div></li>
+        <li><span class="n done">✓</span>
+          <div>Open any browser you like — this page notices automatically and takes you in.</div></li>
+      </ol>
+    </div>
+
+    <div class="card" id="android" hidden>
+      <h3>Android</h3>
+      <ol>
+        <li><span class="n">1</span><div><a class="btn" href="/trust/ca.crt">Download CA certificate</a></div></li>
+        <li><span class="n">2</span>
+          <div>Open <strong>Settings → Security &amp; privacy → More security settings →
+            Encryption &amp; credentials → Install a certificate → CA certificate</strong>, then pick
+            the downloaded file. <span class="dim">(Menu names vary by phone.)</span></div></li>
+        <li><span class="n done">✓</span><div>Come back here — this page notices automatically and takes you in.</div></li>
+      </ol>
+    </div>
+
+    <div class="card" id="mac" hidden>
+      <h3>Mac</h3>
+      <ol>
+        <li><span class="n">1</span>
+          <div>On the machine running this edge: <span class="mono">janus trust</span></div></li>
+        <li><span class="n">2</span>
+          <div>On any other Mac: <a href="/trust/ca.crt">download the CA certificate</a>, double-click
+            it into Keychain Access, then set it to <strong>Always Trust</strong>.</div></li>
+      </ol>
+    </div>
+
+    <div class="card" id="other" hidden>
+      <h3>Other devices</h3>
+      <p><a href="/trust/ca.crt">Download the CA certificate</a> and import it as a trusted root
+        certificate in your system or browser settings.</p>
+    </div>
+
+    <div class="switch">
+      <span>Not this device?</span>
+      <button data-show="ios">iPhone/iPad</button>
+      <button data-show="android">Android</button>
+      <button data-show="mac">Mac</button>
+      <button data-show="other">Other</button>
+      <span class="probe"><span class="dot"></span><span id="probe-text">watching for trust</span>
+        <button id="recheck">Check now</button></span>
+    </div>
+  </div>
+
+  <footer>The certificate authority's private key never leaves the machine running this edge.
+    Trust is per device and can be removed at any time in the device's settings.</footer>
+</div>
+
+<script>
+"use strict";
+// Rendering discipline: dynamic values land via textContent or validated
+// element properties, never as markup.
+var ua = navigator.userAgent;
+var host = location.hostname;
+var state = "probing";
+var checking = false;
+
+function show(id, on) { document.getElementById(id).hidden = !on; }
+function setState(s) {
+  state = s;
+  show("probing", s === "probing");
+  show("trusted", s === "trusted");
+  show("onboard", s === "onboard");
+}
+function detect() {
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return "ios";
+  if (/Android/.test(ua)) return "android";
+  if (/Macintosh/.test(ua)) return "mac";
+  return "other";
+}
+function platform(p) {
+  ["ios", "android", "mac", "other"].forEach(function (id) { show(id, id === p); });
+  document.querySelectorAll(".switch button[data-show]").forEach(function (b) {
+    b.hidden = b.getAttribute("data-show") === p;
+  });
+}
+// Real Safari only: Chrome, Firefox, and Edge on iOS all carry "Safari/"
+// in their UA but cannot hand a profile to Settings.
+var safari = /Safari\//.test(ua) && !/CriOS|FxiOS|EdgiOS|GSA|OPT\//.test(ua);
+// From this plain-HTTP page, an https fetch to the same host resolves only
+// if the device already trusts the CA (no-cors: the opaque response is
+// irrelevant — surviving the TLS handshake is the signal).
+function probe() {
+  var ctl = new AbortController();
+  var timer = setTimeout(function () { ctl.abort(); }, 3000);
+  return fetch("https://" + host + "/trust/check", { mode: "no-cors", cache: "no-store", signal: ctl.signal })
+    .then(function () { clearTimeout(timer); return true; })
+    .catch(function () { clearTimeout(timer); return false; });
+}
+function recheck() {
+  if (checking) return;
+  checking = true;
+  document.getElementById("probe-text").textContent = "checking…";
+  probe().then(function (ok) {
+    checking = false;
+    document.getElementById("probe-text").textContent = "watching for trust";
+    if (ok) location.replace("https://" + host + "/");
+    else setState("onboard");
+  });
+}
+
+document.getElementById("hdr-name").textContent = host;
+document.getElementById("self-url").textContent = "http://" + host + "/trust";
+document.getElementById("self-host").textContent = host;
+show("ios-not-safari", !safari);
+show("ios-safari-step", safari);
+show("ios-other-step", !safari);
+// Force-open Safari from any iOS browser (undocumented scheme). It must
+// target the profile page: a page loaded through a certificate exception
+// would wrongly report this device as trusted.
+document.getElementById("safari-jump").href = "x-safari-https://" + host + "/trust/safari";
+document.querySelectorAll(".switch button[data-show]").forEach(function (b) {
+  b.addEventListener("click", function () { platform(b.getAttribute("data-show")); });
+});
+document.getElementById("recheck").addEventListener("click", recheck);
+platform(detect());
+
+if (location.protocol === "https:") {
+  setState("trusted");
+} else {
+  recheck();
+  setInterval(function () { if (state === "onboard") recheck(); }, 4000);
+  addEventListener("focus", function () { if (state === "onboard") recheck(); });
+}
+</script>
+</body>
+</html>
