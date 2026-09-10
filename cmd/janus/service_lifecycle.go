@@ -104,19 +104,34 @@ func restartEdge(caddyStop, caddyStart *cobra.Command, p servicePaths, cmd *cobr
 		}
 	}
 	pid := runningPID(p)
-	if pid > 0 {
+	if pid > 0 || controlReachable(p) {
 		// A fresh flag set: the stop and start below must not inherit
 		// anything the operator passed to restart (there is nothing to pass).
 		if err := caddyStop.RunE(caddyStop, nil); err != nil {
 			return fmt.Errorf("stop: %w", err)
 		}
-		if !waitGone(pid, 10*time.Second) {
-			return fmt.Errorf("the edge (pid %d) did not exit within 10s", pid)
+		if !waitEdgeStopped(p, pid, 10*time.Second) {
+			return fmt.Errorf("the edge did not stop within 10s")
 		}
 	} else {
 		fmt.Fprintln(cmd.OutOrStdout(), "janus was not running")
 	}
 	return caddyStart.RunE(caddyStart, nil)
+}
+
+// Foreground edges have no supervisor or pidfile. A restart must wait for
+// their control listener to close before attempting to start a replacement.
+func waitEdgeStopped(p servicePaths, pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processAlive(pid) && !controlReachable(p) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // runningPID finds the edge's process: the item's, then the pidfile's.
