@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -53,7 +54,7 @@ Exit 3 when no edge answers.
 			tw := tabwriter.NewWriter(out, 2, 8, 2, ' ', 0)
 			fmt.Fprintln(tw, "NAME\tHOSTS\tSERVES\tLEASE\tID")
 			for _, a := range apps {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", a.Name, strings.Join(a.Hosts, " "), a.serves(), a.Lease, a.ID)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", a.Name, strings.Join(a.claims(), " "), a.serves(), a.Lease, a.ID)
 			}
 			return tw.Flush()
 		},
@@ -73,8 +74,9 @@ type registeredApp struct {
 		Doorbell bool   `json:"doorbell"`
 	} `json:"upstreams"`
 	Site *struct {
-		Host string `json:"host"`
-		Dir  string `json:"dir"`
+		Host    string            `json:"host"`
+		Dir     string            `json:"dir"`
+		Aliases map[string]string `json:"aliases"`
 	} `json:"site"`
 	Files *struct {
 		Roots []struct {
@@ -82,6 +84,18 @@ type registeredApp struct {
 			Browse bool   `json:"browse"`
 		} `json:"roots"`
 	} `json:"files"`
+}
+
+func (a registeredApp) claims() []string {
+	if a.Site == nil {
+		return a.Hosts
+	}
+	aliases := make([]string, 0, len(a.Site.Aliases))
+	for host := range a.Site.Aliases {
+		aliases = append(aliases, host)
+	}
+	sort.Strings(aliases)
+	return append([]string{a.Site.Host}, aliases...)
 }
 
 // serves says what answers for the app's hosts.
