@@ -173,3 +173,22 @@ func TestServeRegistersAndCleansUp(t *testing.T) {
 		t.Error("missing directory accepted")
 	}
 }
+
+func TestServeHeartbeatUsesEffectiveTTL(t *testing.T) {
+	for _, tt := range []struct {
+		ttl  string
+		want time.Duration
+	}{
+		{"", 5 * time.Second}, {"3s", time.Second}, {"90s", 30 * time.Second}, {"3ms", time.Millisecond},
+	} {
+		got, err := heartbeatPeriod(tt.ttl)
+		if err != nil || got != tt.want {
+			t.Errorf("%q: %v %v, want %v", tt.ttl, got, err, tt.want)
+		}
+	}
+	for _, ttl := range []string{"0s", "2ms", "-1s", "invalid"} {
+		if _, err := heartbeatPeriod(ttl); err == nil {
+			t.Errorf("accepted TTL %q", ttl)
+		}
+	}
+}

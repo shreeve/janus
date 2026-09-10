@@ -242,6 +242,7 @@ require_ports_free() {
 }
 
 start_caddy() {
+	printf '%s' "${JANUS_HEARTBEAT_TTL:-15s}" >"$TEST_RUN_DIR/heartbeat-ttl"
 	# Fixed ports must be exclusive. Killing an unknown listener is unsafe, and
 	# supervised services can immediately restart with SO_REUSEPORT and split
 	# acceptance traffic between two Caddy processes.
@@ -371,6 +372,7 @@ case_config_environment() {
 	done
 }
 
+
 case_control_local_root() {
 	local body
 	body="$(http_body http://127.0.0.1:7600/1.0)"
@@ -414,6 +416,23 @@ case_control_unknown_paths_404() {
 
 # --- cases: reload -----------------------------------------------------------
 
+reload_caddy() {
+	JANUS_HEARTBEAT_TTL="$(cat "$TEST_RUN_DIR/heartbeat-ttl")" "$CADDY_BIN" reload "$@"
+}
+
+case_reload_ttl_rejected() {
+	capi GET /1.0
+	json_has "$REPLY_BODY" '"heartbeat_ttl":"15s"'
+	if JANUS_HEARTBEAT_TTL=30s "$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >"$TEST_RUN_DIR/ttl-reload.log" 2>&1; then
+		echo "reload accepted a changed heartbeat TTL" >&2
+		return 1
+	fi
+	json_has "$(cat "$TEST_RUN_DIR/ttl-reload.log")" 'requires a restart'
+	capi GET /1.0
+	json_has "$REPLY_BODY" '"heartbeat_ttl":"15s"'
+	eq "$(http_body https://on.ripdev.io/ping)" "pong"
+}
+
 case_reload_no_split_brain() {
 	# A config reload swaps in a new Janus app while the old one still holds
 	# its sockets: listener pooling lets the new app bind, the reload
@@ -430,7 +449,7 @@ case_reload_no_split_brain() {
 	ok "-n \"$old_id\"" "no id in $REPLY_BODY"
 
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -487,7 +506,7 @@ case_reload_abort_recovery() {
 	awk '{print} $1 == "control" && $2 == "local" {print "\t\tcontrol public https://127.0.0.1:7601 token:JANUS_ABORT_TOKEN cert:/nonexistent/janus-abort.crt key:/nonexistent/janus-abort.key"}' \
 		"$ROOT/Caddyfile" >"$bad_cfg"
 	if XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$bad_cfg" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$bad_cfg" --force >>"$CADDY_LOG" 2>&1; then
 		echo "bad config reload unexpectedly succeeded" >&2
 		return 1
 	fi
@@ -496,11 +515,11 @@ case_reload_abort_recovery() {
 	capi_unix GET /1.0/health
 	eq "$REPLY_CODE" "200"
 	# A GENUINELY different config must now load. --force bypasses Caddy's
-	# identical-bytes short-circuit, while changing heartbeat_ttl keeps this
-	# case honest without creating a listener.
-	sed 's/JANUS_HEARTBEAT_TTL:15s/JANUS_HEARTBEAT_TTL:16s/' "$ROOT/Caddyfile" >"$good_cfg"
+	# identical-bytes short-circuit, while changing the global ping default
+	# proves that a different config actually took effect without a new listener.
+	sed 's/ping # 1)/ping off # 1)/' "$ROOT/Caddyfile" >"$good_cfg"
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$good_cfg" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$good_cfg" --force >>"$CADDY_LOG" 2>&1; then
 		echo "good reload after aborted reload failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -515,9 +534,10 @@ case_reload_abort_recovery() {
 	done
 	ok "-n \"$ready\"" "control listeners never answered after post-abort reload"
 	ok "-S \"$ROOT/run/janus.sock\"" "control socket vanished after post-abort reload"
+	eq "$(http_code https://foo.ripdev.io/ping)" "404"
 	# Restore the canonical config for the rest of the suite.
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
 		echo "restoring canonical config failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -1849,7 +1869,7 @@ case_hub_caddy_reload_persistence() {
 		expect=survived 'send={"?":"post"}' 'expect={"!":"post"}' close
 	wait_file "$ROOT/.test-hub-flag-crl"
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -2482,7 +2502,7 @@ case_mdns_reload_no_flap() {
 	capi GET /1.0/mdns
 	adv0="$(printf '%s' "$REPLY_BODY" | grep -o '"name":"[^"]*"' | sort)"
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -2520,7 +2540,7 @@ case_mdns_reload_teardown() {
 		return 1
 	fi
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$stripped" --adapter caddyfile --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$stripped" --adapter caddyfile --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload (mdns removed) failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -2549,7 +2569,7 @@ case_mdns_reload_teardown() {
 	# Reload the real config back: the capability returns (a fresh probe
 	# is expected — removal was a real teardown, not a pool release).
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload (restore) failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -3091,7 +3111,7 @@ case_auth_reload_keeps_sessions() {
 	auth_login "$AUTH_WALL" alice sesame-alice
 	printf '%s' "$AUTH_SESSION" >"$AUTH_ALICE_COOKIE"
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -3121,7 +3141,7 @@ case_auth_reload_revokes_removed_user() {
 		return 1
 	fi
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$stripped" --adapter caddyfile --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$stripped" --adapter caddyfile --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload (bob removed) failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -3138,7 +3158,7 @@ case_auth_reload_revokes_removed_user() {
 	eq "$REPLY_CODE" "200"
 	# Restore the real config.
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload (restore) failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -3767,7 +3787,7 @@ case_browse_cascade_lease_and_status() {
 	local id
 	id="$(cat "$BROWSE_APP_FILE")"
 	if ! XDG_DATA_HOME="$ROOT/.test-caddy-data" \
-		"$CADDY_BIN" reload --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
+		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then
 		echo "caddy reload failed; see $CADDY_LOG" >&2
 		return 1
 	fi
@@ -3902,6 +3922,7 @@ test "unix GET /1.0 → janus meta" case_control_unix_root
 test "unix GET /1.0/health → ok" case_control_unix_health
 test "unknown /1.0 paths → 404, wrong method → 405" case_control_unknown_paths_404
 test "reload → both listeners serve one live registry" case_reload_no_split_brain
+test "changed TTL reload is rejected and reports the running value" case_reload_ttl_rejected
 test "aborted reload → later reloads still work" case_reload_abort_recovery
 
 group "apps"

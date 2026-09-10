@@ -131,10 +131,15 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 	}
 	defer client.Close()
 	var caps struct {
-		Browse bool `json:"browse"`
+		Browse       bool   `json:"browse"`
+		HeartbeatTTL string `json:"heartbeat_ttl"`
 	}
 	if err := json.Unmarshal(root, &caps); err != nil || !caps.Browse {
 		return fmt.Errorf("the edge's Caddyfile has browse off; 'browse' in its global janus block turns it on (the seed has it), then 'janus reload'")
+	}
+	heartbeat, err := heartbeatPeriod(caps.HeartbeatTTL)
+	if err != nil {
+		return err
 	}
 	// The site for this machine's names is janus's drop-in: put it in
 	// place and apply it before the name is registered, so the first
@@ -197,7 +202,7 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	tick := time.NewTicker(serveHeartbeat)
+	tick := time.NewTicker(heartbeat)
 	defer tick.Stop()
 	for {
 		select {
@@ -211,6 +216,17 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 			}
 		}
 	}
+}
+
+func heartbeatPeriod(ttl string) (time.Duration, error) {
+	if ttl == "" {
+		return serveHeartbeat, nil
+	} // compatibility with older edges
+	duration, err := time.ParseDuration(ttl)
+	if err != nil || duration < 3*time.Millisecond {
+		return 0, fmt.Errorf("the edge reported an invalid heartbeat_ttl %q", ttl)
+	}
+	return duration / 3, nil
 }
 
 // reloadEdge applies the service Caddyfile to the running edge, the way

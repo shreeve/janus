@@ -148,6 +148,14 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if a.HeartbeatTTL != 0 && time.Duration(a.HeartbeatTTL) < minHeartbeatTTL {
 		return fmt.Errorf("janus: heartbeat_ttl must be at least %v, got %v", minHeartbeatTTL, time.Duration(a.HeartbeatTTL))
 	}
+	ttl := time.Duration(a.HeartbeatTTL)
+	if ttl == 0 {
+		var err error
+		ttl, err = heartbeatTTLFromEnv()
+		if err != nil {
+			return fmt.Errorf("janus: %w", err)
+		}
+	}
 	access, err := acquireAccessBridge(a.logger)
 	if err != nil {
 		return err
@@ -155,12 +163,15 @@ func (a *App) Provision(ctx caddy.Context) error {
 	a.access = access
 	a.accessStreams = make(map[*accessSubscriber]struct{})
 	stI, _, err := janusPool.LoadOrNew(janusStateKey, func() (caddy.Destructor, error) {
-		return newJanusState(a.logger, time.Duration(a.HeartbeatTTL))
+		return newJanusState(a.logger, ttl)
 	})
 	if err != nil {
 		return err
 	}
 	a.state = stI.(*janusState)
+	if effective := a.state.registry.ttl; ttl != effective {
+		return fmt.Errorf("janus: heartbeat_ttl is %v in the running process; changing it to %v requires a restart", effective, ttl)
+	}
 	if err := a.state.registry.bindAccess(a.access); err != nil {
 		return err
 	}

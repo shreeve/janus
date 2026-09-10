@@ -517,7 +517,9 @@ sendfile is always on and has no config key.
 `heartbeat_ttl` defaults to `15s`; `JANUS_HEARTBEAT_TTL` supplies the fallback
 when it is unset. The pooled registry captures this value when it is first
 provisioned. Changing it requires a restart: a config reload currently
-accepts the new value but keeps the existing registry's TTL.
+rejects a changed effective value with an error requiring a restart.
+`GET /1.0` reports the running `heartbeat_ttl`; `janus serve` sends
+heartbeats every third of that interval (5s for older edges without it).
 
 ```json
 {
