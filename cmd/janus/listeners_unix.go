@@ -18,13 +18,20 @@ import (
 // ownSockets lists this process's bound IP sockets: listening TCP sockets
 // and every UDP socket, with the local address of each.
 func ownSockets() ([]boundSocket, error) {
-	entries, err := os.ReadDir("/dev/fd")
+	// Names only: stat-ing an entry of /dev/fd fails with EBADF on macOS
+	// when the descriptor is a kqueue, which the Go runtime always holds.
+	dir, err := os.Open("/dev/fd")
+	if err != nil {
+		return nil, err
+	}
+	names, err := dir.Readdirnames(-1)
+	dir.Close()
 	if err != nil {
 		return nil, err
 	}
 	var out []boundSocket
-	for _, e := range entries {
-		fd, err := strconv.Atoi(e.Name())
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		if err != nil {
 			continue
 		}
