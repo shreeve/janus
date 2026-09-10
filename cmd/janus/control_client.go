@@ -62,7 +62,7 @@ func openEdgeControl(p servicePaths) (*edgeControl, []byte, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", p.sock)
 		}), base: "http://janus", address: "unix " + p.sock}
-		if b, err := c.Get("/1.0"); err == nil {
+		if b, err := c.Get("/1.0"); err == nil && controlIdentifies(b, p.sock) {
 			return c, b, nil
 		}
 		c.Close()
@@ -109,12 +109,14 @@ func controlGet(p servicePaths, path string) ([]byte, string, error) {
 }
 
 func probeControl(p servicePaths) (int, string) {
-	b, at, err := controlGet(p, "/1.0/apps")
-	var apps []json.RawMessage
-	if err != nil || json.Unmarshal(b, &apps) != nil {
+	b, at, err := controlGet(p, "/1.0")
+	var root struct {
+		Apps int `json:"app_count"`
+	}
+	if err != nil || json.Unmarshal(b, &root) != nil {
 		return 0, ""
 	}
-	return len(apps), at
+	return root.Apps, at
 }
 
 // localControlURL is the `control local` default, tried after the socket
@@ -122,7 +124,7 @@ func probeControl(p servicePaths) (int, string) {
 // at a port nothing answers on.
 var localControlURL = "http://127.0.0.1:7600"
 
-// probeControl asks the edge's control plane for its apps: over the
+// controlReachable asks the edge's control plane for its identity: over the
 // service's unix socket first (its path is this edge's alone), then over
 // loopback HTTP, accepted only when the edge that answers says it also
 // listens on that socket — any Janus with 'control local' answers on the

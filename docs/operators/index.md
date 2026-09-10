@@ -24,13 +24,25 @@ Relative paths, cleaned paths, and symlinks naming the installed Caddyfile
 receive the same service identity, adapter, environment, and exposure
 handling. An explicit different config remains independently managed.
 
-`run`, `adapt`, `validate`, and `reload` share Caddy envfile syntax. The
+`run`, `adapt`, `validate`, `reload`, and config-selected `stop` share Caddy envfile syntax. The
 optional environment file beside the installed config is the default;
 explicit `--envfile` paths replace it. Existing process values win, including
 empty values. With multiple files the first loaded value wins. Quoted
 multiline values work. `JANUS_BIND` is rejected in envfiles because the stored
 scope owns it. Changing a configuration placeholder on reload does not
 replace the running process environment; that requires a restart.
+
+An explicit `stop --address` uses that admin endpoint directly, even when
+the installed configuration or scope file is unusable. Restart also stops
+a foreground edge identified through its control listener and waits for it
+to release the listener before starting a replacement.
+
+`status --json` includes `dashboard_url` and `trust_url` when available.
+Janus resolves these from its configured front door, actual listener port,
+exposure, and conflict-resolved name. The dashboard can use a canonical
+HTTPS handoff; peer CA onboarding uses the local HTTP name. A loopback-only
+front door does not produce a peer trust link. CA status reads the service's
+storage environment and prefers the running admin API's certificate.
 
 ## Reload survival
 
@@ -44,7 +56,7 @@ replace the running process environment; that requires a restart.
 | Renderers and live access streams | Generation-owned resources follow their lifecycle contract | Stopped |
 | Durable access logs | Remain on disk under Caddy's logging policy | Remain on disk |
 
-`GET /1.0` reports `heartbeat_ttl`. `serve` heartbeats at one third of it,
+`GET /1.0` reports `app_count` and `heartbeat_ttl`. `serve` heartbeats at one third of it,
 including while checking route readiness; older edges without the field use
 the historical 5-second interval.
 

@@ -87,9 +87,10 @@ type edgeStatus struct {
 	// The local CA that signs .local and .localhost names: its root
 	// certificate on disk, whether this machine's trust store accepts it,
 	// and the front door a phone trusts it from (when mdns answered).
-	CA        string `json:"ca,omitempty"`
-	CATrusted *bool  `json:"ca_trusted,omitempty"`
-	TrustURL  string `json:"trust_url,omitempty"`
+	CA           string `json:"ca,omitempty"`
+	CATrusted    *bool  `json:"ca_trusted,omitempty"`
+	TrustURL     string `json:"trust_url,omitempty"`
+	DashboardURL string `json:"dashboard_url,omitempty"`
 	// The exposure mode. Bind is what JANUS_BIND carries; Firewall is
 	// verified / missing / unverified / none; Listeners are the front-door
 	// addresses the mode admits, each with how its reach is enforced.
@@ -127,10 +128,24 @@ func gatherStatus(p servicePaths) edgeStatus {
 			st.Supervisor = "pidfile"
 		}
 	}
-	if n, at := probeControl(p); at != "" {
-		st.Control = at
-		st.Apps = &n
-		st.TrustURL = trustURL(p)
+	if control, body, err := openEdgeControl(p); err == nil {
+		defer control.Close()
+		st.Control = control.address
+		var root struct {
+			Apps *int `json:"app_count"`
+		}
+		if json.Unmarshal(body, &root) == nil {
+			st.Apps = root.Apps
+		}
+		if body, err := control.Get("/1.0/mdns"); err == nil {
+			var front struct {
+				Dashboard string `json:"dashboard_url"`
+				Trust     string `json:"trust_url"`
+			}
+			if json.Unmarshal(body, &front) == nil {
+				st.DashboardURL, st.TrustURL = front.Dashboard, front.Trust
+			}
+		}
 	}
 	st.Running = st.PID > 0 || st.Control != ""
 	gatherCA(&st, p)
@@ -266,30 +281,6 @@ func gatherCA(st *edgeStatus, p servicePaths) {
 	st.CATrusted = &trusted
 }
 
-// trustURL is where a phone trusts the CA: the mdns front door, by its
-// effective name, when the edge announces one.
-func trustURL(p servicePaths) string {
-	body, _, err := controlGet(p, "/1.0/mdns/status")
-	if err != nil {
-		return ""
-	}
-	var snap struct {
-		Name          string `json:"name"`
-		EffectiveName string `json:"effective_name"`
-	}
-	if json.Unmarshal(body, &snap) != nil {
-		return ""
-	}
-	name := snap.EffectiveName
-	if name == "" {
-		name = snap.Name
-	}
-	if name == "" {
-		return ""
-	}
-	return "http://" + name + "/trust"
-}
-
 func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool, note string) error {
 	out := cmd.OutOrStdout()
 	st := gatherStatus(p)
@@ -349,6 +340,8 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 	switch {
 	case st.Apps != nil:
 		fmt.Fprintf(out, "control  %s (%d app%s registered)\n", st.Control, *st.Apps, plural(*st.Apps))
+	case st.Control != "":
+		fmt.Fprintf(out, "control  %s\n", st.Control)
 	case st.Running:
 		fmt.Fprintf(out, "control  unreachable at %s and %s\n", p.sock, localControlURL)
 	}

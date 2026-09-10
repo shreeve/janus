@@ -314,6 +314,7 @@ func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"api_version":   "1.0",
 		"type":          "janus",
+		"app_count":     a.appsRegistry().count(),
 		"ping":          cascadeBool(nil, a.Ping, false),
 		"mdns":          a.Mdns != nil,
 		"auth":          len(a.authEnabledSites()) > 0,

@@ -510,6 +510,15 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 	return out, nil
 }
 
+func (r *appRegistry) count() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.apps)
+}
+
 func (r *appRegistry) list() []AppRecord {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

@@ -127,6 +127,14 @@ case_mdns_state() {
 	# already claims janus.local (both are settled states; probing is not).
 	mdns_wait_advertised janus.local
 	mdns_wait_settled
+	local dashboard name
+	dashboard="$(mdns_stat dashboard_url)"
+	case "$dashboard" in
+		'http://127.0.0.1:7680/'|'http://[::1]:7680/') ;;
+		*) printf 'unexpected dashboard URL: %s' "$dashboard" >&2; return 1 ;;
+	esac
+	name="$(mdns_stat effective_name)"
+	eq "$(mdns_stat trust_url)" "http://${name}:7680/trust"
 	capi GET /1.0/mdns
 	if ! printf '%s' "$REPLY_BODY" | grep -qE '"name":"janus.local","state":"(announced|renamed)"'; then
 		printf 'janus.local never settled: %q' "$REPLY_BODY" >&2

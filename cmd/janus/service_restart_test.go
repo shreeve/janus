@@ -27,7 +27,7 @@ func TestRestartStopsForegroundControlBeforeStarting(t *testing.T) {
 		if r.URL.Path == "/1.0/apps" {
 			fmt.Fprint(w, `[]`)
 		} else {
-			fmt.Fprint(w, `{"type":"janus"}`)
+			fmt.Fprintf(w, `{"type":"janus","control":[{"mode":"internal","listen":%q}]}`, p.sock)
 		}
 	})}
 	go srv.Serve(ln)

@@ -872,7 +872,55 @@ func (a *App) checkMdnsSharedCoverage() (int, error) {
 	if !mdnsSharedSiteCovers(ha, port, a.Mdns.Name) {
 		return 0, mdnsSharedCoverageErr(port, a.Mdns.Name)
 	}
+	for _, srv := range ha.Servers {
+		if !mdnsServerLANPort(srv, port) {
+			continue
+		}
+		_ = walkHostRoutes(srv.Routes, [][]string{nil}, func(h caddyhttp.MiddlewareHandler, alternatives [][]string) error {
+			if _, ok := h.(*Handler); ok {
+				for _, hosts := range alternatives {
+					if hosts == nil || len(hosts) > 0 {
+						a.mdnsSharedHosts = append(a.mdnsSharedHosts, hosts)
+					}
+				}
+			}
+			return nil
+		}, mdnsHostOnlyRoute)
+	}
 	return port, nil
+}
+
+// A host-only route describes the whole front door. Conditional routes
+// (paths, methods, headers, client IPs) cannot establish an operator URL.
+func mdnsHostOnlyRoute(route caddyhttp.Route) bool {
+	for _, set := range route.MatcherSets {
+		for _, matcher := range set {
+			switch matcher.(type) {
+			case caddyhttp.MatchHost, *caddyhttp.MatchHost:
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func mdnsServerLANPort(srv *caddyhttp.Server, port int) bool {
+	for _, listen := range srv.Listen {
+		addr, err := caddy.ParseNetworkAddress(listen)
+		if err != nil || addr.IsUnixNetwork() || uint(port) < addr.StartPort || uint(port) > addr.EndPort {
+			continue
+		}
+		if addr.Host == "" {
+			return true
+		}
+		for _, host := range mdnsListenHostAddrs(addr.Host) {
+			if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsMulticast() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mdnsSharedSiteCovers reports whether any site route on a server
