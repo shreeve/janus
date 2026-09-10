@@ -4,3 +4,5 @@
       environment, and emit `Strict-Transport-Security: max-age=31536000` on
       production HTTPS responses. Do not enable `includeSubDomains` or
       `preload`. Certify redirects and HSTS across Janus response classes.
+      Preserve the plain-HTTP LAN discovery and `/trust` bootstrap: devices
+      must be able to obtain the local CA before they trust local HTTPS.

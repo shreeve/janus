@@ -5,6 +5,10 @@ adjacent Rip Sites integration. This is a point-in-time review, not a new
 behavior contract. The changes accompanying it correct documentation;
 the implementation findings below remain open.
 
+Follow-up: the [resolution record](20260910-120000-stewardship-resolution.md)
+tracks the subsequent fixes and verification; the findings below retain
+their original review context.
+
 ## Assessment
 
 The core is in a good place. Keep the Caddy module, cold admission / hot

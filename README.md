@@ -353,6 +353,9 @@ when it exists; `run` does too when the current directory has no Caddyfile
 of its own. `stop`, `reload`, and `restart` reach the edge through its
 admin socket, so they can never touch another Caddy on the host.
 
+See the [operator contract](docs/operators/index.md) for the command and
+reload-survival matrices, environment precedence, and older-config migration.
+
 Upgrading is the installer followed by a restart:
 
 ```bash
