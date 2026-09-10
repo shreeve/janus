@@ -2,15 +2,40 @@
 <!-- Janus mdns front door — embedded, self-contained (zero external
      resources; the offline-LAN story depends on it). Every dynamic value
      renders as a DOM text node, never markup. Light and dark follow the
-     device. -->
+     device until the user saves a preference in this browser. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Janus</title>
+<script>
+"use strict";
+// Apply the saved preference before painting, without changing the URL.
+var themePreference = null;
+var systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+function validTheme(value) { return value === "light" || value === "dark" ? value : null; }
+try { themePreference = validTheme(localStorage.getItem("janus.theme")); } catch (e) {}
+function applyTheme() {
+  var dark = (themePreference || (systemTheme.matches ? "dark" : "light")) === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  var button = document.getElementById("theme-toggle");
+  if (button) {
+    button.setAttribute("aria-pressed", String(dark));
+    button.title = dark ? "Switch to light mode" : "Switch to dark mode";
+  }
+}
+applyTheme();
+systemTheme.addEventListener("change", function () { if (!themePreference) applyTheme(); });
+window.addEventListener("storage", function (event) {
+  if (event.key === "janus.theme" || event.key === null) {
+    themePreference = validTheme(event.newValue);
+    applyTheme();
+  }
+});
+</script>
 <style>
   :root {
-    color-scheme: light dark;
+    color-scheme: light;
     --bg1: #eff6ff; --bg2: #eef2ff; --bg3: #faf5ff;
     --panel: rgba(255,255,255,.72); --panel-solid: #ffffff; --line: rgba(255,255,255,.35);
     --inner: rgba(249,250,251,.7); --inner-line: rgba(209,213,219,.5);
@@ -26,22 +51,21 @@
     --shadow: 0 10px 25px -8px rgba(0,0,0,.12);
     --arc1: #8b5cf6; --arc2: #a78bfa; --arc3: #c4b5fd;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg1: #0b1020; --bg2: #0f1115; --bg3: #150f22;
-      --panel: rgba(23,26,33,.82); --panel-solid: #171a21; --line: rgba(255,255,255,.08);
-      --inner: rgba(255,255,255,.03); --inner-line: rgba(255,255,255,.08);
-      --text: #e6e9ef; --text-2: #b6bdc9; --dim: #8b93a3;
-      --accent: #7aa2f7; --accent-bg: rgba(122,162,247,.12); --accent-line: rgba(122,162,247,.35);
-      --ok: #4fd6a5; --ok-bg: rgba(79,214,165,.16); --ok-text: #7fe3bf;
-      --warn: #e8b75f; --warn-bg: rgba(232,183,95,.16); --warn-text: #f0cc85;
-      --bad: #f27878; --bad-bg: rgba(242,120,120,.16); --bad-text: #f7a0a0;
-      --indigo: #a5b4fc; --indigo-bg: rgba(129,140,248,.16); --indigo-text: #c7d2fe;
-      --purple-bg: rgba(192,132,252,.16); --purple-text: #d8b4fe;
-      --blue-bg: rgba(96,165,250,.16); --blue-text: #93c5fd;
-      --gray-bg: rgba(255,255,255,.06); --gray-text: #b6bdc9; --dot-off: #3b4150;
-      --shadow: 0 10px 25px -8px rgba(0,0,0,.5);
-    }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg1: #0b1020; --bg2: #0f1115; --bg3: #150f22;
+    --panel: rgba(23,26,33,.82); --panel-solid: #171a21; --line: rgba(255,255,255,.08);
+    --inner: rgba(255,255,255,.03); --inner-line: rgba(255,255,255,.08);
+    --text: #e6e9ef; --text-2: #b6bdc9; --dim: #8b93a3;
+    --accent: #7aa2f7; --accent-bg: rgba(122,162,247,.12); --accent-line: rgba(122,162,247,.35);
+    --ok: #4fd6a5; --ok-bg: rgba(79,214,165,.16); --ok-text: #7fe3bf;
+    --warn: #e8b75f; --warn-bg: rgba(232,183,95,.16); --warn-text: #f0cc85;
+    --bad: #f27878; --bad-bg: rgba(242,120,120,.16); --bad-text: #f7a0a0;
+    --indigo: #a5b4fc; --indigo-bg: rgba(129,140,248,.16); --indigo-text: #c7d2fe;
+    --purple-bg: rgba(192,132,252,.16); --purple-text: #d8b4fe;
+    --blue-bg: rgba(96,165,250,.16); --blue-text: #93c5fd;
+    --gray-bg: rgba(255,255,255,.06); --gray-text: #b6bdc9; --dot-off: #3b4150;
+    --shadow: 0 10px 25px -8px rgba(0,0,0,.5);
   }
   * { box-sizing: border-box; }
   html, body { min-height: 100%; }
@@ -57,6 +81,7 @@
   .bar { border-bottom: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(6px); }
   .bar.foot { border-bottom: 0; border-top: 1px solid var(--line); margin-top: auto; }
   .inner { max-width: 1120px; margin: 0 auto; padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .header { flex-wrap: wrap; }
   .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
   .logo {
     width: 48px; height: 48px; flex: none;
@@ -64,7 +89,16 @@
   }
   .brand h1 { margin: 0; font-size: 22px; font-weight: 700; }
   .brand p { margin: 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
-  .live { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); white-space: nowrap; }
+  .live { display: flex; align-items: center; gap: 10px; margin-left: auto; font-size: 13px; color: var(--text-2); white-space: nowrap; }
+  .theme-toggle {
+    width: 44px; height: 44px; flex: none; padding: 0; border: 0; border-radius: 50%;
+    display: grid; place-items: center; background: transparent; color: var(--text-2); cursor: pointer;
+  }
+  .theme-toggle:hover { background: var(--inner); }
+  .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .theme-toggle svg { width: 20px; height: 20px; }
+  .theme-toggle .sun, :root[data-theme="dark"] .theme-toggle .moon { display: none; }
+  :root[data-theme="dark"] .theme-toggle .sun { display: block; }
   .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--ok); animation: pulse 2s infinite; }
   .dot.off { background: var(--bad); animation: none; }
   @keyframes pulse { 50% { opacity: .35; } }
@@ -180,7 +214,7 @@
 </head>
 <body>
   <div class="bar">
-    <div class="inner">
+    <div class="inner header">
       <div class="brand">
         <img class="logo" src="data:image/png;base64,{{JANUS_ICON}}" alt="" width="48" height="48">
         <div>
@@ -198,6 +232,15 @@
           <svg class="arc" viewBox="0 0 36 36">
             <circle class="track" cx="18" cy="18" r="16" fill="none" stroke-width="2.5"/>
             <circle class="prog" id="arc" cx="18" cy="18" r="16" fill="none" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false" hidden>
+          <svg class="moon" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+            <path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13z"/>
+          </svg>
+          <svg class="sun" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>
           </svg>
         </button>
       </div>
@@ -306,6 +349,15 @@
 
 <script>
 "use strict";
+var themeToggle = document.getElementById("theme-toggle");
+themeToggle.addEventListener("click", function () {
+  themePreference = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem("janus.theme", themePreference); } catch (e) {}
+  applyTheme();
+});
+applyTheme();
+themeToggle.hidden = false;
+
 // Rendering discipline: every dynamic value lands via textContent (or an
 // element property like href built from a validated hostname), never as
 // raw markup — registry-derived strings cannot become HTML here.
