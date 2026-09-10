@@ -41,7 +41,7 @@ jobs:
           repository: shreeve/rip
           # The reviewed, locally tested integration revision. Update this
           # deliberately with the tenant acceptance results.
-          ref: 88ab78e45db4e559fe2a827a1c4209f4ba6ac9e2
+          ref: 80567de72fa0b24f322e91a07ec09647ff26c38f
           path: rip
       - uses: actions/setup-go@v6
         with:
