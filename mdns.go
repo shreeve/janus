@@ -898,19 +898,13 @@ func mdnsSharedSiteCovers(ha *caddyhttp.App, httpPort int, name string) bool {
 // (subroutes carry a site's directive routes under its host-matched
 // wrapper, and inherit the wrapper's hosts).
 func collectSiteHosts(routes caddyhttp.RouteList, hosts []string, out *[][]string) {
-	for _, route := range routes {
-		routeHosts := hosts
-		if h := hostsFromMatcherSets(route.MatcherSets); len(h) > 0 {
-			routeHosts = h
+	_ = walkHostRoutes(routes, [][]string{hosts}, func(_ caddyhttp.MiddlewareHandler, alternatives [][]string) error {
+		patterns := routeHostUnion(alternatives)
+		if patterns == nil || len(patterns) > 0 {
+			*out = append(*out, patterns)
 		}
-		for _, handler := range route.Handlers {
-			if sub, ok := handler.(*caddyhttp.Subroute); ok {
-				collectSiteHosts(sub.Routes, routeHosts, out)
-				continue
-			}
-			*out = append(*out, routeHosts)
-		}
-	}
+		return nil
+	})
 }
 
 // mdnsServerListensOnPort reports whether one HTTP server binds the

@@ -173,3 +173,86 @@ func TestServeRegistersAndCleansUp(t *testing.T) {
 		t.Error("missing directory accepted")
 	}
 }
+
+func TestServeHeartbeatUsesEffectiveTTL(t *testing.T) {
+	for _, tt := range []struct {
+		ttl  string
+		want time.Duration
+	}{
+		{"", 5 * time.Second}, {"3s", time.Second}, {"90s", 30 * time.Second}, {"3ms", time.Millisecond},
+	} {
+		got, err := heartbeatPeriod(tt.ttl)
+		if err != nil || got != tt.want {
+			t.Errorf("%q: %v %v, want %v", tt.ttl, got, err, tt.want)
+		}
+	}
+	for _, ttl := range []string{"0s", "2ms", "-1s", "invalid"} {
+		if _, err := heartbeatPeriod(ttl); err == nil {
+			t.Errorf("accepted TTL %q", ttl)
+		}
+	}
+}
+
+func TestServeRejectsFailedSetup(t *testing.T) {
+	for _, failure := range []string{"scope", "reload", "route"} {
+		t.Run(failure, func(t *testing.T) {
+			p := isolatedHome(t)
+			c := &serveControl{browse: true}
+			c.start(t, p)
+			oldReload, oldProbe, oldTimeout, oldBeat := reloadEdge, serveHandshake, serveReadyTimeout, serveHeartbeat
+			t.Cleanup(func() {
+				reloadEdge, serveHandshake, serveReadyTimeout, serveHeartbeat = oldReload, oldProbe, oldTimeout, oldBeat
+			})
+			reloadEdge = func(*cobra.Command, servicePaths) error { return nil }
+			serveHandshake = func(string) string { return "unreachable route" }
+			serveReadyTimeout = 40 * time.Millisecond
+			serveHeartbeat = 10 * time.Millisecond
+			if failure == "scope" {
+				if err := os.WriteFile(p.scope, []byte("broken"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "reload" {
+				reloadEdge = func(*cobra.Command, servicePaths) error { return errors.New("reload refused") }
+			}
+			out, err := run(t, "serve", t.TempDir(), "--name", "failure")
+			if err == nil {
+				t.Fatal("failed setup reported success")
+			}
+			if strings.Contains(out, "serving ") {
+				t.Fatalf("announced unusable route: %s", out)
+			}
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if failure == "route" {
+				if len(c.created) == 0 || !c.deleted || c.beats == 0 {
+					t.Fatalf("lease not maintained/cleaned during readiness: %+v", c)
+				}
+			} else if len(c.created) != 0 {
+				t.Fatal("registered despite failed setup")
+			}
+			if failure == "reload" && fileExists(localhostSitePath(p)) {
+				t.Fatal("failed new site was not rolled back")
+			}
+		})
+	}
+}
+
+func TestServeReadinessRequiresUsableHTTPRoute(t *testing.T) {
+	for _, status := range []int{200, 302, 404, 503} {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != "HEAD" || r.Host != "docs.localhost" {
+				t.Errorf("readiness request: %s %s", r.Method, r.Host)
+			}
+			if status == 302 {
+				w.Header().Set("Location", "https://example.invalid/auth")
+			}
+			w.WriteHeader(status)
+		}))
+		problem := probeServeRoute("docs.localhost", server.Listener.Addr().String())
+		server.Close()
+		if (problem == "") != (status < 400) {
+			t.Errorf("status %d: %q", status, problem)
+		}
+	}
+}

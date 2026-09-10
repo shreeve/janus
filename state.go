@@ -35,8 +35,8 @@ type janusState struct {
 // newJanusState builds the pooled holder. ttl is the configured heartbeat
 // TTL; zero falls back to the JANUS_HEARTBEAT_TTL environment variable,
 // then the built-in default. The holder is constructed once per process
-// (first Provision wins), so a config reload cannot retune the TTL — only
-// a restart can.
+// (first Provision captures the TTL). Provision rejects a changed effective
+// TTL on reload; only a restart can retune it.
 func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 	if ttl == 0 {
 		var err error

@@ -793,27 +793,22 @@ func (a *App) buildAuthSiteTable() error {
 }
 
 func collectAuthRoutes(routes caddyhttp.RouteList, hosts []string, entries *[]authSiteEntry) {
-	for _, route := range routes {
-		routeHosts := hosts
-		if h := hostsFromMatcherSets(route.MatcherSets); len(h) > 0 {
-			routeHosts = h
+	_ = walkHostRoutes(routes, [][]string{hosts}, func(handler caddyhttp.MiddlewareHandler, alternatives [][]string) error {
+		patterns := routeHostUnion(alternatives)
+		if patterns != nil && len(patterns) == 0 {
+			return nil
 		}
-		for _, handler := range route.Handlers {
-			switch v := handler.(type) {
-			case *Handler:
-				v.authExactHosts = make(map[string]struct{}, len(routeHosts))
-				for _, host := range routeHosts {
-					host = strings.ToLower(host)
-					if !strings.Contains(host, "*") {
-						v.authExactHosts[host] = struct{}{}
-					}
+		if h, ok := handler.(*Handler); ok {
+			h.authExactHosts = make(map[string]struct{}, len(patterns))
+			for _, host := range patterns {
+				if !strings.ContainsAny(host, "*{}") {
+					h.authExactHosts[host] = struct{}{}
 				}
-				*entries = append(*entries, authSiteEntry{patterns: routeHosts, cfg: v.authCfg})
-			case *caddyhttp.Subroute:
-				collectAuthRoutes(v.Routes, routeHosts, entries)
 			}
+			*entries = append(*entries, authSiteEntry{patterns: patterns, cfg: h.authCfg})
 		}
-	}
+		return nil
+	})
 }
 
 // authEnabledSites reports the host patterns of every auth-enabled site

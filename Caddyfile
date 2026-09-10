@@ -62,7 +62,7 @@
 #
 # 5) auth — URL-prefix gates for auth-less apps (site-scoped, cascades)
 #   Global auth ON with fixture users + gates (passwords in the block
-#   below; mint with `./bin/janus janus-auth-hash`). Every site EXCEPT
+#   below; mint with `./bin/janus passhash`). Every site EXCEPT
 #   authwall/authcarol opts out with `auth off`. Cascade:
 #   authwall.ripdev.io   → inherits global users + gates
 #   authcarol.ripdev.io  → site auth { … } replaces global (carol only)
@@ -82,7 +82,7 @@
 
 	janus {
 		ping # 1) site-scoped default: on
-		control internal # 2) process-wide
+		control internal {$JANUS_TEST_CONTROL:run/janus.sock} # 2) process-wide
 		control local
 		heartbeat_ttl {$JANUS_HEARTBEAT_TTL:15s}
 		hub # 3) site-scoped default: on (path /hub, origin same)
@@ -146,7 +146,7 @@
 
 (janus_access) {
 	log {
-		output file .test-access.log
+		output file {$JANUS_TEST_ACCESS_LOG:.test-access.log}
 		format janus {
 			time_format rfc3339_nano
 			duration_format seconds
@@ -289,7 +289,11 @@ hubtwenty.ripdev.io {
 # plus /one/; login doors /auth and /one/auth.
 authwall.ripdev.io {
 	import ripdev_tls
-	janus
+	# Nested host matchers intersect the exact site's admission.
+	@nested host *.ripdev.io
+	handle @nested {
+		janus
+	}
 }
 
 # Auth: site auth { … } replaces global (carol only, gate /, ttl 30m).

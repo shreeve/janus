@@ -121,6 +121,7 @@ func TestLoadEnvFile(t *testing.T) {
 	}
 	for _, k := range []string{"JT_A", "JT_B", "JT_C", "JT_D"} {
 		t.Setenv(k, "")
+		os.Unsetenv(k)
 	}
 	if err := loadEnvFile(path); err != nil {
 		t.Fatal(err)

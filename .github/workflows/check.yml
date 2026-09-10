@@ -1,0 +1,77 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Unit, vet, and race gates
+        run: |
+          go test ./...
+          go vet ./...
+          go test -race ./...
+
+  acceptance:
+    name: Foreground acceptance
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: janus
+      - uses: actions/checkout@v5
+        with:
+          repository: shreeve/rip
+          # The reviewed, locally tested integration revision. Update this
+          # deliberately with the tenant acceptance results.
+          ref: 88ab78e45db4e559fe2a827a1c4209f4ba6ac9e2
+          path: rip
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: janus/go.mod
+          cache-dependency-path: janus/go.sum
+      - uses: oven-sh/setup-bun@v2
+      - name: Record integration provenance
+        run: |
+          git -C janus rev-parse HEAD
+          git -C rip rev-parse HEAD
+          go version
+          bun --version
+      - name: Build acceptance binary
+        working-directory: janus
+        run: make janus
+      - name: Full acceptance gate
+        working-directory: janus
+        # Keep one foreground owner. The runner needs privilege for 443.
+        run: sudo env "PATH=$PATH" "HOME=$HOME" NO_COLOR=1 KEEP_TEST_STATE=1 ./test.sh
+      - name: Make privileged fixture logs readable
+        if: always()
+        run: |
+          for state_dir in /tmp/janus-test.*; do
+            [[ -d "$state_dir" ]] || continue
+            sudo chmod -R a+rX "$state_dir"
+          done
+      - name: Retain acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-state
+          path: /tmp/janus-test.*/**/*.log
+          if-no-files-found: ignore

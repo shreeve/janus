@@ -358,38 +358,16 @@ func (a *App) buildHubSiteTable() error {
 // collectHubRoutes recursively walks a route list (subroutes carry the
 // site's directive routes under the host-matched wrapper route).
 func collectHubRoutes(routes caddyhttp.RouteList, hosts []string, entries *[]hubSiteEntry) {
-	for _, route := range routes {
-		routeHosts := hosts
-		if h := hostsFromMatcherSets(route.MatcherSets); len(h) > 0 {
-			routeHosts = h
+	_ = walkHostRoutes(routes, [][]string{hosts}, func(handler caddyhttp.MiddlewareHandler, alternatives [][]string) error {
+		patterns := routeHostUnion(alternatives)
+		if patterns != nil && len(patterns) == 0 {
+			return nil
 		}
-		for _, handler := range route.Handlers {
-			switch v := handler.(type) {
-			case *Handler:
-				*entries = append(*entries, hubSiteEntry{patterns: routeHosts, cfg: v.hubCfg})
-			case *caddyhttp.Subroute:
-				collectHubRoutes(v.Routes, routeHosts, entries)
-			}
+		if h, ok := handler.(*Handler); ok {
+			*entries = append(*entries, hubSiteEntry{patterns: patterns, cfg: h.hubCfg})
 		}
-	}
-}
-
-// hostsFromMatcherSets extracts host patterns from a route's provisioned
-// matcher sets (the raw JSON is zeroed after module loading; the decoded
-// MatchHost values carry the patterns).
-func hostsFromMatcherSets(sets caddyhttp.MatcherSets) []string {
-	var out []string
-	for _, set := range sets {
-		for _, m := range set {
-			switch mh := m.(type) {
-			case *caddyhttp.MatchHost:
-				out = append(out, *mh...)
-			case caddyhttp.MatchHost:
-				out = append(out, mh...)
-			}
-		}
-	}
-	return out
+		return nil
+	})
 }
 
 // hubSiteFor resolves one hostname to its effective hub configuration:

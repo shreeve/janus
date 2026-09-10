@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shreeve/janus/internal/strictjson"
+
 	"go.uber.org/zap"
 )
 
@@ -1010,13 +1012,12 @@ type upstreamsPutRequest struct {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return errBadRequest("malformed JSON body: %v", err)
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err == nil {
+		err = strictjson.Decode(data, v)
 	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errBadRequest("malformed JSON body: trailing data")
+	if err != nil {
+		return errBadRequest("malformed JSON body: %v", err)
 	}
 	return nil
 }
@@ -1101,15 +1102,7 @@ func (a *App) handleAppsCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeStrictRaw(raw json.RawMessage, value any) error {
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(value); err != nil {
-		return err
-	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("trailing data")
-	}
-	return nil
+	return strictjson.Decode(raw, value)
 }
 
 func (a *App) handleAppsList(w http.ResponseWriter, r *http.Request) {

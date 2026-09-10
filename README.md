@@ -34,9 +34,9 @@ app.example.com {
 }
 ```
 
-Registry, data plane, and hub state live in pooled process state: a Caddy config reload never drops a registration or a WebSocket. Janus control state is memory-only — a restart empties the registry and tenants re-register. See [`Caddyfile.minimal`](Caddyfile.minimal) for the operator-facing starting point, [`Caddyfile.example`](Caddyfile.example) for the full capability walkthrough, and [`docs/`](docs/) for the contracts.
+Registry, data plane, and hub state live in pooled process state: Caddy config reloads preserve registrations and eligible hub WebSockets. A committed policy change can close connections on hosts where hub admission was disabled. Janus control state is memory-only — a restart empties the registry and tenants re-register. See [`Caddyfile.minimal`](Caddyfile.minimal) for the operator-facing starting point, [`Caddyfile.example`](Caddyfile.example) for the full capability walkthrough, and [`docs/`](docs/) for the contracts.
 
-This repository is a Go module. Caddy is a dependency, not a git submodule. The `janus` binary is built from [`cmd/janus`](cmd/janus/main.go), which compiles stock Caddy, this module, and the Route 53 DNS provider into one static executable; the module also loads into any custom Caddy build like any other plugin.
+This repository is a Go module. Caddy is a dependency, not a git submodule. The `janus` binary is built from [`cmd/janus`](cmd/janus/main.go), which compiles stock Caddy, this module, and the Route 53 DNS provider into one executable; the module also loads into any custom Caddy build like any other plugin.
 
 **License:** Apache License 2.0 (same family as Caddy’s source).
 
@@ -52,7 +52,7 @@ presence, with zero per-app edge
 configuration. That is the router contract of a PaaS — the shape of
 Fly's proxy or Heroku's router — in one self-hosted binary, with the
 running app as the source of truth and heartbeat reaping as the
-garbage collector: an app that stops heartbeating simply ceases to
+garbage collector: a heartbeat-leased app that stops heartbeating ceases to
 exist at the edge. The nearest historical relative is Phusion
 Passenger, the app-aware web server — but Passenger manages processes
 for its supported languages and learns about apps from the web
@@ -86,9 +86,9 @@ module, and every stock directive works unchanged next to it.
 - **a persistent store.** Janus does not persist registry, session, or
   hub state; tenants re-register after a restart. Caddy still writes
   configured certificate storage and log outputs.
-- **a container orchestrator.** Janus never starts, stops, or
-  supervises a process. Tenants run themselves; Janus routes to what
-  is alive.
+- **a container orchestrator.** Tenants supervise their own worker
+  processes; Janus routes to them. Janus's service commands manage the
+  edge itself, and browse may launch bounded renderer subprocesses.
 - **a service mesh.** One edge, inward-facing unix sockets — no
   sidecars, no inter-service mTLS fabric, no traffic policy between
   tenants.
@@ -143,11 +143,16 @@ go test ./...
 
 `cmd/janus` is the binary's main package: stock Caddy, the Janus module,
 and the Route 53 DNS provider (DNS-01 wildcard certificates), compiled as
-one static executable. `go.mod` pins all dependencies, including explicit
+one executable. `go.mod` pins all dependencies, including explicit
 security-sensitive overrides.
 `janus version`, `-v`, `-V`, and `--version` all report the Janus and Caddy
 versions; the service verbs (`autostart`, `start`, `stop`, `restart`,
-`status`) are Janus's; every other subcommand is stock Caddy.
+`status`) are Janus's, as are `apps`, `logs`, `serve`, `mode`, `firewall`,
+and `passhash`. Janus wraps Caddy's config and trust commands with service
+defaults; `trust --export` exports the local CA. Other available commands
+retain Caddy's behavior, except `file-server` defaults to `:8080`.
+`upgrade`, `add-package`, and `remove-package` are unavailable; rebuild
+Janus to change its compiled modules.
 
 ### 1. ping (data plane)
 
@@ -192,8 +197,8 @@ curl -s -X POST -H 'Content-Type: application/json' \
 Opt-in LAN presence: `janus.local` (and every registered single-label `.local` host) answers over multicast DNS with no DNS server or client install, and a plain-HTTP front door serves a read-only, self-contained status page — registry, worker health, heartbeat freshness, and hub counters, with socket paths redacted — and the trust page, `http://janus.local/trust`: the one-time setup that has a phone or another machine trust the edge's own CA, so every `.local` name it serves gets a real lock. The page detects the device, hands iOS a configuration profile (`/trust/ca.mobileconfig`) and everything else the root certificate (`/trust/ca.crt`), and watches for the moment trust lands (`/trust/check` over HTTPS) to move the device on. The front door's own name also answers over HTTPS. An optional `canonical` origin turns the page into a hand-off ramp to real HTTPS, with a built-in diagnostic for router DNS-rebinding filters. The announced name must answer on the HTTP port; where a `janus` site covers it, that site serves the front door, and where a site of your own covers it, your site owns the name.
 
 ```bash
-curl -s --unix-socket ~/.local/state/janus/run/control.sock http://janus/1.0/mdns          # advertiser state
-curl -s --unix-socket ~/.local/state/janus/run/control.sock http://janus/1.0/mdns/status   # the front door's snapshot
+curl -s --unix-socket ~/.local/state/janus/run/janus.sock http://janus/1.0/mdns          # advertiser state
+curl -s --unix-socket ~/.local/state/janus/run/janus.sock http://janus/1.0/mdns/status   # the front door's snapshot
 curl -s -H 'Host: janus.local' http://127.0.0.1/status.json
 curl -s -H 'Host: janus.local' http://127.0.0.1/trust/ca.crt                                # the CA, as a phone fetches it
 ```
@@ -335,13 +340,21 @@ config never becomes a restart loop, and refuses a state directory deep
 enough to push the socket paths past the unix limit. A tool that owns a
 site writes one `*.caddy` file into the sites directory and runs `janus
 reload`; the Caddyfile itself stays the operator's. `KEY=value` lines in
-the env file reach the edge at start (the Route 53 provider's `AWS_*`
-credentials, say, or anything a `{env.*}` placeholder reads).
+the env file are loaded by `run`, `adapt`, `validate`, and `reload` when
+they use the service config. Explicit `--envfile` paths replace that default.
+Caddy's syntax applies, including quoted multiline values. Existing process
+environment values win, even if empty; with multiple files the first value
+loaded wins. `JANUS_BIND` is reserved for the stored mode and is rejected in
+every env file. A reload changes configuration placeholders; changes needed
+by the running process itself require a restart.
 
 `start`, `stop`, `reload`, and `validate` default to the service Caddyfile
 when it exists; `run` does too when the current directory has no Caddyfile
 of its own. `stop`, `reload`, and `restart` reach the edge through its
 admin socket, so they can never touch another Caddy on the host.
+
+See the [operator contract](docs/operators/index.md) for the command and
+reload-survival matrices, environment precedence, and older-config migration.
 
 Upgrading is the installer followed by a restart:
 
@@ -503,6 +516,13 @@ The Caddyfile adapts to the following partial JSON shape. Site-scoped
 capabilities cascade global → site → built-in default. `control` and `mdns`
 are process-wide; access logging belongs to each HTTP site's `log` config;
 sendfile is always on and has no config key.
+
+`heartbeat_ttl` defaults to `15s`; `JANUS_HEARTBEAT_TTL` supplies the fallback
+when it is unset. The pooled registry captures this value when it is first
+provisioned. Changing it requires a restart: a config reload currently
+rejects a changed effective value with an error requiring a restart.
+`GET /1.0` reports the running `heartbeat_ttl`; `janus serve` sends
+heartbeats every third of that interval (5s for older edges without it).
 
 ```json
 {

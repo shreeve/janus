@@ -8,7 +8,6 @@ package main
 // is exactly what 'janus mode' says, and nothing else starts.
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -35,6 +34,8 @@ func setServeHeartbeat(d time.Duration)   { serveHeartbeat = d }
 
 // serveStop ends a serve from a test instead of a signal.
 var serveStop chan struct{}
+
+var serveReadyTimeout = 5 * time.Second
 
 func serveCommand(caddyReload *cobra.Command) *cobra.Command {
 	cmd := &cobra.Command{
@@ -80,10 +81,6 @@ trust' installs the edge's CA on this machine.
 			if note != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), note)
 			}
-			// Local names are not served in wan mode; there is nothing to open.
-			if st, err := readScope(p); err == nil && st.Scope == ScopeWAN {
-				return errors.New("the edge is in wan mode, and local names (<name>.localhost, <name>.local) are not served there; 'janus mode localhost' or 'janus mode lan' first")
-			}
 			return serveDir(cmd, caddyReload, p, abs, name)
 		},
 	}
@@ -124,17 +121,30 @@ func serveName(base string) string {
 
 func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, dir, name string) error {
 	out := cmd.OutOrStdout()
-	root, _, err := controlGet(p, "/1.0")
+	st, err := readScope(p)
+	if err != nil {
+		return err
+	}
+	if st.Scope == ScopeWAN {
+		return errors.New("the edge is in wan mode, and local names (<name>.localhost, <name>.local) are not served there; 'janus mode localhost' or 'janus mode lan' first")
+	}
+	client, root, err := openEdgeControl(p)
 	if err != nil {
 		cmd.SilenceErrors = true
 		fmt.Fprintf(cmd.ErrOrStderr(), "janus is not running: no control plane answered at %s or %s\n", p.sock, localControlURL)
 		return &exitError{code: 3, err: err}
 	}
+	defer client.Close()
 	var caps struct {
-		Browse bool `json:"browse"`
+		Browse       bool   `json:"browse"`
+		HeartbeatTTL string `json:"heartbeat_ttl"`
 	}
 	if err := json.Unmarshal(root, &caps); err != nil || !caps.Browse {
 		return fmt.Errorf("the edge's Caddyfile has browse off; 'browse' in its global janus block turns it on (the seed has it), then 'janus reload'")
+	}
+	heartbeat, err := heartbeatPeriod(caps.HeartbeatTTL)
+	if err != nil {
+		return err
 	}
 	// The site for this machine's names is janus's drop-in: put it in
 	// place and apply it before the name is registered, so the first
@@ -144,7 +154,14 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 	} else if written {
 		fmt.Fprintf(out, "added %s (this machine's *.localhost names)\n", localhostSitePath(p))
 		if err := reloadEdge(caddyReload, p); err != nil {
-			fmt.Fprintf(out, "note: the edge did not reload it (%v); 'janus reload' applies it\n", err)
+			path := localhostSitePath(p)
+			contents, readErr := os.ReadFile(path)
+			if readErr == nil && string(contents) == localhostSite(p) {
+				readErr = os.Remove(path)
+			} else if readErr == nil {
+				readErr = fmt.Errorf("%s changed during reload; left it in place", path)
+			}
+			return fmt.Errorf("could not apply the localhost site: %w", errors.Join(err, readErr))
 		}
 	}
 	hosts := []string{name + ".localhost", name + ".local"}
@@ -155,7 +172,7 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 		"files":     map[string]any{"roots": []map[string]any{{"path": dir, "cache": "revalidate", "browse": true}}},
 		"lease":     "heartbeat",
 	})
-	created, status, err := controlPost(p, "/1.0/apps", body)
+	created, status, err := client.Do(http.MethodPost, "/1.0/apps", body)
 	if err != nil {
 		return err
 	}
@@ -172,108 +189,130 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 		return fmt.Errorf("the edge's answer has no id: %s", created)
 	}
 	defer func() {
-		_, _, _ = controlDo(p, http.MethodDelete, "/1.0/apps/"+reg.ID, nil)
+		_, _, _ = client.Do(http.MethodDelete, "/1.0/apps/"+reg.ID, nil)
 		fmt.Fprintf(out, "closed %s\n", dir)
 	}()
 
-	st, _ := readScope(p)
+	parent := cmd.Context()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt)
+	defer stop()
+	failures, stopHeartbeats := serveHeartbeats(ctx, client, reg.ID, heartbeat)
+	defer stopHeartbeats()
+	// A freshly applied site obtains its certificate in the background;
+	// maintain the lease while waiting for usable HTTPS routing.
+	problem := ""
+	for deadline := time.Now().Add(serveReadyTimeout); ; {
+		if problem = serveHandshake(hosts[0]); problem == "" || time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-serveStop:
+			return nil
+		case err := <-failures:
+			return err
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if problem != "" {
+		return fmt.Errorf("the registered directory is not reachable: %s", problem)
+	}
 	fmt.Fprintf(out, "serving %s\n  https://%s/  (this machine)\n", dir, hosts[0])
 	if st.Scope != ScopeLocalhost {
 		fmt.Fprintf(out, "  https://%s/  (the network: %s mode)\n", hosts[1], st.Scope)
 	}
-	// A freshly applied site obtains its certificate in the background;
-	// give it a few seconds before calling the handshake a problem.
-	problem := ""
-	for deadline := time.Now().Add(5 * time.Second); ; {
-		if problem = serveHandshake(hosts[0]); problem == "" || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if problem != "" {
-		fmt.Fprintf(out, "note: %s\n", problem)
-	}
 	fmt.Fprintln(out, "if the browser warns about the certificate: janus trust   (Ctrl-C closes)")
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	tick := time.NewTicker(serveHeartbeat)
-	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-serveStop:
 			return nil
-		case <-tick.C:
-			if _, status, err := controlDo(p, http.MethodPost, "/1.0/apps/"+reg.ID+"/heartbeat", nil); err != nil || status/100 != 2 {
-				return fmt.Errorf("the edge stopped answering heartbeats (%d, %v); the registration is gone", status, err)
-			}
+		case err := <-failures:
+			return err
 		}
 	}
 }
 
+func serveHeartbeats(parent context.Context, client *edgeControl, id string, interval time.Duration) (<-chan error, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	failures, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(interval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if _, status, err := client.Do(http.MethodPost, "/1.0/apps/"+id+"/heartbeat", nil); err != nil || status/100 != 2 {
+					failures <- fmt.Errorf("the edge stopped answering heartbeats (%d, %v); the registration is gone", status, err)
+					return
+				}
+			}
+		}
+	}()
+	return failures, func() { cancel(); <-done }
+}
+
+func heartbeatPeriod(ttl string) (time.Duration, error) {
+	if ttl == "" {
+		return serveHeartbeat, nil
+	} // compatibility with older edges
+	duration, err := time.ParseDuration(ttl)
+	if err != nil || duration < 3*time.Millisecond {
+		return 0, fmt.Errorf("the edge reported an invalid heartbeat_ttl %q", ttl)
+	}
+	return duration / 3, nil
+}
+
 // reloadEdge applies the service Caddyfile to the running edge, the way
 // 'janus reload' does; a variable so tests need no admin socket.
-var reloadEdge = func(caddyReload *cobra.Command, p servicePaths) error {
+var reloadEdge = func(_ *cobra.Command, p servicePaths) error {
 	if err := loadEnvFile(p.env); err != nil {
 		return err
 	}
 	if _, err := setBindEnv(p); err != nil {
 		return err
 	}
-	_ = caddyReload.Flags().Set("config", p.config)
-	_ = caddyReload.Flags().Set("adapter", "caddyfile")
-	return caddyReload.RunE(caddyReload, nil)
+	return reloadConfig(p.config, "caddyfile", "", false)
 }
 
-// serveHandshake asks the edge for the served name over TLS on the
-// loopback and reports what would stop a browser, other than trust.
+// serveHandshake checks the directory route over loopback HTTPS and reports
+// what would stop a browser, other than installing the local CA's trust.
 // A variable so tests do not need a listener on 443.
 var serveHandshake = func(host string) string {
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", "127.0.0.1:443", &tls.Config{ServerName: host, InsecureSkipVerify: true})
+	return probeServeRoute(host, "127.0.0.1:443")
+}
+
+func probeServeRoute(host, address string) string {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	req, err := http.NewRequest(http.MethodHead, "https://"+host+"/", nil)
 	if err != nil {
-		return fmt.Sprintf("the edge did not complete a TLS handshake for %s (%v); its Caddyfile must import the sites directory (import <sites>/*.caddy) and its on_demand_tls permission must be janus (or an ask that admits registered names)", host, err)
+		return err.Error()
 	}
-	conn.Close()
+	req.Header.Set("Accept", "text/html")
+	response, err := client.Do(req)
+	if err != nil {
+		return fmt.Sprintf("the edge did not serve HTTPS for %s (%v); check its sites import and on_demand_tls permission", host, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 400 {
+		return fmt.Sprintf("https://%s/ returned %s", host, response.Status)
+	}
 	return ""
-}
-
-// controlPost and controlDo send to this edge's control API the way
-// controlGet reads it, returning the body and status.
-func controlPost(p servicePaths, path string, body []byte) ([]byte, int, error) {
-	return controlDo(p, http.MethodPost, path, body)
-}
-
-func controlDo(p servicePaths, method, path string, body []byte) ([]byte, int, error) {
-	try := func(client *http.Client, url string) ([]byte, int, error) {
-		req, err := http.NewRequest(method, url, bytes.NewReader(body))
-		if err != nil {
-			return nil, 0, err
-		}
-		if body != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, 0, err
-		}
-		defer resp.Body.Close()
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(resp.Body)
-		return buf.Bytes(), resp.StatusCode, nil
-	}
-	if socketExists(p.sock) {
-		dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", p.sock)
-		}
-		if b, status, err := try(controlClient(dial), "http://janus"+path); err == nil {
-			return b, status, nil
-		}
-	}
-	if !controlListensOn(localControlURL+"/1.0", p.sock) {
-		return nil, 0, errors.New("no control plane answered")
-	}
-	return try(controlClient(nil), localControlURL+path)
 }

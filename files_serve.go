@@ -150,7 +150,7 @@ func serveAbsoluteFile(w http.ResponseWriter, r *http.Request, name string, prec
 		return false
 	}
 	defer root.Close()
-	file, err := root.Open(filepath.Base(name))
+	file, err := openRootFile(root, filepath.Base(name))
 	if err != nil {
 		return false
 	}
@@ -179,7 +179,7 @@ func serveOpenedFileFromRoot(w http.ResponseWriter, r *http.Request, root *os.Ro
 			if !ok || root == nil {
 				continue
 			}
-			sidecar, err := root.Open(relative + suffix)
+			sidecar, err := openRootFile(root, relative+suffix)
 			if err != nil {
 				continue
 			}

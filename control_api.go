@@ -312,15 +312,23 @@ func (a *App) handleControlRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"api_version": "1.0",
-		"type":        "janus",
-		"ping":        cascadeBool(nil, a.Ping, false),
-		"mdns":        a.Mdns != nil,
-		"auth":        len(a.authEnabledSites()) > 0,
-		"files":       cascadeBool(nil, a.Files, a.Browse != nil),
-		"browse":      a.Browse != nil,
-		"control":     a.controlPublicInfo(),
+		"api_version":   "1.0",
+		"type":          "janus",
+		"ping":          cascadeBool(nil, a.Ping, false),
+		"mdns":          a.Mdns != nil,
+		"auth":          len(a.authEnabledSites()) > 0,
+		"files":         cascadeBool(nil, a.Files, a.Browse != nil),
+		"browse":        a.Browse != nil,
+		"control":       a.controlPublicInfo(),
+		"heartbeat_ttl": a.effectiveHeartbeatTTL().String(),
 	})
+}
+
+func (a *App) effectiveHeartbeatTTL() time.Duration {
+	if a.appsReg != nil {
+		return a.appsReg.ttl
+	}
+	return defaultHeartbeatTTL
 }
 
 func (a *App) handleBrowseState(w http.ResponseWriter, r *http.Request) {

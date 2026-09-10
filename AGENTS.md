@@ -4,8 +4,9 @@ Standing rules for anyone (AI or human) working in this repository.
 
 Janus is a **Caddy module**: cold Caddyfile capabilities + hot `/1.0`
 control API. Registry, data plane, and hub state live in pooled process
-state (`caddy.UsagePool`) — a config reload never drops a registration
-or a WebSocket. Janus runtime state is memory-only by contract: a
+state (`caddy.UsagePool`) — config reloads preserve registrations and
+eligible hub WebSockets; committed admission changes can close affected
+connections. Janus runtime state is memory-only by contract: a
 restart empties the registry and tenants re-register.
 
 **Era: stewardship.** Nine capabilities are shipped. Ongoing work is
@@ -98,9 +99,10 @@ browse, access.
 | **control** | Global `janus { control … }` | Where `/1.0` listens: `internal` / `local` / `public` |
 
 Unknown public hosts → **404**. Registry, data plane, and hubs sit in
-pooled process state (`caddy.UsagePool`): config reloads reuse them;
-only registry DELETE, heartbeat TTL reap, or process exit tears them
-down. Memory-only across restarts — tenants re-register.
+pooled process state (`caddy.UsagePool`): config reloads reuse them.
+Registry DELETE, heartbeat TTL reap, or final pooled-state cleanup removes
+registrations. Host removal and committed hub-policy changes can also
+close affected WebSockets. Memory-only across restarts — tenants re-register.
 
 ## Docs
 

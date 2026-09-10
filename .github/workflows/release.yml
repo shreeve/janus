@@ -1,6 +1,6 @@
 # Release — push a v* tag and five self-contained Janus archives appear on the
 # GitHub Release: osx-arm64, linux-amd64, linux-arm64, windows-amd64, and
-# windows-arm64. Each archive contains the static janus binary (Caddy + the
+# windows-arm64. Each archive contains the janus binary (Caddy + the
 # Janus module + the Route 53 DNS provider), the operator-facing Caddyfile,
 # README, and license. Unix archives also include an install.sh that puts
 # janus on PATH without touching live configuration.
@@ -15,47 +15,11 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Unit, vet, and race gates
-        run: |
-          go test ./...
-          go vet ./...
-          go test -race ./...
-
-  acceptance:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          path: janus
-      - uses: actions/checkout@v5
-        with:
-          repository: shreeve/rip
-          path: rip
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: janus/go.mod
-          cache-dependency-path: janus/go.sum
-      - uses: oven-sh/setup-bun@v2
-      - name: Build acceptance binary
-        working-directory: janus
-        run: make janus
-      - name: Full acceptance gate
-        working-directory: janus
-        # The suite intentionally exercises the production HTTPS port (443).
-        # GitHub's macOS runner provides passwordless sudo; preserve the tool
-        # path so the checked-out Rip manager can invoke Bun.
-        run: sudo env "PATH=$PATH" "HOME=$HOME" NO_COLOR=1 ./test.sh
+  checks:
+    uses: ./.github/workflows/check.yml
 
   build:
-    needs: [test, acceptance]
+    needs: [checks]
     strategy:
       fail-fast: false
       matrix:

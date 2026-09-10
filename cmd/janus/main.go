@@ -1,6 +1,6 @@
 // Command janus is the Janus edge binary: stock Caddy compiled together
 // with the Janus module and the Route 53 DNS provider (DNS-01 wildcard
-// issuance) as one static executable named janus.
+// issuance) as one executable named janus.
 //
 // Janus owns the command tree. Caddy's cmd package hard-codes "caddy" as
 // the command to run throughout its help text and captures each command's

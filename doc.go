@@ -2,11 +2,13 @@
 // cold Caddyfile capabilities on the data plane and a hot /1.0 control
 // API on the control plane. Its runtime coordination state is memory-only.
 //
-// Janus registers two Caddy modules: the app "janus" (process-wide
+// Janus registers four Caddy modules: the app "janus" (process-wide
 // control listeners and capability defaults, configured in the global
-// options block) and the HTTP handler "http.handlers.janus" (per-site
-// admission and capability overrides). Cold config admits capabilities;
-// the hot registry wires tenants: apps register their hosts, publish
+// options block), the HTTP handler "http.handlers.janus" (per-site
+// admission and capability overrides), "tls.permission.janus" (in-process
+// on-demand certificate admission), and "caddy.logging.encoders.janus"
+// (durable JSON access logging and live observation). Cold config admits
+// capabilities; the hot registry wires tenants: apps register their hosts, publish
 // their worker unix sockets, and heartbeat on /1.0, while Janus routes
 // admitted requests host→upstream with doorbell-driven reloads that are
 // invisible to clients.
@@ -30,10 +32,11 @@
 // publishes bounded app-scoped NDJSON through the control plane.
 //
 // The registry, data plane, and hub state live in pooled process state
-// (caddy.UsagePool), so a Caddy config reload never drops a registration
-// or a hub socket; only registry DELETE, heartbeat TTL reap, or process
-// exit tears them down. A restart empties the registry and tenants
-// re-register.
+// (caddy.UsagePool), so Caddy config reloads preserve registrations and
+// eligible hub sockets. Committed hub-policy changes and host removal can
+// close affected sockets; registry DELETE, heartbeat TTL reap, or final
+// pooled-state cleanup tears down the registration itself. A restart
+// empties the registry and tenants re-register.
 //
 // The authoritative contracts live under docs/: the phased build spec,
 // one page per capability, the Janus↔tenant pool protocol, and the

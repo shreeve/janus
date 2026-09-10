@@ -47,6 +47,7 @@ plus its runnable artifacts.
 | Doc | Role |
 | --- | --- |
 | [`counter/index.md`](counter/index.md) | The realtime counter demo: ping, control, and hub end to end with a Rip tenant (`app.rip` and `Caddyfile.demo` ship alongside) |
+| [`operators/index.md`](operators/index.md) | Living command/default/scope and reload-survival matrices, strict JSON rules, and migration guidance for older installations |
 
 ## Design history (kept, superseded by the contracts above)
 
@@ -59,3 +60,10 @@ plus its runnable artifacts.
 
 Images (`janus-*.png`, `janus-doorway-mark.svg`) are the project logo,
 mark, and social card.
+
+## Reviews (findings, not implementation contracts)
+
+| Doc | Role |
+| --- | --- |
+| [`20260910-100643-stewardship-review.md`](20260910-100643-stewardship-review.md) | v1.14.1 review: reproduced defects, POLS, cleanup boundaries, installed capability gaps, and documentation corrections |
+| [`20260910-120000-stewardship-resolution.md`](20260910-120000-stewardship-resolution.md) | Finding-by-finding fixes, commit mapping, validation, and boundaries for installed settings and future product ideas |
