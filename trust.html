@@ -124,7 +124,7 @@
             <span class="mono" id="ca-name-ios">Caddy Local Authority</span>.
             <span class="dim">(This is the step everyone misses — HTTPS does not work without it.)</span></div></li>
         <li><span class="n done">✓</span>
-          <div>Open any browser you like — this page notices automatically and takes you in.</div></li>
+          <div data-trust-next>Open a local site after installing the certificate.</div></li>
       </ol>
     </div>
 
@@ -136,7 +136,7 @@
           <div>Open <strong>Settings → Security &amp; privacy → More security settings →
             Encryption &amp; credentials → Install a certificate → CA certificate</strong>, then pick
             the downloaded file. <span class="dim">(Menu names vary by phone.)</span></div></li>
-        <li><span class="n done">✓</span><div>Come back here — this page notices automatically and takes you in.</div></li>
+        <li><span class="n done">✓</span><div data-trust-next>Open a local site after installing the certificate.</div></li>
       </ol>
     </div>
 
@@ -163,7 +163,7 @@
       <button data-show="android">Android</button>
       <button data-show="mac">Mac</button>
       <button data-show="other">Other</button>
-      <span class="probe"><span class="dot"></span><span id="probe-text">watching for trust</span>
+      <span class="probe" id="trust-probe"><span class="dot"></span><span id="probe-text">watching for trust</span>
         <button id="recheck">Check now</button></span>
     </div>
   </div>
@@ -178,6 +178,7 @@
 // element properties, never as markup.
 var ua = navigator.userAgent;
 var host = location.hostname;
+var canCheck = {{CAN_CHECK}};
 var state = "probing";
 var checking = false;
 
@@ -214,7 +215,7 @@ function probe() {
     .catch(function () { clearTimeout(timer); return false; });
 }
 function recheck() {
-  if (checking) return;
+  if (!canCheck || checking) return;
   checking = true;
   document.getElementById("probe-text").textContent = "checking…";
   probe().then(function (ok) {
@@ -226,8 +227,8 @@ function recheck() {
 }
 
 document.getElementById("hdr-name").textContent = host;
-document.getElementById("self-url").textContent = "http://" + host + "/trust";
-document.getElementById("self-host").textContent = host;
+document.getElementById("self-url").textContent = location.origin + "/trust";
+document.getElementById("self-host").textContent = location.host + "/trust";
 show("ios-not-safari", !safari);
 show("ios-safari-step", safari);
 show("ios-other-step", !safari);
@@ -240,8 +241,14 @@ document.querySelectorAll(".switch button[data-show]").forEach(function (b) {
 });
 document.getElementById("recheck").addEventListener("click", recheck);
 platform(detect());
+show("trust-probe", canCheck);
+if (canCheck) document.querySelectorAll("[data-trust-next]").forEach(function (item) {
+  item.textContent = "Come back here — this page notices automatically and takes you in.";
+});
 
-if (location.protocol === "https:") {
+if (!canCheck) {
+  setState("onboard");
+} else if (location.protocol === "https:") {
   setState("trusted");
 } else {
   recheck();
