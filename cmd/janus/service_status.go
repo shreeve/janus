@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -132,7 +133,7 @@ func gatherStatus(p servicePaths) edgeStatus {
 		st.TrustURL = trustURL(p)
 	}
 	st.Running = st.PID > 0 || st.Control != ""
-	gatherCA(&st)
+	gatherCA(&st, p)
 	if st.PID > 0 {
 		st.Uptime = elapsed(st.PID)
 		st.BinaryNewer = binaryNewerThan(st.Binary, st.PID)
@@ -179,21 +180,84 @@ var verifyCA = func(root *x509.Certificate) error {
 	return err
 }
 
-func gatherCA(st *edgeStatus) {
-	path := localCARoot()
-	pemBytes, err := os.ReadFile(path)
-	if err != nil {
-		return
+// Resolve stopped-service storage from that service's home and env file,
+// without changing the CLI process environment. A running admin API is
+// authoritative for the certificate itself, including custom storage.
+func serviceCARoot(p servicePaths) string {
+	env := map[string]string{"HOME": p.home}
+	if !p.root && p.home == os.Getenv("HOME") {
+		for _, key := range []string{"XDG_DATA_HOME", "AppData"} {
+			env[key] = os.Getenv(key)
+		}
 	}
-	block, _ := pem.Decode(pemBytes)
+	if body, err := os.ReadFile(p.env); err == nil {
+		values, err := parseEnvFile(bytes.NewReader(body))
+		if err != nil {
+			return ""
+		}
+		for key, value := range values {
+			env[key] = value
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	var data string
+	switch {
+	case env["XDG_DATA_HOME"] != "":
+		data = filepath.Join(env["XDG_DATA_HOME"], "caddy")
+	case runtime.GOOS == "darwin":
+		data = filepath.Join(env["HOME"], "Library", "Application Support", "Caddy")
+	case runtime.GOOS == "windows":
+		if env["AppData"] == "" {
+			return ""
+		}
+		data = filepath.Join(env["AppData"], "Caddy")
+	default:
+		data = filepath.Join(env["HOME"], ".local", "share", "caddy")
+	}
+	return filepath.Join(data, "pki", "authorities", "local", "root.crt")
+}
+
+func parseRootCA(body []byte) *x509.Certificate {
+	block, _ := pem.Decode(body)
 	if block == nil {
-		return
+		return nil
 	}
 	root, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
+		return nil
+	}
+	return root
+}
+
+func gatherCA(st *edgeStatus, p servicePaths) {
+	path := serviceCARoot(p)
+	body, _ := os.ReadFile(path)
+	root := parseRootCA(body)
+	if root != nil {
+		st.CA = path
+	}
+	if st.Running && socketExists(p.admin) {
+		client, base := adminClient("unix/" + p.admin)
+		defer client.CloseIdleConnections()
+		if response, err := client.Get(base + "/pki/ca/local"); err == nil {
+			defer response.Body.Close()
+			var ca struct {
+				Root string `json:"root_certificate"`
+			}
+			if response.StatusCode == http.StatusOK && json.NewDecoder(response.Body).Decode(&ca) == nil {
+				if live := parseRootCA([]byte(ca.Root)); live != nil {
+					if root == nil || !bytes.Equal(live.Raw, root.Raw) {
+						st.CA = ""
+					}
+					root = live
+				}
+			}
+		}
+	}
+	if root == nil {
 		return
 	}
-	st.CA = path
 	trusted := verifyCA(root) == nil
 	st.CATrusted = &trusted
 }
