@@ -82,7 +82,7 @@
 
 	janus {
 		ping # 1) site-scoped default: on
-		control internal # 2) process-wide
+		control internal {$JANUS_TEST_CONTROL:run/janus.sock} # 2) process-wide
 		control local
 		heartbeat_ttl {$JANUS_HEARTBEAT_TTL:15s}
 		hub # 3) site-scoped default: on (path /hub, origin same)
@@ -146,7 +146,7 @@
 
 (janus_access) {
 	log {
-		output file .test-access.log
+		output file {$JANUS_TEST_ACCESS_LOG:.test-access.log}
 		format janus {
 			time_format rfc3339_nano
 			duration_format seconds
