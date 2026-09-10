@@ -154,7 +154,7 @@ func (h *Handler) serveBrowseRootsPrecompressed(w http.ResponseWriter, r *http.R
 		if err != nil {
 			continue
 		}
-		file, err := root.Open(relative)
+		file, err := openRootFile(root, relative)
 		if err != nil {
 			root.Close()
 			continue
@@ -196,7 +196,7 @@ func (h *Handler) serveBrowseRootsPrecompressed(w http.ResponseWriter, r *http.R
 			if relative != "." {
 				indexRelative = relative + "/" + index
 			}
-			indexFile, err := root.Open(indexRelative)
+			indexFile, err := openRootFile(root, indexRelative)
 			if err != nil {
 				continue
 			}
@@ -264,7 +264,7 @@ func (h *Handler) serveBrowseFile(w http.ResponseWriter, r *http.Request, file *
 
 func (h *Handler) serveBrowseListing(w http.ResponseWriter, r *http.Request, root *os.Root, configured activeBrowseRoot, relative, requestPath string) {
 	accessFactsOf(r).setClass("browse_listing")
-	directory, err := root.Open(relative)
+	directory, err := openRootFile(root, relative)
 	if err != nil {
 		http.NotFound(w, r)
 		return

@@ -3439,6 +3439,13 @@ case_files_setup() {
 	printf '%s' "$id" >"$FILES_APP_FILE"
 }
 
+case_files_special_files() {
+	mkfifo "$ROOT/.test-files/root1/pipe" "$ROOT/.test-files/root1/plain.json.br"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 -H 'Accept: application/json' https://files.ripdev.io/pipe)" "404"
+	eq "$(curl -sS --max-time 2 -H 'Accept-Encoding: br' https://files.ripdev.io/plain.json)" '{"plain":"identity only"}'
+	rm "$ROOT/.test-files/root1/pipe" "$ROOT/.test-files/root1/plain.json.br"
+}
+
 case_files_precompressed_brotli() {
 	local headers decoded sidecar_size
 	headers="$(curl -sS -D - -o "$ROOT/.test-files/bundle.br.response" --max-time 5 \
@@ -4032,6 +4039,7 @@ test "precompressed fallback, removal, canonical-first, same-root" case_files_pr
 test "precompressed representation-specific conditionals" case_files_precompressed_conditionals
 test "precompressed HEAD, encoded range, and no double encode" case_files_precompressed_head_range_and_encode
 test "precompressed SPA shell and directory index" case_files_precompressed_shell_and_index
+test "FIFO canonical files and sidecars never block" case_files_special_files
 test "strict site/files JSON fields reject" case_files_strict_hot_fields
 test "cascade: site files off beats global on" case_files_cascade_off
 
