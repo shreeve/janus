@@ -2,6 +2,8 @@ package janus
 
 import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -50,12 +52,48 @@ func TestMdnsSharedURLCandidates(t *testing.T) {
 		}
 	}
 	route := caddyhttp.Route{MatcherSets: caddyhttp.MatcherSets{{caddyhttp.MatchPath{"/api/*"}}}, Handlers: []caddyhttp.MiddlewareHandler{&Handler{}}}
-	visited := false
-	_ = walkHostRoutes(caddyhttp.RouteList{route}, [][]string{nil}, func(caddyhttp.MiddlewareHandler, [][]string) error {
-		visited = true
-		return nil
-	}, mdnsHostOnlyRoute)
-	if visited {
+	if mdnsRouteOwner(caddyhttp.RouteList{route}, "janus.local") != mdnsRouteBlocked {
 		t.Fatal("conditional route advertised as the whole front door")
 	}
+	shadow := caddyhttp.Route{Handlers: []caddyhttp.MiddlewareHandler{&caddyhttp.StaticResponse{Body: "shadow"}, &Handler{}}}
+	if mdnsRouteOwner(caddyhttp.RouteList{shadow}, "janus.local") != mdnsRouteBlocked {
+		t.Fatal("response before Janus advertised as the front door")
+	}
+	janus := caddyhttp.Route{Handlers: []caddyhttp.MiddlewareHandler{&Handler{}}}
+	if mdnsRouteOwner(caddyhttp.RouteList{shadow, janus}, "janus.local") != mdnsRouteBlocked {
+		t.Fatal("earlier response route ignored")
+	}
+	grouped := janus
+	grouped.Group = "door"
+	if mdnsRouteOwner(caddyhttp.RouteList{{Group: "door"}, grouped}, "janus.local") != mdnsRouteBlocked {
+		t.Fatal("earlier empty grouped route ignored")
+	}
+	if mdnsRouteOwner(caddyhttp.RouteList{grouped}, "janus.local") != mdnsRouteOwned {
+		t.Fatal("direct grouped Janus handler was rejected")
+	}
+	child := caddyhttp.Route{MatcherSets: caddyhttp.MatcherSets{{caddyhttp.MatchHost{"elsewhere.local"}}}, Handlers: []caddyhttp.MiddlewareHandler{&Handler{}}}
+	outer := caddyhttp.Route{MatcherSets: caddyhttp.MatcherSets{{caddyhttp.MatchHost{"janus.local"}}}, Handlers: []caddyhttp.MiddlewareHandler{&caddyhttp.Subroute{Routes: caddyhttp.RouteList{child}}}}
+	if mdnsRouteOwner(caddyhttp.RouteList{outer}, "janus.local") == mdnsRouteOwned {
+		t.Fatal("impossible host intersection advertised as the front door")
+	}
+	outer.Handlers = []caddyhttp.MiddlewareHandler{&caddyhttp.Subroute{Routes: caddyhttp.RouteList{janus}}}
+	if mdnsRouteOwner(caddyhttp.RouteList{outer}, "janus.local") != mdnsRouteOwned {
+		t.Fatal("unconditional nested Janus route not discovered")
+	}
+}
+
+func TestMdnsMetadataPublication(t *testing.T) {
+	a := newTestSharedMdnsApp(t)
+	var readers sync.WaitGroup
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for i := 0; i < 500; i++ {
+			a.handleMdnsState(httptest.NewRecorder(), httptest.NewRequest("GET", "/1.0/mdns", nil))
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		a.mdnsDoor.Store(&mdnsFrontDoorInfo{address: ":8080", routes: []caddyhttp.RouteList{{{Handlers: []caddyhttp.MiddlewareHandler{&Handler{}}}}}})
+	}
+	readers.Wait()
 }

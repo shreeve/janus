@@ -1,7 +1,7 @@
 package janus
 
 import (
-	"fmt"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"net"
 	"net/http"
 	"net/url"
@@ -9,14 +9,21 @@ import (
 	"strings"
 )
 
+// Published after listener setup. Readers can arrive while Start is still
+// running; neither listener fields nor growing route slices are read live.
+type mdnsFrontDoorInfo struct {
+	address string
+	routes  []caddyhttp.RouteList
+}
+
 // The mdns control surface (docs/20260722-034619-capability-mdns.md
 // "Registry, control-surface, and repo deltas"). GET /1.0/mdns rides
 // every control listener with the existing Bearer posture — the
 // acceptance oracle (multicast is not CI-assertable; advertiser state
 // is) and the operator's view of the advertiser.
 
-// handleMdnsState is GET /1.0/mdns. Disabled answers {"enabled": false}
-// — present and honest even when mDNS is disabled.
+// handleMdnsState is GET /1.0/mdns. Disabled answers enabled:false and
+// empty URLs — present and honest even when mDNS is disabled.
 // Enabled answers the advertiser view: configured and effective names,
 // the front door's mode and address (shared mode names the HTTP port
 // the door rides inside; dedicated mode names its own listener), every
@@ -36,18 +43,21 @@ func (a *App) handleMdnsState(w http.ResponseWriter, r *http.Request) {
 		advertised = []mdnsAdvertisedEntry{}
 	}
 	mode, frontDoor := "dedicated", ms.Listen
-	if ms.shared() {
-		mode, frontDoor = "shared", fmt.Sprintf(":%d", a.mdnsSharedPort)
-	}
-	address := frontDoor
-	if a.mdnsLn != nil {
-		address = a.mdnsLn.Addr().String()
-	}
+	address := ""
 	ownsName := !ms.shared()
-	for _, hosts := range a.mdnsSharedHosts {
-		if entryMatchesHost(hubSiteEntry{patterns: hosts}, snap.effectiveName) {
-			ownsName = true
-			break
+	if ms.shared() {
+		mode, frontDoor = "shared", ""
+	}
+	if door := a.mdnsDoor.Load(); door != nil {
+		address = door.address
+		if ms.shared() {
+			frontDoor = address
+		}
+		for _, routes := range door.routes {
+			if mdnsRouteOwner(routes, snap.effectiveName) == mdnsRouteOwned {
+				ownsName = true
+				break
+			}
 		}
 	}
 	dashboard, trust := mdnsFrontDoorURLs(ms, snap.effectiveName, address, ExposureScope(), ownsName)

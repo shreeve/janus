@@ -10,15 +10,12 @@ import (
 // routes. Within an alternative, patterns are a union; nil means any host,
 // while a non-nil empty slice means no host. Keep those states distinct:
 // an impossible parent must never become a catch-all in a deeper subroute.
-func walkHostRoutes(routes caddyhttp.RouteList, inherited [][]string, visit func(caddyhttp.MiddlewareHandler, [][]string) error, accept ...func(caddyhttp.Route) bool) error {
+func walkHostRoutes(routes caddyhttp.RouteList, inherited [][]string, visit func(caddyhttp.MiddlewareHandler, [][]string) error) error {
 	for _, route := range routes {
-		if len(accept) > 0 && !accept[0](route) {
-			continue
-		}
 		alternatives := intersectRouteHosts(inherited, route.MatcherSets)
 		for _, handler := range route.Handlers {
 			if sub, ok := handler.(*caddyhttp.Subroute); ok {
-				if err := walkHostRoutes(sub.Routes, alternatives, visit, accept...); err != nil {
+				if err := walkHostRoutes(sub.Routes, alternatives, visit); err != nil {
 					return err
 				}
 			} else if err := visit(handler, alternatives); err != nil {

@@ -114,7 +114,7 @@ type App struct {
 	// dedicated mode and with mdns off.
 	mdnsSharedPort   int
 	mdnsSharedRoutes http.Handler
-	mdnsSharedHosts  [][]string // Janus host matchers on the shared HTTP port
+	mdnsDoor         atomic.Pointer[mdnsFrontDoorInfo]
 
 	// authSites pairs compiled site routes with effective auth configs;
 	// built at Start for the removed-user session revocation, the

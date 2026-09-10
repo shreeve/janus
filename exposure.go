@@ -2,8 +2,8 @@ package janus
 
 // The edge's exposure mode, as the process that runs it knows it. The
 // service edge publishes the stored mode here when it starts and on every
-// tick of its exposure watch; a config loaded some other way publishes
-// nothing, and nothing means the default, localhost.
+// tick of its exposure watch. A standalone configuration publishes no
+// service mode and supplies its own listener policy.
 //
 // In wan mode the local name families are not served, not certified, and
 // not announced: <name>.local, <name>.localhost, localhost, and via.rip
