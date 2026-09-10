@@ -4,7 +4,7 @@
 #   TAG=v1.7.2 PLAT=osx-arm64 scripts/package-release.sh
 #
 # The workflow builds bin/janus[.exe] first. This script packages that
-# static binary with an installer, operator-facing configuration, README, and
+# binary with an installer, operator-facing configuration, README, and
 # license. Windows archives omit the Unix install.sh and run in place.
 
 set -euo pipefail

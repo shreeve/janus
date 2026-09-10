@@ -1,6 +1,6 @@
 # Release — push a v* tag and five self-contained Janus archives appear on the
 # GitHub Release: osx-arm64, linux-amd64, linux-arm64, windows-amd64, and
-# windows-arm64. Each archive contains the static janus binary (Caddy + the
+# windows-arm64. Each archive contains the janus binary (Caddy + the
 # Janus module + the Route 53 DNS provider), the operator-facing Caddyfile,
 # README, and license. Unix archives also include an install.sh that puts
 # janus on PATH without touching live configuration.

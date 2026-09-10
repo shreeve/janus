@@ -59,3 +59,9 @@ plus its runnable artifacts.
 
 Images (`janus-*.png`, `janus-doorway-mark.svg`) are the project logo,
 mark, and social card.
+
+## Reviews (findings, not implementation contracts)
+
+| Doc | Role |
+| --- | --- |
+| [`20260910-100643-stewardship-review.md`](20260910-100643-stewardship-review.md) | v1.14.1 review: reproduced defects, POLS, cleanup boundaries, installed capability gaps, and documentation corrections |

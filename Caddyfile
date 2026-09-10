@@ -62,7 +62,7 @@
 #
 # 5) auth — URL-prefix gates for auth-less apps (site-scoped, cascades)
 #   Global auth ON with fixture users + gates (passwords in the block
-#   below; mint with `./bin/janus janus-auth-hash`). Every site EXCEPT
+#   below; mint with `./bin/janus passhash`). Every site EXCEPT
 #   authwall/authcarol opts out with `auth off`. Cascade:
 #   authwall.ripdev.io   → inherits global users + gates
 #   authcarol.ripdev.io  → site auth { … } replaces global (carol only)
