@@ -19,6 +19,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/certmagic"
 )
 
 // bindEnvKey is the environment variable the service Caddyfile binds through.
@@ -184,11 +187,9 @@ func setBindEnv(p servicePaths) (scopeState, error) {
 	return s, os.Setenv(bindEnvKey, strings.Join(bind, " "))
 }
 
-// loadEnvFile puts KEY=value lines from the service env file into the
-// process environment, in Caddy's envfile format (comments, `export `,
-// quotes), for the verbs that adapt the Caddyfile in-process without Caddy's
-// own --envfile. A missing file is nothing to load. JANUS_BIND is refused
-// there: the bind comes from the mode, nowhere else.
+// loadEnvFile uses Caddy's syntax and preserves existing environment values,
+// including empty ones. Parse and check the whole file before changing the
+// environment. JANUS_BIND belongs exclusively to the stored exposure mode.
 func loadEnvFile(path string) error {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -197,31 +198,22 @@ func loadEnvFile(path string) error {
 	if err != nil {
 		return err
 	}
-	for n, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, val, ok := strings.Cut(line, "=")
-		if !ok {
-			return fmt.Errorf("%s line %d: not KEY=value", path, n+1)
-		}
-		key = strings.TrimPrefix(key, "export ")
-		if key == "" || strings.ContainsAny(key, " \t") {
-			return fmt.Errorf("%s line %d: bad key %q", path, n+1, key)
-		}
-		if key == bindEnvKey {
-			return fmt.Errorf("%s line %d: %s is the exposure mode's; 'janus mode <scope>' sets it", path, n+1, bindEnvKey)
-		}
-		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
-			val = val[1 : len(val)-1]
-		} else if i := strings.Index(val, " #"); i >= 0 {
-			val = strings.TrimRight(val[:i], " \t")
-		}
-		if err := os.Setenv(key, val); err != nil {
-			return err
+	values, err := parseEnvFile(strings.NewReader(string(b)))
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if _, exists := values[bindEnvKey]; exists {
+		return fmt.Errorf("%s: %s is the exposure mode's; 'janus mode <scope>' sets it", path, bindEnvKey)
+	}
+	for key, val := range values {
+		if _, exists := os.LookupEnv(key); !exists {
+			if err := os.Setenv(key, val); err != nil {
+				return err
+			}
 		}
 	}
+	caddy.ConfigAutosavePath = filepath.Join(caddy.AppConfigDir(), "autosave.json")
+	caddy.DefaultStorage = &certmagic.FileStorage{Path: caddy.AppDataDir()}
 	return nil
 }
 

@@ -251,13 +251,7 @@ func applyToEdge(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths,
 		return nil
 	}
 	if runningPID(p) > 0 || controlReachable(p) {
-		if err := loadEnvFile(p.env); err != nil {
-			return err
-		}
-		_ = os.Setenv(bindEnvKey, strings.Join(bind, " "))
-		_ = caddyReload.Flags().Set("config", p.config)
-		_ = caddyReload.Flags().Set("adapter", "caddyfile")
-		if err := caddyReload.RunE(caddyReload, nil); err != nil {
+		if err := reloadEdge(caddyReload, p); err != nil {
 			return fmt.Errorf("reload: %w (the edge keeps its previous bind; its watch stops it if that is wider than the mode)", err)
 		}
 		fmt.Fprintln(out, "edge reloaded on the new bind")

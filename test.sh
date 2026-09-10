@@ -354,6 +354,23 @@ json_has() {
 	fi
 }
 
+case_config_environment() {
+	local dir="$TEST_RUN_DIR/env" out
+	mkdir -p "$dir"
+	printf 'http://example.test:8098 {\n respond "{$JANUS_TEST_ENV}"\n}\n' >"$dir/Caddyfile"
+	printf 'JANUS_TEST_ENV="file\nvalue"\n' >"$dir/env"
+	out="$(JANUS_TEST_ENV=shell "$CADDY_BIN" adapt --config "$dir/Caddyfile" --envfile "$dir/env" 2>/dev/null)"
+	[[ "$out" == *'"body":"shell"'* ]] || return 1
+	printf 'JANUS_BIND=0.0.0.0\n' >>"$dir/env"
+	for verb in run adapt validate reload; do
+		if "$CADDY_BIN" "$verb" --config "$dir/Caddyfile" --envfile "$dir/env" >"$dir/rejected" 2>&1; then
+			echo "$verb accepted reserved JANUS_BIND" >&2
+			return 1
+		fi
+		[[ "$(cat "$dir/rejected")" == *'janus mode'* ]] || return 1
+	done
+}
+
 case_control_local_root() {
 	local body
 	body="$(http_body http://127.0.0.1:7600/1.0)"
@@ -3879,6 +3896,7 @@ test "TLS verify trusted (no -k)" case_ping_tls_trusted
 
 group "control"
 test "local GET /1.0 → janus meta" case_control_local_root
+test "config commands share environment precedence and reserved bind" case_config_environment
 test "local GET /1.0/health → ok" case_control_local_health
 test "unix GET /1.0 → janus meta" case_control_unix_root
 test "unix GET /1.0/health → ok" case_control_unix_health

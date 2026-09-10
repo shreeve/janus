@@ -216,12 +216,6 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 // reloadEdge applies the service Caddyfile to the running edge, the way
 // 'janus reload' does; a variable so tests need no admin socket.
 var reloadEdge = func(caddyReload *cobra.Command, p servicePaths) error {
-	if err := loadEnvFile(p.env); err != nil {
-		return err
-	}
-	if _, err := setBindEnv(p); err != nil {
-		return err
-	}
 	_ = caddyReload.Flags().Set("config", p.config)
 	_ = caddyReload.Flags().Set("adapter", "caddyfile")
 	return caddyReload.RunE(caddyReload, nil)

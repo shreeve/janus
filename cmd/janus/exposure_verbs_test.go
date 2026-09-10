@@ -68,6 +68,7 @@ func TestValidateLoadsScopeAndEnv(t *testing.T) {
 	p := isolatedHome(t)
 	seedAt(t, p)
 	t.Setenv("JT_SITE_PORT", "")
+	os.Unsetenv("JT_SITE_PORT")
 	if err := os.WriteFile(p.env, []byte("JT_SITE_PORT=8098\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

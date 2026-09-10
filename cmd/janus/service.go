@@ -380,8 +380,7 @@ default when it exists, and the service env file is loaded beside it.
 				setConfig(cmd, p.config)
 			}
 		}
-		setEnvfile(cmd, p)
-		st, err := setBindEnv(p)
+		st, err := prepareConfigEnvironment(cmd, p)
 		if err != nil {
 			return err
 		}
@@ -404,12 +403,13 @@ default when it exists, and the service env file is loaded beside it.
 	// adapt reads the Caddyfile too: the bind must be in its environment,
 	// or {$JANUS_BIND} adapts to Caddy's own default, the wildcard.
 	wrap(caddyAdapt, func(orig runFunc, cmd *cobra.Command, args []string) error {
-		if _, err := setBindEnv(p); err != nil {
+		if _, err := prepareConfigEnvironment(cmd, p); err != nil {
 			return err
 		}
 		return orig(cmd, args)
 	})
 	hiddenScopeFlags(caddyReload)
+	caddyReload.Flags().StringSlice("envfile", nil, "Environment file(s) to load")
 	for _, c := range []*cobra.Command{caddyReload, caddyValidate} {
 		c.Use = strings.Replace(c.Use, "--config <path>", "[--config <path>]", 1)
 		c.Long = janusify(c.Long) + serviceDefault
@@ -425,14 +425,7 @@ default when it exists, and the service env file is loaded beside it.
 			if !cmd.Flags().Changed("config") && fileExists(p.config) {
 				setConfig(cmd, p.config)
 			}
-			// The Caddyfile is adapted here, in this process: the service
-			// env file and the mode's bind must be in the environment.
-			if cfg, _ := cmd.Flags().GetString("config"); cfg == p.config {
-				if err := loadEnvFile(p.env); err != nil {
-					return err
-				}
-			}
-			if _, err := setBindEnv(p); err != nil {
+			if _, err := prepareConfigEnvironment(cmd, p); err != nil {
 				return err
 			}
 			return orig(cmd, args)
@@ -610,6 +603,27 @@ func setEnvfile(cmd *cobra.Command, p servicePaths) {
 	if cfg, _ := cmd.Flags().GetString("config"); cfg == p.config {
 		_ = cmd.Flags().Set("envfile", p.env)
 	}
+}
+
+// Every in-process adaptation loads the same environment before deriving the
+// reserved bind. Explicit envfiles replace the optional service default.
+func prepareConfigEnvironment(cmd *cobra.Command, p servicePaths) (scopeState, error) {
+	setEnvfile(cmd, p)
+	if cmd.Flags().Lookup("envfile") != nil {
+		paths, err := cmd.Flags().GetStringSlice("envfile")
+		if err != nil {
+			return scopeState{}, err
+		}
+		for _, path := range paths {
+			if _, err := os.Stat(path); err != nil {
+				return scopeState{}, err
+			}
+			if err := loadEnvFile(path); err != nil {
+				return scopeState{}, err
+			}
+		}
+	}
+	return setBindEnv(p)
 }
 
 // targetsService reports whether a stop or reload is aimed at the service

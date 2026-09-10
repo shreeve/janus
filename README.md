@@ -340,8 +340,13 @@ config never becomes a restart loop, and refuses a state directory deep
 enough to push the socket paths past the unix limit. A tool that owns a
 site writes one `*.caddy` file into the sites directory and runs `janus
 reload`; the Caddyfile itself stays the operator's. `KEY=value` lines in
-the env file reach the edge at start (the Route 53 provider's `AWS_*`
-credentials, say, or anything a `{env.*}` placeholder reads).
+the env file are loaded by `run`, `adapt`, `validate`, and `reload` when
+they use the service config. Explicit `--envfile` paths replace that default.
+Caddy's syntax applies, including quoted multiline values. Existing process
+environment values win, even if empty; with multiple files the first value
+loaded wins. `JANUS_BIND` is reserved for the stored mode and is rejected in
+every env file. A reload changes configuration placeholders; changes needed
+by the running process itself require a restart.
 
 `start`, `stop`, `reload`, and `validate` default to the service Caddyfile
 when it exists; `run` does too when the current directory has no Caddyfile
