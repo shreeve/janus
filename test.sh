@@ -372,6 +372,14 @@ case_config_environment() {
 	done
 }
 
+case_control_duplicate_json() {
+	capi POST /1.0/apps '{"name":"first","name":"second","hosts":["duplicate.ripdev.io"]}'
+	eq "$REPLY_CODE" "400"
+	json_has "$REPLY_BODY" 'appears twice'
+	capi POST /1.0/apps '{"name":"nested","hosts":["duplicate.ripdev.io"],"files":{"roots":[{"path":"/one","path":"/two"}]}}'
+	eq "$REPLY_CODE" "400"
+	json_has "$REPLY_BODY" 'appears twice'
+}
 
 case_control_local_root() {
 	local body
@@ -3921,6 +3929,7 @@ test "local GET /1.0/health → ok" case_control_local_health
 test "unix GET /1.0 → janus meta" case_control_unix_root
 test "unix GET /1.0/health → ok" case_control_unix_health
 test "unknown /1.0 paths → 404, wrong method → 405" case_control_unknown_paths_404
+test "control JSON rejects repeated fields at every depth" case_control_duplicate_json
 test "reload → both listeners serve one live registry" case_reload_no_split_brain
 test "changed TTL reload is rejected and reports the running value" case_reload_ttl_rejected
 test "aborted reload → later reloads still work" case_reload_abort_recovery

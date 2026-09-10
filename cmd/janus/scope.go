@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/certmagic"
+	"github.com/shreeve/janus/internal/strictjson"
 )
 
 // bindEnvKey is the environment variable the service Caddyfile binds through.
@@ -124,35 +124,10 @@ func readScope(p servicePaths) (scopeState, error) {
 // decodeOneObject decodes exactly one JSON object with no unknown fields,
 // no repeated keys, and nothing after it.
 func decodeOneObject(b []byte, v any) error {
-	dec := json.NewDecoder(strings.NewReader(string(b)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return errors.New("more than one JSON value")
-	}
-	keys := json.NewDecoder(strings.NewReader(string(b)))
-	if tok, err := keys.Token(); err != nil || tok != json.Delim('{') {
+	if !strings.HasPrefix(strings.TrimSpace(string(b)), "{") {
 		return errors.New("not a JSON object")
 	}
-	seen := map[string]bool{}
-	for keys.More() {
-		tok, err := keys.Token()
-		if err != nil {
-			return err
-		}
-		key, _ := tok.(string)
-		if seen[key] {
-			return fmt.Errorf("key %q appears twice", key)
-		}
-		seen[key] = true
-		var skip json.RawMessage
-		if err := keys.Decode(&skip); err != nil {
-			return err
-		}
-	}
-	return nil
+	return strictjson.Decode(b, v)
 }
 
 // writeScope stores the state, validated first, by writing beside the file

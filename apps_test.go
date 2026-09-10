@@ -531,3 +531,20 @@ func asAPIError(err error, target **apiError) bool {
 	}
 	return ok
 }
+
+func TestControlJSONRejectsDuplicateKeysBeforeMutation(t *testing.T) {
+	for _, body := range []string{
+		`{"name":"first","name":"second","hosts":["example.test"]}`,
+		`{"name":"first","na\u006de":"second","hosts":["example.test"]}`,
+		`{"name":"app","hosts":["example.test"],"files":{"roots":[{"path":"/one","path":"/two"}]}}`,
+	} {
+		var req appCreateRequest
+		r := httptest.NewRequest("POST", "/1.0/apps", strings.NewReader(body))
+		if err := decodeJSON(httptest.NewRecorder(), r, &req); err == nil || !strings.Contains(err.Error(), "appears twice") {
+			t.Errorf("duplicate accepted: %s (%v)", body, err)
+		}
+		if req.Name != "" {
+			t.Fatal("rejected document partially decoded")
+		}
+	}
+}
