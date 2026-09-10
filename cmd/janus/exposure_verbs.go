@@ -212,7 +212,7 @@ func setScope(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, pr
 	if next.Scope == ScopeWAN {
 		fmt.Fprintln(out, "wildcard exposure active: the edge answers on every interface")
 	}
-	return applyToEdge(cmd, caddyReload, p, bind)
+	return applyToEdge(cmd, caddyReload, p)
 }
 
 func ifaceSuffix(st scopeState) string {
@@ -244,7 +244,7 @@ func checkFirewallVerdict(st scopeState) firewallVerdict {
 // applyToEdge puts a running edge on the new bind with a reload, or starts
 // an installed edge that is not running; a bare stopped edge is told what
 // applies it.
-func applyToEdge(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, bind []string) error {
+func applyToEdge(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths) error {
 	out := cmd.OutOrStdout()
 	if !fileExists(p.config) {
 		fmt.Fprintf(out, "no Caddyfile at %s yet; 'janus autostart' seeds one on this scope\n", p.config)

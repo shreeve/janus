@@ -384,7 +384,7 @@ default when it exists, and the service env file is loaded beside it.
 		if err != nil {
 			return err
 		}
-		if cfg, _ := cmd.Flags().GetString("config"); cfg == p.config {
+		if usesServiceConfig(cmd, p) {
 			// The service edge: the mode must be enforceable here, the
 			// host rule it needs must be in place before a wildcard
 			// socket opens, nothing else may already answer on its
@@ -427,6 +427,13 @@ default when it exists, and the service env file is loaded beside it.
 			}
 			if _, err := prepareConfigEnvironment(cmd, p); err != nil {
 				return err
+			}
+			if cmd.Name() == "reload" {
+				config, _ := cmd.Flags().GetString("config")
+				adapter, _ := cmd.Flags().GetString("adapter")
+				address, _ := cmd.Flags().GetString("address")
+				force, _ := cmd.Flags().GetBool("force")
+				return reloadConfig(config, adapter, address, force)
 			}
 			return orig(cmd, args)
 		})
@@ -600,7 +607,7 @@ func setEnvfile(cmd *cobra.Command, p servicePaths) {
 	if f == nil || f.Changed || !fileExists(p.env) {
 		return
 	}
-	if cfg, _ := cmd.Flags().GetString("config"); cfg == p.config {
+	if usesServiceConfig(cmd, p) {
 		_ = cmd.Flags().Set("envfile", p.env)
 	}
 }
@@ -608,6 +615,11 @@ func setEnvfile(cmd *cobra.Command, p servicePaths) {
 // Every in-process adaptation loads the same environment before deriving the
 // reserved bind. Explicit envfiles replace the optional service default.
 func prepareConfigEnvironment(cmd *cobra.Command, p servicePaths) (scopeState, error) {
+	if usesServiceConfig(cmd, p) {
+		if f := cmd.Flags().Lookup("adapter"); f != nil && !f.Changed {
+			_ = cmd.Flags().Set("adapter", "caddyfile")
+		}
+	}
 	setEnvfile(cmd, p)
 	if cmd.Flags().Lookup("envfile") != nil {
 		paths, err := cmd.Flags().GetStringSlice("envfile")
@@ -627,9 +639,9 @@ func prepareConfigEnvironment(cmd *cobra.Command, p servicePaths) (scopeState, e
 }
 
 // targetsService reports whether a stop or reload is aimed at the service
-// edge: no --config and no --address, which would name another one.
+// edge: no explicit address, and an absent or equivalent service config.
 func targetsService(cmd *cobra.Command) bool {
-	return !cmd.Flags().Changed("config") && !cmd.Flags().Changed("address")
+	return !cmd.Flags().Changed("address") && (!cmd.Flags().Changed("config") || usesServiceConfig(cmd, currentPaths()))
 }
 
 func fileExists(path string) bool {
@@ -992,6 +1004,11 @@ var validateConfig = func(path string) error {
 
 // validateInProcess is what 'janus validate' does, without the process.
 func validateInProcess(path string) error {
+	if sameConfigPath(path, currentPaths().config) {
+		if err := loadEnvFile(currentPaths().env); err != nil {
+			return err
+		}
+	}
 	if _, err := setBindEnv(currentPaths()); err != nil {
 		return err
 	}

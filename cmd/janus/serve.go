@@ -231,10 +231,14 @@ func heartbeatPeriod(ttl string) (time.Duration, error) {
 
 // reloadEdge applies the service Caddyfile to the running edge, the way
 // 'janus reload' does; a variable so tests need no admin socket.
-var reloadEdge = func(caddyReload *cobra.Command, p servicePaths) error {
-	_ = caddyReload.Flags().Set("config", p.config)
-	_ = caddyReload.Flags().Set("adapter", "caddyfile")
-	return caddyReload.RunE(caddyReload, nil)
+var reloadEdge = func(_ *cobra.Command, p servicePaths) error {
+	if err := loadEnvFile(p.env); err != nil {
+		return err
+	}
+	if _, err := setBindEnv(p); err != nil {
+		return err
+	}
+	return reloadConfig(p.config, "caddyfile", "", false)
 }
 
 // serveHandshake asks the edge for the served name over TLS on the
