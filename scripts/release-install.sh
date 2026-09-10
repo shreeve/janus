@@ -11,6 +11,9 @@
 # the destination is not writable.
 
 set -euo pipefail
+# Source builds pass an absolute binary path; extracted releases use the
+# adjacent binary. Both paths use the same atomic replacement below.
+SOURCE=${1:-}
 cd "$(dirname "$0")"
 
 # Color only when stdout is a terminal, and never against NO_COLOR.
@@ -25,13 +28,14 @@ info() { printf "${Dim}%s${Color_Off}\n" "$*"; }
 fail() { printf "${Red}error${Color_Off}: %s\n" "$*" >&2; exit 2; }
 tildify() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 
-[[ -f janus && -x janus ]] || fail "janus is missing or not executable"
+SOURCE=${SOURCE:-"$(pwd -P)/janus"}
+[[ -f "$SOURCE" && -x "$SOURCE" ]] || fail "janus is missing or not executable: $SOURCE"
+SOURCE="$(cd "$(dirname "$SOURCE")" && pwd -P)/$(basename "$SOURCE")"
 
 # System-wide for root (a deploy's systemd unit and setcap keep their path),
 # user-owned for everyone else — the XDG home for user executables.
 if [[ "$(id -u)" == 0 ]]; then BIN=${BIN:-/usr/local/bin}
 else BIN=${BIN:-$HOME/.local/bin}; fi
-SOURCE="$(pwd -P)/janus"
 
 as_owner() {
   if [[ -w "$(dirname "$1")" || -w "$1" ]]; then
@@ -88,17 +92,20 @@ cleanup_stage() {
 trap cleanup_stage EXIT
 trap 'exit 1' HUP INT TERM
 run_as_owner install -m 0755 "$SOURCE" "$STAGE"
+# Preserve the ability to bind before committing the replacement. A failed
+# capability update must leave the working binary at its original path.
+if [[ "$HAD_CAPS" == *cap_net_bind_service* ]]; then
+  info "preserving cap_net_bind_service on the replacement"
+  if [[ "$(id -u)" == 0 ]]; then setcap cap_net_bind_service=+ep "$STAGE"
+  else sudo setcap cap_net_bind_service=+ep "$STAGE"; fi
+fi
 run_as_owner mv -f "$STAGE" "$DEST"
 STAGE=""
 trap - EXIT HUP INT TERM
 
 hint_caps=false
 if [[ "$(uname -s)" == Linux ]]; then
-  if [[ "$HAD_CAPS" == *cap_net_bind_service* ]]; then
-    info "restoring cap_net_bind_service (upgrades drop it with the old inode)"
-    if [[ "$(id -u)" == 0 ]]; then setcap cap_net_bind_service=+ep "$DEST"
-    else sudo setcap cap_net_bind_service=+ep "$DEST"; fi
-  elif [[ "$(getcap "$DEST" 2>/dev/null || true)" != *cap_net_bind_service* ]]; then
+  if [[ "$(getcap "$DEST" 2>/dev/null || true)" != *cap_net_bind_service* ]]; then
     hint_caps=true
   fi
 fi
