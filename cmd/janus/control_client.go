@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -114,4 +115,25 @@ func probeControl(p servicePaths) (int, string) {
 		return 0, ""
 	}
 	return len(apps), at
+}
+
+// localControlURL is the `control local` default, tried after the socket
+// for an edge whose Caddyfile opens it. A variable so tests can point it
+// at a port nothing answers on.
+var localControlURL = "http://127.0.0.1:7600"
+
+// probeControl asks the edge's control plane for its apps: over the
+// service's unix socket first (its path is this edge's alone), then over
+// loopback HTTP, accepted only when the edge that answers says it also
+// listens on that socket — any Janus with 'control local' answers on the
+// port, and another one must not pass as this edge. Returns the count and
+// the endpoint that answered, or "" when neither did.
+func controlReachable(p servicePaths) bool {
+	_, at := probeControl(p)
+	return at != ""
+}
+
+func socketExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode()&os.ModeSocket != 0
 }
