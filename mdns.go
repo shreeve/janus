@@ -3,6 +3,7 @@ package janus
 import (
 	"context"
 	_ "embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -1054,7 +1055,13 @@ func mdnsListenHostAddrs(h string) []string {
 // --- the front door -------------------------------------------------------------
 
 //go:embed mdns.html
-var mdnsPageHTML []byte
+var mdnsPageTemplate string
+
+//go:embed docs/janus-circle.png
+var mdnsIconPNG []byte
+
+// Inline the bundled icon once so the LAN status page stays self-contained.
+var mdnsPageHTML = []byte(strings.Replace(mdnsPageTemplate, "{{JANUS_ICON}}", base64.StdEncoding.EncodeToString(mdnsIconPNG), 1))
 
 // mdnsRoutes is the front door's route set, identical in both modes:
 // exactly two read-only routes. Unknown path → 404, known path with

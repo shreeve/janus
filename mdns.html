@@ -60,10 +60,8 @@
   .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
   .logo {
     width: 48px; height: 48px; border-radius: 999px; flex: none;
-    background: var(--panel-solid); box-shadow: var(--shadow); border: 1px solid var(--inner-line);
-    display: flex; align-items: center; justify-content: center;
+    display: block; object-fit: contain; box-shadow: var(--shadow);
   }
-  .logo svg { width: 30px; height: 30px; }
   .brand h1 { margin: 0; font-size: 22px; font-weight: 700; }
   .brand p { margin: 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
   .live { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); white-space: nowrap; }
@@ -184,13 +182,7 @@
   <div class="bar">
     <div class="inner">
       <div class="brand">
-        <div class="logo" aria-hidden="true">
-          <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-            <path d="M24 10 L10 32 L24 54" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M40 10 L54 32 L40 54" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M32 18 V38 a6 6 0 0 1 -12 0" fill="none" stroke="#bb0000" stroke-width="5" stroke-linecap="round"/>
-          </svg>
-        </div>
+        <img class="logo" src="data:image/png;base64,{{JANUS_ICON}}" alt="" width="48" height="48">
         <div>
           <h1>Janus</h1>
           <p id="hdr-sub">connecting…</p>
