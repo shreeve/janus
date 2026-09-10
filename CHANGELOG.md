@@ -4,6 +4,15 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.14.1 — 2026-09-10
+
+- The exposure watch lists `/dev/fd` by name. Reading that directory as
+  entries stats each one, and on macOS the stat of an entry backed by a
+  kqueue — the Go runtime always holds one for its network poller —
+  answers EBADF, so the first pass could not read the edge's own sockets
+  and the edge refused to serve. The walk wants only the descriptor
+  numbers, which the names carry.
+
 ## 1.14.0 — 2026-09-07
 
 - In `wan` the local name families are off. Every janus site, the mdns
