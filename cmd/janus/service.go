@@ -997,6 +997,7 @@ func validateInProcess(path string) error {
 // writes its root certificate, PEM, to path.
 func exportRootCA(cmd *cobra.Command, address, path string) error {
 	client, base := adminClient(address)
+	defer client.CloseIdleConnections()
 	resp, err := client.Get(base + "/pki/ca/local")
 	if err != nil {
 		return fmt.Errorf("admin API: %w (is the edge running?)", err)
@@ -1173,26 +1174,15 @@ func gatherCA(st *edgeStatus) {
 // trustURL is where a phone trusts the CA: the mdns front door, by its
 // effective name, when the edge announces one.
 func trustURL(p servicePaths) string {
-	if !socketExists(p.sock) {
-		return ""
-	}
-	client := controlClient(func(ctx context.Context, _, _ string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", p.sock)
-	})
-	resp, err := client.Get("http://janus/1.0/mdns/status")
+	body, _, err := controlGet(p, "/1.0/mdns/status")
 	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
 		return ""
 	}
 	var snap struct {
 		Name          string `json:"name"`
 		EffectiveName string `json:"effective_name"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+	if json.Unmarshal(body, &snap) != nil {
 		return ""
 	}
 	name := snap.EffectiveName
@@ -1321,25 +1311,6 @@ func plural(n int) string {
 // listens on that socket — any Janus with 'control local' answers on the
 // port, and another one must not pass as this edge. Returns the count and
 // the endpoint that answered, or "" when neither did.
-func probeControl(p servicePaths) (int, string) {
-	if socketExists(p.sock) {
-		dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", p.sock)
-		}
-		if n, ok := fetchApps("http://janus/1.0/apps", dial); ok {
-			return n, "unix " + p.sock
-		}
-	}
-	if !controlListensOn(localControlURL+"/1.0", p.sock) {
-		return 0, ""
-	}
-	if n, ok := fetchApps(localControlURL+"/1.0/apps", nil); ok {
-		return n, localControlURL
-	}
-	return 0, ""
-}
-
 func controlReachable(p servicePaths) bool {
 	_, at := probeControl(p)
 	return at != ""
@@ -1348,59 +1319,6 @@ func controlReachable(p servicePaths) bool {
 func socketExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Mode()&os.ModeSocket != 0
-}
-
-func controlClient(dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
-	tr := &http.Transport{}
-	if dial != nil {
-		tr.DialContext = dial
-	}
-	return &http.Client{Transport: tr, Timeout: 1500 * time.Millisecond}
-}
-
-func fetchApps(url string, dial func(context.Context, string, string) (net.Conn, error)) (int, bool) {
-	resp, err := controlClient(dial).Get(url)
-	if err != nil {
-		return 0, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, false
-	}
-	var apps []json.RawMessage
-	if err := json.NewDecoder(resp.Body).Decode(&apps); err != nil {
-		return 0, false
-	}
-	return len(apps), true
-}
-
-// controlListensOn asks the control root at url whether that edge also
-// listens on the unix socket path: the identity check for loopback.
-func controlListensOn(url, sock string) bool {
-	resp, err := controlClient(nil).Get(url)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-	var root struct {
-		Type    string `json:"type"`
-		Control []struct {
-			Mode   string `json:"mode"`
-			Listen string `json:"listen"`
-		} `json:"control"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&root); err != nil || root.Type != "janus" {
-		return false
-	}
-	for _, c := range root.Control {
-		if c.Mode == "internal" && c.Listen == sock {
-			return true
-		}
-	}
-	return false
 }
 
 // elapsed reports how long the process has been up, as ps prints it.

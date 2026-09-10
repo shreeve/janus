@@ -8,7 +8,6 @@ package main
 // is exactly what 'janus mode' says, and nothing else starts.
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -124,12 +123,13 @@ func serveName(base string) string {
 
 func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, dir, name string) error {
 	out := cmd.OutOrStdout()
-	root, _, err := controlGet(p, "/1.0")
+	client, root, err := openEdgeControl(p)
 	if err != nil {
 		cmd.SilenceErrors = true
 		fmt.Fprintf(cmd.ErrOrStderr(), "janus is not running: no control plane answered at %s or %s\n", p.sock, localControlURL)
 		return &exitError{code: 3, err: err}
 	}
+	defer client.Close()
 	var caps struct {
 		Browse bool `json:"browse"`
 	}
@@ -155,7 +155,7 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 		"files":     map[string]any{"roots": []map[string]any{{"path": dir, "cache": "revalidate", "browse": true}}},
 		"lease":     "heartbeat",
 	})
-	created, status, err := controlPost(p, "/1.0/apps", body)
+	created, status, err := client.Do(http.MethodPost, "/1.0/apps", body)
 	if err != nil {
 		return err
 	}
@@ -172,7 +172,7 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 		return fmt.Errorf("the edge's answer has no id: %s", created)
 	}
 	defer func() {
-		_, _, _ = controlDo(p, http.MethodDelete, "/1.0/apps/"+reg.ID, nil)
+		_, _, _ = client.Do(http.MethodDelete, "/1.0/apps/"+reg.ID, nil)
 		fmt.Fprintf(out, "closed %s\n", dir)
 	}()
 
@@ -206,7 +206,7 @@ func serveDir(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, di
 		case <-serveStop:
 			return nil
 		case <-tick.C:
-			if _, status, err := controlDo(p, http.MethodPost, "/1.0/apps/"+reg.ID+"/heartbeat", nil); err != nil || status/100 != 2 {
+			if _, status, err := client.Do(http.MethodPost, "/1.0/apps/"+reg.ID+"/heartbeat", nil); err != nil || status/100 != 2 {
 				return fmt.Errorf("the edge stopped answering heartbeats (%d, %v); the registration is gone", status, err)
 			}
 		}
@@ -237,43 +237,4 @@ var serveHandshake = func(host string) string {
 	}
 	conn.Close()
 	return ""
-}
-
-// controlPost and controlDo send to this edge's control API the way
-// controlGet reads it, returning the body and status.
-func controlPost(p servicePaths, path string, body []byte) ([]byte, int, error) {
-	return controlDo(p, http.MethodPost, path, body)
-}
-
-func controlDo(p servicePaths, method, path string, body []byte) ([]byte, int, error) {
-	try := func(client *http.Client, url string) ([]byte, int, error) {
-		req, err := http.NewRequest(method, url, bytes.NewReader(body))
-		if err != nil {
-			return nil, 0, err
-		}
-		if body != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, 0, err
-		}
-		defer resp.Body.Close()
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(resp.Body)
-		return buf.Bytes(), resp.StatusCode, nil
-	}
-	if socketExists(p.sock) {
-		dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", p.sock)
-		}
-		if b, status, err := try(controlClient(dial), "http://janus"+path); err == nil {
-			return b, status, nil
-		}
-	}
-	if !controlListensOn(localControlURL+"/1.0", p.sock) {
-		return nil, 0, errors.New("no control plane answered")
-	}
-	return try(controlClient(nil), localControlURL+path)
 }

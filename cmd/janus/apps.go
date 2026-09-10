@@ -4,13 +4,8 @@ package main
 // API keeps, read the way status counts it, printed one app per line.
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"strings"
 	"text/tabwriter"
 
@@ -114,40 +109,4 @@ func (a registeredApp) serves() string {
 		return "nothing yet"
 	}
 	return strings.Join(parts, ", ")
-}
-
-// controlGet reads a control API path from this edge: over its unix
-// socket, else over loopback when the edge there proves it is this one
-// (its control list names the socket). Returns the body and where it
-// answered.
-func controlGet(p servicePaths, path string) ([]byte, string, error) {
-	if socketExists(p.sock) {
-		dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", p.sock)
-		}
-		if body, err := controlBody(controlClient(dial), "http://janus"+path); err == nil {
-			return body, "unix " + p.sock, nil
-		}
-	}
-	if !controlListensOn(localControlURL+"/1.0", p.sock) {
-		return nil, "", errors.New("no control plane answered")
-	}
-	body, err := controlBody(controlClient(nil), localControlURL+path)
-	if err != nil {
-		return nil, "", err
-	}
-	return body, localControlURL, nil
-}
-
-func controlBody(client *http.Client, url string) ([]byte, error) {
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: %s", url, resp.Status)
-	}
-	return io.ReadAll(resp.Body)
 }
