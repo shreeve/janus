@@ -289,7 +289,11 @@ hubtwenty.ripdev.io {
 # plus /one/; login doors /auth and /one/auth.
 authwall.ripdev.io {
 	import ripdev_tls
-	janus
+	# Nested host matchers intersect the exact site's admission.
+	@nested host *.ripdev.io
+	handle @nested {
+		janus
+	}
 }
 
 # Auth: site auth { … } replaces global (carol only, gate /, ttl 30m).

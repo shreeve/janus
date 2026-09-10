@@ -209,99 +209,24 @@ func (a *App) buildBrowseSiteTable() error {
 }
 
 func collectBrowseRoutes(routes caddyhttp.RouteList, inherited [][]string, entries *[]browseSiteEntry) error {
-	for _, route := range routes {
-		alternatives, err := intersectBrowseHostAlternatives(inherited, route.MatcherSets)
-		if err != nil {
-			return err
+	return walkHostRoutes(routes, inherited, func(handler caddyhttp.MiddlewareHandler, alternatives [][]string) error {
+		value, ok := handler.(*Handler)
+		if !ok {
+			return nil
 		}
-		for _, handler := range route.Handlers {
-			switch value := handler.(type) {
-			case *Handler:
-				var hosts []string
-				if len(value.coldRoots) > 0 {
-					hosts, err = exactBrowseHosts(alternatives)
-					if err != nil {
-						return err
-					}
-				} else if len(alternatives) > 0 {
-					hosts = append([]string(nil), alternatives[0]...)
-				}
-				*entries = append(*entries, browseSiteEntry{
-					hosts: hosts, enabled: value.browseEnabled, handler: value,
-				})
-			case *caddyhttp.Subroute:
-				if err := collectBrowseRoutes(value.Routes, alternatives, entries); err != nil {
-					return err
-				}
+		hosts := routeHostUnion(alternatives)
+		if len(value.coldRoots) > 0 {
+			var err error
+			hosts, err = exactBrowseHosts(alternatives)
+			if err != nil {
+				return err
 			}
+		} else if hosts != nil && len(hosts) == 0 {
+			return nil
 		}
-	}
-	return nil
-}
-
-func intersectBrowseHostAlternatives(inherited [][]string, sets caddyhttp.MatcherSets) ([][]string, error) {
-	if len(sets) == 0 {
-		return inherited, nil
-	}
-	var local [][]string
-	for _, set := range sets {
-		var current []string
-		found := false
-		for _, matcher := range set {
-			var hosts []string
-			switch value := matcher.(type) {
-			case *caddyhttp.MatchHost:
-				hosts = append(hosts, (*value)...)
-			case caddyhttp.MatchHost:
-				hosts = append(hosts, value...)
-			default:
-				continue
-			}
-			if !found {
-				current = hosts
-				found = true
-			} else {
-				current = intersectStrings(current, hosts)
-			}
-		}
-		if found {
-			local = append(local, current)
-		} else {
-			local = append(local, nil)
-		}
-	}
-	if len(inherited) == 0 {
-		return local, nil
-	}
-	var out [][]string
-	for _, parent := range inherited {
-		for _, child := range local {
-			switch {
-			case len(parent) == 0:
-				out = append(out, append([]string(nil), child...))
-			case len(child) == 0:
-				out = append(out, append([]string(nil), parent...))
-			default:
-				out = append(out, intersectStrings(parent, child))
-			}
-		}
-	}
-	return out, nil
-}
-
-func intersectStrings(a, b []string) []string {
-	set := map[string]bool{}
-	for _, value := range a {
-		set[strings.ToLower(value)] = true
-	}
-	var out []string
-	for _, value := range b {
-		value = strings.ToLower(value)
-		if set[value] {
-			out = append(out, value)
-		}
-	}
-	return out
+		*entries = append(*entries, browseSiteEntry{hosts: hosts, enabled: value.browseEnabled, handler: value})
+		return nil
+	})
 }
 
 func exactBrowseHosts(alternatives [][]string) ([]string, error) {
