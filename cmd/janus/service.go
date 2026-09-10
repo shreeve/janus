@@ -95,6 +95,9 @@ nothing is running this is a quiet no-op.
 `
 	caddyStop.Flags().StringSlice("envfile", nil, "Environment file(s) to load")
 	wrap(caddyStop, func(orig runFunc, cmd *cobra.Command, args []string) error {
+		if cmd.Flags().Changed("address") {
+			return orig(cmd, args)
+		}
 		if targetsService(cmd) && runningPID(p) == 0 && !controlReachable(p) {
 			fmt.Fprintln(cmd.OutOrStdout(), "janus was not running")
 			return nil

@@ -187,7 +187,9 @@ func serviceCARoot(p servicePaths) string {
 	env := map[string]string{"HOME": p.home}
 	if !p.root && p.home == os.Getenv("HOME") {
 		for _, key := range []string{"XDG_DATA_HOME", "AppData"} {
-			env[key] = os.Getenv(key)
+			if value, set := os.LookupEnv(key); set {
+				env[key] = value
+			}
 		}
 	}
 	if body, err := os.ReadFile(p.env); err == nil {
@@ -196,7 +198,9 @@ func serviceCARoot(p servicePaths) string {
 			return ""
 		}
 		for key, value := range values {
-			env[key] = value
+			if _, set := env[key]; !set {
+				env[key] = value
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return ""

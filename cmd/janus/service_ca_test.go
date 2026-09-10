@@ -27,7 +27,8 @@ func TestStatusUsesServiceStorageEnvironment(t *testing.T) {
 	if err := os.WriteFile(p.env, []byte("XDG_DATA_HOME="+data+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", "")
+	os.Unsetenv("XDG_DATA_HOME")
 	caller := os.Getenv("XDG_DATA_HOME")
 	st := gatherStatus(p)
 	if st.CA != path || st.CATrusted == nil {
