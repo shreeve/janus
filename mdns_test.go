@@ -1334,9 +1334,11 @@ func newTestSharedMdnsApp(t *testing.T) *App {
 // TestMdnsSharedDecider pins the janus site handler as the shared-mode
 // decider on the plain-HTTP port: the door's own Hosts get the front
 // door exactly as the dedicated listener serves it (page, /status.json,
-// 404/405 discipline); everything else, app hosts included, passes
-// through to the next handler on the same server (the auto-HTTPS
-// redirects) — never 421.
+// 404/405 discipline); everything else, app hosts included, gets the
+// redirect to HTTPS from the handler itself — never 421, and never
+// deferred to next. The Caddyfile adapter emits every site block as a
+// terminal route, and Caddy hands a terminal route an empty next, so a
+// decider that deferred would answer an empty 200 instead.
 func TestMdnsSharedDecider(t *testing.T) {
 	app := newTestSharedMdnsApp(t)
 	h := &Handler{app: app, dp: app.dp, logger: zap.NewNop()}
@@ -1346,9 +1348,10 @@ func TestMdnsSharedDecider(t *testing.T) {
 		req = req.WithContext(context.WithValue(req.Context(),
 			http.LocalAddrContextKey, &net.TCPAddr{IP: net.IPv4zero, Port: port}))
 		nextCalled := false
+		// The terminal route's next: writes nothing, so anything the
+		// decider leaves to it surfaces as a bare 200.
 		next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
 			nextCalled = true
-			w.WriteHeader(http.StatusTeapot) // a marker no janus path emits
 			return nil
 		})
 		rr := httptest.NewRecorder()
@@ -1382,20 +1385,43 @@ func TestMdnsSharedDecider(t *testing.T) {
 		if rr.Code != tc.want {
 			t.Errorf("%s %s (Host %s) = %d, want %d", tc.method, tc.path, tc.host, rr.Code, tc.want)
 		}
+		// The recorder defaults to 200, so a 200 proves the front door
+		// served only when something was written.
+		if tc.want == 200 && tc.method != "HEAD" && rr.Body.Len() == 0 {
+			t.Errorf("%s %s (Host %s) answered 200 with an empty body", tc.method, tc.path, tc.host)
+		}
 	}
 
-	// Not mine: pass through to next — an app's advertised .local host
-	// (the redirect sends it to the app over HTTPS), IP literals (the
-	// shared-mode trade), and everyone else — and never a 421.
-	for _, host := range []string{"shop.local", "other.ripdev.io", "evil.example.com", "a.b.local",
-		"127.0.0.1", "192.168.1.10", "[::1]"} {
-		rr, nextCalled, err := serve("GET", "/", host, 80)
+	// Not mine: the redirect to HTTPS — an app's advertised .local host
+	// (so the name a person types is the app they get), IP literals (the
+	// shared-mode trade), and everyone else — and never a 421. The
+	// Location keeps the Host minus its port and the full request URI,
+	// as Caddy's own auto-HTTPS redirect does.
+	notMine := []struct {
+		host, path, want string
+	}{
+		{"shop.local", "/", "https://shop.local/"},
+		{"shop.local:80", "/cart?item=3", "https://shop.local/cart?item=3"},
+		{"other.ripdev.io", "/", "https://other.ripdev.io/"},
+		{"evil.example.com", "/", "https://evil.example.com/"},
+		{"a.b.local", "/", "https://a.b.local/"},
+		{"127.0.0.1", "/", "https://127.0.0.1/"},
+		{"192.168.1.10:80", "/", "https://192.168.1.10/"},
+		{"[::1]", "/", "https://[::1]/"},
+		{"[::1]:80", "/x", "https://[::1]/x"},
+	}
+	for _, tc := range notMine {
+		rr, nextCalled, err := serve("GET", tc.path, tc.host, 80)
 		if err != nil {
-			t.Errorf("Host %s: %v", host, err)
+			t.Errorf("Host %s: %v", tc.host, err)
 			continue
 		}
-		if !nextCalled || rr.Code != http.StatusTeapot {
-			t.Errorf("Host %s = %d (next called %v), want pass-through", host, rr.Code, nextCalled)
+		if nextCalled {
+			t.Errorf("Host %s deferred to next instead of redirecting", tc.host)
+		}
+		if rr.Code != http.StatusPermanentRedirect || rr.Header().Get("Location") != tc.want {
+			t.Errorf("Host %s %s = %d Location %q, want 308 to %q",
+				tc.host, tc.path, rr.Code, rr.Header().Get("Location"), tc.want)
 		}
 	}
 

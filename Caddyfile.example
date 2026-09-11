@@ -177,7 +177,7 @@
 }
 
 # The mdns front door: front-door names serve the status page here; every
-# other host falls through to the automatic HTTP→HTTPS redirects. auth
+# other host is redirected to HTTPS by the janus handler itself. auth
 # off: this is a plain-HTTP carrier — the __Host- session cookie cannot
 # be set without HTTPS, so an inherited wall here would answer 421 to any
 # data-plane request that reached it.

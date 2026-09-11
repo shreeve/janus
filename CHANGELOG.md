@@ -4,6 +4,17 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## Unreleased
+
+- On the shared mdns front door, a plain-HTTP request for any Host that
+  is not the door's own — an app's `.local` host, an IP literal —
+  answers 308 to `https://{host}{uri}` from the janus handler itself. It
+  used to defer to Caddy's auto-HTTPS redirect routes through `next`,
+  but the Caddyfile adapter emits every site block as a terminal route
+  and Caddy hands a terminal route an empty `next`, so
+  `http://rip.local/` answered an empty 200 while `http://janus.local/`
+  served the dashboard.
+
 ## 1.14.1 — 2026-09-10
 
 - The exposure watch lists `/dev/fd` by name. Reading that directory as

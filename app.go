@@ -110,8 +110,8 @@ type App struct {
 	// mdnsSharedPort and mdnsSharedRoutes wire the shared-mode front
 	// door (mdns with no listen): janus site handlers on the HTTP app's
 	// plain-HTTP port serve mdnsSharedRoutes for front-door Hosts and
-	// pass everything else through. Set at Start by startMdns; zero in
-	// dedicated mode and with mdns off.
+	// redirect everything else to HTTPS. Set at Start by startMdns; zero
+	// in dedicated mode and with mdns off.
 	mdnsSharedPort   int
 	mdnsSharedRoutes http.Handler
 	mdnsDoor         atomic.Pointer[mdnsFrontDoorInfo]
