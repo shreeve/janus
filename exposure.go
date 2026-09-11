@@ -13,19 +13,33 @@ package janus
 // asking the wrong question.
 
 import (
+	"net/netip"
 	"strings"
 	"sync/atomic"
 )
 
-var exposureScope atomic.Value // string
+type exposureState struct {
+	scope   string
+	iface   string
+	lanIPv4 netip.Addr
+}
 
-// SetExposureScope publishes the edge's exposure mode to the module.
-func SetExposureScope(scope string) { exposureScope.Store(scope) }
+var exposure atomic.Value // exposureState
+
+// SetExposure publishes the service's validated scope and LAN selection
+// together, so discovery cannot combine a new mode with an old address.
+func SetExposure(scope, iface string, lanIPv4 netip.Addr) {
+	exposure.Store(exposureState{scope: scope, iface: iface, lanIPv4: lanIPv4})
+}
+
+func currentExposure() exposureState {
+	s, _ := exposure.Load().(exposureState)
+	return s
+}
 
 // ExposureScope is the published mode, "" when nothing published one.
 func ExposureScope() string {
-	s, _ := exposureScope.Load().(string)
-	return s
+	return currentExposure().scope
 }
 
 func wanExposure() bool { return ExposureScope() == "wan" }

@@ -85,7 +85,7 @@ func exposureWatch(ctx context.Context, p servicePaths) {
 			logger.Error("the exposure mode is unreadable; refusing to serve unverified", zap.Error(err))
 			exitExposure()
 		}
-		janus.SetExposureScope(string(st.Scope))
+		janus.SetExposure(string(st.Scope), st.Interface, st.lan())
 		socks, err := ownSockets()
 		if err != nil {
 			logger.Error("cannot read the edge's own sockets; refusing to serve unverified", zap.Error(err))

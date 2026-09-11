@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -18,8 +19,8 @@ import (
 // door included), refused a certificate, and withdrawn from the air; a
 // public name is untouched, and leaving wan mode brings the names back.
 func TestWanExposureRefusesLocalNames(t *testing.T) {
-	SetExposureScope("wan")
-	t.Cleanup(func() { SetExposureScope("") })
+	SetExposure("wan", "", netip.Addr{})
+	t.Cleanup(func() { SetExposure("", "", netip.Addr{}) })
 	app := newTestSharedMdnsApp(t)
 	if _, err := app.appsReg.create("shop", []string{"shop.local", "shop.example.com"}, ""); err != nil {
 		t.Fatal(err)
@@ -74,7 +75,7 @@ func TestWanExposureRefusesLocalNames(t *testing.T) {
 		t.Errorf("/1.0/mdns does not say wan:\n%s", rr.Body.String())
 	}
 
-	SetExposureScope("lan")
+	SetExposure("lan", "en0", netip.MustParseAddr("10.0.0.211"))
 	if _, err := app.certificateAllowed("shop.local"); err != nil {
 		t.Errorf("back in lan mode, a registered .local name was refused: %v", err)
 	}
@@ -90,7 +91,7 @@ func TestWanExposureRefusesLocalNames(t *testing.T) {
 // The advertiser carries nothing in wan mode and re-announces when the
 // mode returns, on its own reconcile cadence.
 func TestWanExposureWithdrawsAdvertising(t *testing.T) {
-	t.Cleanup(func() { SetExposureScope("") })
+	t.Cleanup(func() { SetExposure("", "", netip.Addr{}) })
 	reg := newAppRegistry()
 	if _, err := reg.create("shop", []string{"shop.local"}, ""); err != nil {
 		t.Fatal(err)
@@ -104,7 +105,7 @@ func TestWanExposureWithdrawsAdvertising(t *testing.T) {
 	if n := len(adv.snapshot("janus.local").entries); n != 2 {
 		t.Fatalf("entries before wan = %d, want 2", n)
 	}
-	SetExposureScope("wan")
+	SetExposure("wan", "", netip.Addr{})
 	adv.reconcile()
 	if n := len(adv.snapshot("janus.local").entries); n != 0 {
 		t.Fatalf("entries in wan = %d, want 0", n)
@@ -112,7 +113,7 @@ func TestWanExposureWithdrawsAdvertising(t *testing.T) {
 	if adv.withdraws.Load() != 2 {
 		t.Errorf("withdraws = %d, want 2 (goodbyes for both names)", adv.withdraws.Load())
 	}
-	SetExposureScope("lan")
+	SetExposure("lan", "en0", netip.MustParseAddr("10.0.0.211"))
 	adv.reconcile()
 	if n := len(adv.snapshot("janus.local").entries); n != 2 {
 		t.Fatalf("entries after wan = %d, want 2", n)

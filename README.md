@@ -203,6 +203,12 @@ curl -s -H 'Host: janus.local' http://127.0.0.1/status.json
 curl -s -H 'Host: janus.local' http://127.0.0.1/trust/ca.crt                                # the CA, as a phone fetches it
 ```
 
+Service discovery follows `janus mode`: LAN mode advertises only the selected
+interface's selected private IPv4 address; localhost and WAN modes advertise
+no LAN names. Changing that selection withdraws the old records and announces
+the new address. Standalone Caddy configurations retain their configured
+interfaces and IPv4/IPv6 discovery.
+
 ### 5. auth
 
 URL-prefix gates in front of tenant apps that have no login story of their own: define a shared `users` table and one or more `gate <path> { … }` allow lists (credentials minted by `janus passhash`). Each gate's login door is exact `{prefix}auth`. One host-wide session — sign in once, sign out once; a request under a gate proceeds only if the session user is on that gate's allow list. Longest prefix wins; paths outside every gate stay open. What passes a gate carries `Remote-User: <name>`; cookies and client `Remote-User` are stripped on every fall-through. Sessions live in memory: unchanged reloads keep eligible sessions, removing a user or host revokes its sessions after commit, and a restart signs everyone out. Admins observe and revoke over `/1.0/auth`.

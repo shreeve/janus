@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,8 +32,8 @@ import (
 
 // mdnsBlockedNets is the address block list applied to every service
 // registration when interfaces are auto-selected or pinned: loopback and
-// IPv4 link-local never appear in answers; IPv6 link-local (fe80::/10)
-// is legitimate mDNS material and is advertised.
+// IPv4 link-local never appear in answers. Standalone configurations can
+// advertise IPv6 link-local; service LAN mode supplies only its selected IPv4.
 //
 // Every string here must be a valid CIDR: the library's
 // dnssd.NewService checks the wrong error variable when parsing
@@ -206,7 +207,8 @@ type mdnsAdvertiser struct {
 	responder   dnssd.Responder
 	cancel      context.CancelFunc
 	respondDone chan struct{}
-	runIfaces   []string // the interface set the live responder was built with
+	runIfaces   []string      // the interface set the live responder was built with
+	runExposure exposureState // address policy used by the live advertisements
 
 	announces atomic.Uint64
 	withdraws atomic.Uint64
@@ -348,6 +350,7 @@ func (a *mdnsAdvertiser) startResponderLocked(r dnssd.Responder, ifaces []string
 	a.cancel = cancel
 	a.respondDone = done
 	a.runIfaces = append([]string{}, ifaces...)
+	a.runExposure = currentExposure()
 	go func() {
 		defer close(done)
 		// Respond returns the context error on orderly teardown (its
@@ -393,6 +396,7 @@ func (a *mdnsAdvertiser) reconcile() {
 	a.mu.Lock()
 	cfg := a.cfg
 	epoch := a.epoch
+	exposure := currentExposure()
 	respondDied := false
 	if a.responder != nil {
 		select {
@@ -409,8 +413,12 @@ func (a *mdnsAdvertiser) reconcile() {
 		}
 	}
 	needTeardown := a.responder != nil &&
-		(cfg == nil || !mdnsIfacesEqual(a.runIfaces, cfg.ifaces))
+		(cfg == nil || !mdnsIfacesEqual(a.runIfaces, cfg.ifaces) || a.runExposure != exposure)
 	if needTeardown {
+		if cfg != nil && exposure.scope == "lan" && len(cfg.ifaces) > 0 && !slices.Contains(cfg.ifaces, exposure.iface) {
+			a.logger.Warn("janus mdns: pinned interfaces exclude the selected LAN interface; withdrawing advertisements",
+				zap.Strings("interfaces", cfg.ifaces), zap.String("lan_interface", exposure.iface))
+		}
 		cancel, doneCh := a.cancel, a.respondDone
 		// Only entries that reached the responder (a live handle) are
 		// counted as withdrawn: the ctx-cancel goodbye covers managed
@@ -462,6 +470,8 @@ func (a *mdnsAdvertiser) reconcile() {
 		a.startResponderLocked(r, cfg.ifaces)
 	}
 	responder := a.responder
+	// Freeze the policy for this pass, including service construction below.
+	exposure = a.runExposure
 	desired := a.desiredLocked(cfg)
 	var adds []*mdnsEntry
 	var removes []*mdnsEntry
@@ -506,7 +516,7 @@ func (a *mdnsAdvertiser) reconcile() {
 			continue
 		}
 		label := strings.TrimSuffix(e.name, ".local")
-		srv, err := dnssd.NewService(dnssd.Config{
+		serviceConfig := dnssd.Config{
 			Name:          label,
 			Type:          e.typ,
 			Domain:        "local",
@@ -514,7 +524,13 @@ func (a *mdnsAdvertiser) reconcile() {
 			Port:          e.port,
 			Ifaces:        cfg.ifaces,
 			BlockedIPNets: mdnsBlockedNets,
-		})
+		}
+		if exposure.scope == "lan" {
+			serviceConfig.Ifaces = []string{exposure.iface}
+			serviceConfig.IPs = []net.IP{net.IP(exposure.lanIPv4.AsSlice())}
+			serviceConfig.AdvertiseIPType = dnssd.IPv4
+		}
+		srv, err := dnssd.NewService(serviceConfig)
 		if err != nil {
 			a.markFailed(e, epoch)
 			a.logger.Error("janus mdns service", zap.String("name", e.name), zap.Error(err))
@@ -618,9 +634,11 @@ func (a *mdnsAdvertiser) markFailed(e *mdnsEntry, epoch uint64) {
 // once per registration.
 func (a *mdnsAdvertiser) desiredLocked(cfg *mdnsConfig) map[string]*mdnsEntry {
 	out := map[string]*mdnsEntry{}
-	// In wan mode nothing is announced: the periodic pass withdraws what
-	// is on the air, with goodbyes, and re-announces when the mode returns.
-	if wanExposure() {
+	// Service discovery is LAN-only and uses the selected address. A
+	// standalone Caddy configuration owns its own interface/address policy.
+	exposure := a.runExposure
+	if exposure.scope != "" && (exposure.scope != "lan" || exposure.iface == "" || !exposure.lanIPv4.Is4() ||
+		(len(cfg.ifaces) > 0 && !slices.Contains(cfg.ifaces, exposure.iface))) {
 		a.skipped = map[string]bool{}
 		return out
 	}
@@ -723,6 +741,10 @@ func (a *App) startMdns() error {
 		return adv.configure(a, nil)
 	}
 	ms := a.Mdns
+	exposure := currentExposure()
+	if exposure.scope == "lan" && len(ms.Interfaces) > 0 && !slices.Contains(ms.Interfaces, exposure.iface) {
+		return fmt.Errorf("janus mdns: pinned interfaces %v exclude LAN interface %q; include it or change 'janus mode lan --interface'", ms.Interfaces, exposure.iface)
+	}
 	for _, ifn := range ms.Interfaces {
 		if _, err := net.InterfaceByName(ifn); err != nil {
 			return fmt.Errorf("janus mdns: pinned interface %q does not exist on this machine: %w", ifn, err)

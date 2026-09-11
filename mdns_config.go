@@ -35,7 +35,9 @@ type MdnsSettings struct {
 
 	// Interfaces pins advertising to exactly these interfaces. Default:
 	// unset — the live multicast interface set with the loopback and
-	// IPv4 link-local block list applied.
+	// IPv4 link-local block list applied for standalone Caddy configs.
+	// Service LAN mode uses only its selected interface and IPv4 address;
+	// an explicit list must include that interface.
 	Interfaces []string `json:"interface,omitempty"`
 
 	// Apps controls per-app `.local` advertising. Default: on.

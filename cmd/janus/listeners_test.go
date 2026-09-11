@@ -183,7 +183,7 @@ func TestForeignListener(t *testing.T) {
 // the edge refuses local names the moment the mode is wan.
 func TestExposureWatchPublishesScope(t *testing.T) {
 	p := isolatedHome(t)
-	t.Cleanup(func() { janus.SetExposureScope("") })
+	t.Cleanup(func() { janus.SetExposure("", "", netip.Addr{}) })
 	if err := writeScope(p, scopeState{Scope: ScopeWAN}); err != nil {
 		t.Fatal(err)
 	}
