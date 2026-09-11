@@ -757,3 +757,87 @@ EOF
 	done
 	rm -rf "$dir"
 }
+
+# A separate Caddy process exercises the shared front door with real TLS
+# and no registered app. High ports keep it independent of the main fixture.
+case_auth_dashboard() {
+	local dir door="https://status.ripdev.io:7683" csrf session target
+	dir="$(mktemp -d "$TEST_RUN_DIR/janus-auth-dashboard.XXXXXX")"
+	cat >"$dir/Caddyfile" <<EOF_CONFIG
+{
+	admin off
+	http_port 7682
+	https_port 7683
+	janus {
+		mdns {
+			name authdashboard.local
+			canonical https://status.ripdev.io
+			apps off
+		}
+		auth {
+			user alice aZoyWD0mfNZH7GZCh3DH9Te1FwAxA0yc
+			gate / {
+				alice
+			}
+		}
+	}
+}
+http://*.local, http://status.ripdev.io {
+	janus
+}
+https://*.local, https://status.ripdev.io {
+	tls $ROOT/certs/ripdev.io.crt $ROOT/certs/ripdev.io.key
+	janus
+}
+EOF_CONFIG
+	"$CADDY_BIN" run --config "$dir/Caddyfile" >"$dir/caddy.log" 2>&1 &
+	local dashboard_pid=$!
+	printf '%s\n' "$dashboard_pid" >>"$AUTH_PIDS_FILE"
+	local i ready=""
+	for i in $(seq 1 50); do
+		if curl -fsS --max-time 1 "http://127.0.0.1:7682/trust" -H 'Host: authdashboard.local' >/dev/null 2>&1; then
+			ready=1
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ -z "$ready" ]]; then
+		cat "$dir/caddy.log" >&2
+		return 1
+	fi
+	for target in / /status.json /auth; do
+		auth_req GET "http://127.0.0.1:7682$target" -H 'Host: status.ripdev.io:7682'
+		eq "$REPLY_CODE" "308"
+		eq "$(auth_hdr Location)" "https://status.ripdev.io$target"
+	done
+	auth_req POST "http://127.0.0.1:7682/auth" -H 'Host: status.ripdev.io:7682' -d 'user=alice&password=sesame-alice'
+	eq "$REPLY_CODE" "421"
+	for target in / /status.json; do
+		auth_req GET "$door$target"
+		eq "$REPLY_CODE" "401"
+		eq "$(auth_hdr Cache-Control)" "no-store"
+	done
+	auth_req GET "$door/" -H 'Accept: text/html'
+	eq "$REPLY_CODE" "302"
+	eq "$(auth_hdr Location)" '/auth?to=%2F'
+	auth_req GET "$door/trust"
+	eq "$REPLY_CODE" "200"
+	auth_req GET "$door/trust/check"
+	eq "$REPLY_CODE" "204"
+	auth_login "$door" alice sesame-alice
+	session=$AUTH_SESSION
+	for target in / /status.json; do
+		auth_req GET "$door$target" -H "Cookie: __Host-janus=$session"
+		eq "$REPLY_CODE" "200"
+		ok "-n \"\$REPLY_BODY\"" "empty authenticated dashboard"
+	done
+	json_has "$REPLY_BODY" '"apps":[]'
+	# Sign out through the same front door, then prove the snapshot is closed.
+	auth_req GET "$door/auth" -H "Cookie: __Host-janus=$session"
+	csrf="$(auth_csrf_from_body)"
+	auth_req POST "$door/auth" -H "Cookie: __Host-janus=$session; __Host-janus_csrf=$csrf" --data-urlencode "csrf=$csrf"
+	eq "$REPLY_CODE" "303"
+	auth_req GET "$door/status.json" -H "Cookie: __Host-janus=$session"
+	eq "$REPLY_CODE" "401"
+	stop_owned_pid "$dashboard_pid" "$CADDY_BIN"
+}

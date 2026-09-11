@@ -175,6 +175,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if wanExposure() && localFamilyHost(normalizeHostHeader(r.Host)) {
 		return caddyhttp.Error(http.StatusMisdirectedRequest, fmt.Errorf("janus: %s is a local name; the edge is in wan mode", r.Host))
 	}
+	frontDoor := false
 	if h.app != nil && h.app.mdnsSharedRoutes != nil {
 		// The front door answers for its own names only: the configured
 		// name, the effective (post-conflict) name, and the canonical
@@ -188,11 +189,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		// https://janus.local/ is the status page, and /trust/check there
 		// is the handshake the trust page probes from plain HTTP.
 		shared := r.TLS == nil && requestLocalPort(r) == h.app.mdnsSharedPort
-		if (shared || r.TLS != nil) && h.app.mdnsFrontDoorName(normalizeHostHeader(r.Host)) {
+		frontDoor = (shared || r.TLS != nil) && h.app.mdnsFrontDoorName(normalizeHostHeader(r.Host))
+		if frontDoor && trustRoutePath(r.URL.Path) {
+			// A new device must be able to trust the local CA before it
+			// can establish HTTPS and sign in. Only onboarding is exempt.
 			h.app.mdnsSharedRoutes.ServeHTTP(w, r)
 			return nil
 		}
-		if shared {
+		if shared && (!frontDoor || (h.authCfg != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead))) {
 			mdnsSharedRedirect(w, r)
 			return nil
 		}
@@ -201,7 +205,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if facts != nil {
 		w = &accessResponseWriter{ResponseWriter: w, request: r, facts: facts}
 	}
-	if h.pingEnabled() && (r.URL.Path == "/ping" || r.URL.Path == "/ping/") {
+	if !frontDoor && h.pingEnabled() && (r.URL.Path == "/ping" || r.URL.Path == "/ping/") {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
@@ -219,9 +223,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		// A wildcard/catch-all Janus route does not itself admit arbitrary hot
 		// app hosts. Reject an unknown host before the wall can expose a login
 		// surface or spend password-KDF work on it. An exact Caddy host route
-		// and a configured cold browse root are explicit cold admission and do
-		// not depend on a hot registration.
-		requireHotClaim := !h.authExactHostClaim(host) &&
+		// and a configured cold browse root, like the built-in front door,
+		// are explicit cold admission and do not need a hot registration.
+		requireHotClaim := !frontDoor && !h.authExactHostClaim(host) &&
 			!(h.browseEnabled && len(h.coldRoots) > 0)
 		if requireHotClaim && h.dp != nil {
 			if rec, resolved = h.dp.registry.resolveRequestHost(r.Host); resolved {
@@ -243,6 +247,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		facts.clearOwner()
 		r = rr
 		w = &authRespStrip{ResponseWriter: w}
+	}
+	if frontDoor {
+		h.app.mdnsSharedRoutes.ServeHTTP(w, r)
+		return nil
 	}
 	requestPath, err := validatedRequestPath(r)
 	if err != nil {

@@ -69,6 +69,16 @@ func (a *App) mdnsFrontDoorName(host string) bool {
 	return a.state != nil && host == a.state.mdns.effectiveName(ms.Name)
 }
 
+// trustRoutePath is the exact public onboarding surface, including its
+// HTTPS probe. Do not exempt an arbitrary /trust prefix from site auth.
+func trustRoutePath(path string) bool {
+	switch path {
+	case "/trust", "/trust/", "/trust/safari", "/trust/check", "/trust/ca.crt", "/trust/ca.mobileconfig":
+		return true
+	}
+	return false
+}
+
 func (a *App) trustRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /trust", a.trustServePage)
 	mux.HandleFunc("GET /trust/{$}", a.trustServePage)

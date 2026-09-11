@@ -178,9 +178,10 @@
 
 # The mdns front door: front-door names serve the status page here; every
 # other host is redirected to HTTPS by the janus handler itself. auth
-# off: this is a plain-HTTP carrier — the __Host- session cookie cannot
-# be set without HTTPS, so an inherited wall here would answer 421 to any
-# data-plane request that reached it.
+# off deliberately keeps this local dashboard public. To protect it,
+# inherit the root gate on both this HTTP site and matching HTTPS sites:
+# HTTP GET/HEAD then redirects to HTTPS, where /auth provides login.
+# Trust onboarding stays public; credentials require HTTPS.
 http://*.local {
 	import janus_access
 	janus {
