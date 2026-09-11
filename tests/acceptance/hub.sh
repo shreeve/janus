@@ -675,23 +675,30 @@ case_hub_cap_floor_and_reservation() {
 	# One app spans hosts capped 10 and 20: the effective floor is 10 —
 	# enforced with slot reservation while open bridges are in flight,
 	# even arriving through the 20-capped host.
-	hub_playbook '{"open":{"status":204,"delay_ms":2000}}'
-	rm -f "$TEST_RUN_DIR/hub-cap-codes"
-	local i
+	local release="$TEST_RUN_DIR/hub-flag-cap-release" i pid pids="" opens0
+	rm -f "$release" "$TEST_RUN_DIR"/hub-flag-cap-open-*
+	opens0="$(hub_bridge_count open)"
+	hub_playbook "{\"open\":{\"status\":204,\"wait_file\":\"$release\"}}"
 	for i in $(seq 1 10); do
-		curl -sS -o /dev/null -w '%{http_code}\n' --max-time 4 --http1.1 \
-			-H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-			-H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-			"https://hubtwenty.ripdev.io/hub" >>"$TEST_RUN_DIR/hub-cap-codes" 2>/dev/null &
+		hub_ws_bg "$TEST_RUN_DIR/hub-out-cap-$i" hubtwenty.ripdev.io - - \
+			"touch=$TEST_RUN_DIR/hub-flag-cap-open-$i"
+		pids="$pids $HUB_WS_PID"
 	done
-	sleep 1
+	# Wait for all ten bridge requests, which hold their reservations until
+	# released. Process launch order and DNS/TLS latency cannot order arrivals.
+	for i in $(seq 1 100); do
+		[[ "$(hub_bridge_count open)" -eq "$((opens0 + 10))" ]] && break
+		sleep 0.05
+	done
+	eq "$(hub_bridge_count open)" "$((opens0 + 10))"
 	# All ten slots reserved: the 11th rejects 503 immediately.
 	eq "$(hub_upgrade_code hubtwenty.ripdev.io -)" "503"
-	wait
+	touch "$release"
+	for pid in $pids; do wait "$pid"; done
 	hub_playbook ''
 	# The ten held handshakes completed (101) — reservation ≠ rejection.
-	eq "$(sort -u "$TEST_RUN_DIR/hub-cap-codes" | tr -d '[:space:]')" "101"
-	# Their curl drivers die on max-time; cleanup releases every slot.
+	for i in $(seq 1 10); do wait_file "$TEST_RUN_DIR/hub-flag-cap-open-$i"; done
+	# The drivers exit after their successful handshakes, releasing every slot.
 	for i in $(seq 1 100); do
 		hub_snapshot "$(hub_cap_id)"
 		if printf '%s' "$REPLY_BODY" | grep -qF '"conns":0'; then

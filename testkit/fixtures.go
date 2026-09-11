@@ -265,14 +265,29 @@ func cmdHubTenant(args []string) {
 		mu.Unlock()
 
 		var play map[string]struct {
-			Status  int    `json:"status"`
-			Body    string `json:"body"`
-			DelayMS int    `json:"delay_ms"`
+			Status   int    `json:"status"`
+			Body     string `json:"body"`
+			DelayMS  int    `json:"delay_ms"`
+			WaitFile string `json:"wait_file"`
 		}
 		if data, err := os.ReadFile(playbook); err == nil {
 			_ = json.Unmarshal(data, &play)
 		}
 		act := play[kind]
+		if act.WaitFile != "" {
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				if _, err := os.Stat(act.WaitFile); err == nil {
+					break
+				}
+				select {
+				case <-r.Context().Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}
 		if act.DelayMS > 0 {
 			time.Sleep(time.Duration(act.DelayMS) * time.Millisecond)
 		}
