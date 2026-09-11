@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -458,17 +460,21 @@ func TestStopAndReloadWhenStopped(t *testing.T) {
 // A control server on the service's socket, answering /1.0 and /1.0/apps.
 func controlServer(t *testing.T, p servicePaths, apps string) {
 	t.Helper()
+	var records []json.RawMessage
+	if err := json.Unmarshal([]byte(apps), &records); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(p.run, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/1.0":
-			_, _ = w.Write([]byte(`{"type":"janus","control":[{"mode":"internal","listen":"` + p.sock + `"}]}`))
+			fmt.Fprintf(w, `{"type":"janus","app_count":%d,"control":[{"mode":"internal","listen":%q}]}`, len(records), p.sock)
 		case "/1.0/apps":
 			_, _ = w.Write([]byte(apps))
-		case "/1.0/mdns/status":
-			_, _ = w.Write([]byte(`{"name":"janus.local","effective_name":"janus-2.local"}`))
+		case "/1.0/mdns":
+			_, _ = w.Write([]byte(`{"dashboard_url":"http://janus-2.local/","trust_url":"http://janus-2.local/trust"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -632,6 +638,50 @@ func TestStatusCountsApps(t *testing.T) {
 	}
 	if !strings.Contains(out, "2 apps registered") || !strings.Contains(out, "edge     running") {
 		t.Errorf("status:\n%s", out)
+	}
+}
+
+func TestStatusRejectsInvalidControlMetadata(t *testing.T) {
+	p := isolatedHome(t)
+	withFakeItem(t, &fakeItem{})
+	if err := os.MkdirAll(p.run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", p.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "not JSON"
+	requests := []string{}
+	var mu sync.Mutex
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		requests = append(requests, r.URL.Path)
+		fmt.Fprint(w, body)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	if st := gatherStatus(p); st.Running || st.Control != "" {
+		t.Fatalf("malformed metadata reported a running edge: %+v", st)
+	}
+	mu.Lock()
+	body = fmt.Sprintf(`{"type":"janus","control":[{"mode":"internal","listen":%q}]}`, p.sock)
+	requests = nil
+	mu.Unlock()
+	st := gatherStatus(p)
+	if !st.Running || st.Apps != nil {
+		t.Fatalf("root without count: %+v", st)
+	}
+	var out bytes.Buffer
+	printStatus(&out, p, st)
+	if strings.Contains(out.String(), "control  unreachable") {
+		t.Fatal(out.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(requests, ",") != "/1.0,/1.0/mdns" {
+		t.Fatalf("status fetched more than compact metadata: %v", requests)
 	}
 }
 

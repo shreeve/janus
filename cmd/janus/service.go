@@ -93,13 +93,20 @@ Under an autostart item this is a clean exit, so the edge stays stopped
 until the next login (root: boot); 'janus start' brings it back. When
 nothing is running this is a quiet no-op.
 `
+	caddyStop.Flags().StringSlice("envfile", nil, "Environment file(s) to load")
 	wrap(caddyStop, func(orig runFunc, cmd *cobra.Command, args []string) error {
+		if cmd.Flags().Changed("address") {
+			return orig(cmd, args)
+		}
 		if targetsService(cmd) && runningPID(p) == 0 && !controlReachable(p) {
 			fmt.Fprintln(cmd.OutOrStdout(), "janus was not running")
 			return nil
 		}
 		if !cmd.Flags().Changed("config") && fileExists(p.config) {
 			setConfig(cmd, p.config)
+		}
+		if _, err := prepareConfigEnvironment(cmd, p); err != nil {
+			return err
 		}
 		return orig(cmd, args)
 	})

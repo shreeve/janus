@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -86,9 +87,10 @@ type edgeStatus struct {
 	// The local CA that signs .local and .localhost names: its root
 	// certificate on disk, whether this machine's trust store accepts it,
 	// and the front door a phone trusts it from (when mdns answered).
-	CA        string `json:"ca,omitempty"`
-	CATrusted *bool  `json:"ca_trusted,omitempty"`
-	TrustURL  string `json:"trust_url,omitempty"`
+	CA           string `json:"ca,omitempty"`
+	CATrusted    *bool  `json:"ca_trusted,omitempty"`
+	TrustURL     string `json:"trust_url,omitempty"`
+	DashboardURL string `json:"dashboard_url,omitempty"`
 	// The exposure mode. Bind is what JANUS_BIND carries; Firewall is
 	// verified / missing / unverified / none; Listeners are the front-door
 	// addresses the mode admits, each with how its reach is enforced.
@@ -126,13 +128,27 @@ func gatherStatus(p servicePaths) edgeStatus {
 			st.Supervisor = "pidfile"
 		}
 	}
-	if n, at := probeControl(p); at != "" {
-		st.Control = at
-		st.Apps = &n
-		st.TrustURL = trustURL(p)
+	if control, body, err := openEdgeControl(p); err == nil {
+		defer control.Close()
+		st.Control = control.address
+		var root struct {
+			Apps *int `json:"app_count"`
+		}
+		if json.Unmarshal(body, &root) == nil {
+			st.Apps = root.Apps
+		}
+		if body, err := control.Get("/1.0/mdns"); err == nil {
+			var front struct {
+				Dashboard string `json:"dashboard_url"`
+				Trust     string `json:"trust_url"`
+			}
+			if json.Unmarshal(body, &front) == nil {
+				st.DashboardURL, st.TrustURL = front.Dashboard, front.Trust
+			}
+		}
 	}
 	st.Running = st.PID > 0 || st.Control != ""
-	gatherCA(&st)
+	gatherCA(&st, p)
 	if st.PID > 0 {
 		st.Uptime = elapsed(st.PID)
 		st.BinaryNewer = binaryNewerThan(st.Binary, st.PID)
@@ -179,47 +195,90 @@ var verifyCA = func(root *x509.Certificate) error {
 	return err
 }
 
-func gatherCA(st *edgeStatus) {
-	path := localCARoot()
-	pemBytes, err := os.ReadFile(path)
-	if err != nil {
-		return
+// Resolve stopped-service storage from that service's home and env file,
+// without changing the CLI process environment. A running admin API is
+// authoritative for the certificate itself, including custom storage.
+func serviceCARoot(p servicePaths) string {
+	env := map[string]string{"HOME": p.home}
+	if !p.root && p.home == os.Getenv("HOME") {
+		for _, key := range []string{"XDG_DATA_HOME", "AppData"} {
+			if value, set := os.LookupEnv(key); set {
+				env[key] = value
+			}
+		}
 	}
-	block, _ := pem.Decode(pemBytes)
+	if body, err := os.ReadFile(p.env); err == nil {
+		values, err := parseEnvFile(bytes.NewReader(body))
+		if err != nil {
+			return ""
+		}
+		for key, value := range values {
+			if _, set := env[key]; !set {
+				env[key] = value
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	var data string
+	switch {
+	case env["XDG_DATA_HOME"] != "":
+		data = filepath.Join(env["XDG_DATA_HOME"], "caddy")
+	case runtime.GOOS == "darwin":
+		data = filepath.Join(env["HOME"], "Library", "Application Support", "Caddy")
+	case runtime.GOOS == "windows":
+		if env["AppData"] == "" {
+			return ""
+		}
+		data = filepath.Join(env["AppData"], "Caddy")
+	default:
+		data = filepath.Join(env["HOME"], ".local", "share", "caddy")
+	}
+	return filepath.Join(data, "pki", "authorities", "local", "root.crt")
+}
+
+func parseRootCA(body []byte) *x509.Certificate {
+	block, _ := pem.Decode(body)
 	if block == nil {
-		return
+		return nil
 	}
 	root, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return
+		return nil
 	}
-	st.CA = path
-	trusted := verifyCA(root) == nil
-	st.CATrusted = &trusted
+	return root
 }
 
-// trustURL is where a phone trusts the CA: the mdns front door, by its
-// effective name, when the edge announces one.
-func trustURL(p servicePaths) string {
-	body, _, err := controlGet(p, "/1.0/mdns/status")
-	if err != nil {
-		return ""
+func gatherCA(st *edgeStatus, p servicePaths) {
+	path := serviceCARoot(p)
+	body, _ := os.ReadFile(path)
+	root := parseRootCA(body)
+	if root != nil {
+		st.CA = path
 	}
-	var snap struct {
-		Name          string `json:"name"`
-		EffectiveName string `json:"effective_name"`
+	if st.Running && socketExists(p.admin) {
+		client, base := adminClient("unix/" + p.admin)
+		defer client.CloseIdleConnections()
+		if response, err := client.Get(base + "/pki/ca/local"); err == nil {
+			defer response.Body.Close()
+			var ca struct {
+				Root string `json:"root_certificate"`
+			}
+			if response.StatusCode == http.StatusOK && json.NewDecoder(response.Body).Decode(&ca) == nil {
+				if live := parseRootCA([]byte(ca.Root)); live != nil {
+					if root == nil || !bytes.Equal(live.Raw, root.Raw) {
+						st.CA = ""
+					}
+					root = live
+				}
+			}
+		}
 	}
-	if json.Unmarshal(body, &snap) != nil {
-		return ""
+	if root == nil {
+		return
 	}
-	name := snap.EffectiveName
-	if name == "" {
-		name = snap.Name
-	}
-	if name == "" {
-		return ""
-	}
-	return "http://" + name + "/trust"
+	trusted := verifyCA(root) == nil
+	st.CATrusted = &trusted
 }
 
 func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool, note string) error {
@@ -281,6 +340,8 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 	switch {
 	case st.Apps != nil:
 		fmt.Fprintf(out, "control  %s (%d app%s registered)\n", st.Control, *st.Apps, plural(*st.Apps))
+	case st.Control != "":
+		fmt.Fprintf(out, "control  %s\n", st.Control)
 	case st.Running:
 		fmt.Fprintf(out, "control  unreachable at %s and %s\n", p.sock, localControlURL)
 	}

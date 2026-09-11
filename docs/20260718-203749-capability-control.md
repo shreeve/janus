@@ -142,7 +142,7 @@ Port **7601** for public avoids clashing with local **7600**.
 
 | Method | Path | Body |
 | --- | --- | --- |
-| `GET` | `{base}/1.0` | `{ "api_version":"1.0", "type":"janus", "ping":…, "control":[…] }` |
+| `GET` | `{base}/1.0` | `{ "api_version":"1.0", "type":"janus", "app_count":0, "ping":…, "control":[…] }` — `app_count` is the current registry size. |
 | `GET` | `{base}/1.0/health` | `{ "status":"ok" }` |
 | `POST` | `{base}/1.0/apps` | register → `201 { "id":"name-xxxxxx" }` |
 | `GET` | `{base}/1.0/apps` | list registered apps |

@@ -9,6 +9,7 @@ package janus
 // reason the front door exists on port 80.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/x509"
 	_ "embed"
@@ -18,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2/modules/caddypki"
@@ -79,7 +81,10 @@ func (a *App) trustRoutes(mux *http.ServeMux) {
 func (a *App) trustServePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(trustPageHTML)
+	// A public certificate on the canonical name proves nothing about
+	// this device's trust in the local CA. Only local names can probe it.
+	canCheck := strings.HasSuffix(normalizeHostHeader(r.Host), ".local")
+	_, _ = w.Write(bytes.ReplaceAll(trustPageHTML, []byte("{{CAN_CHECK}}"), []byte(strconv.FormatBool(canCheck))))
 }
 
 func (a *App) trustServeSafari(w http.ResponseWriter, r *http.Request) {

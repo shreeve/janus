@@ -40,6 +40,7 @@ case_control_local_root() {
 	body="$(http_body http://127.0.0.1:7600/1.0)"
 	eq "$(http_code http://127.0.0.1:7600/1.0)" "200"
 	json_has "$body" '"api_version":"1.0"'
+	json_has "$body" '"app_count":0'
 	json_has "$body" '"type":"janus"'
 }
 

@@ -774,6 +774,7 @@ func (a *App) startMdns() error {
 		}
 		a.mdnsSrv = srv
 		a.mdnsLn = ln
+		a.mdnsDoor.Store(&mdnsFrontDoorInfo{address: ln.Addr().String()})
 		go func() {
 			if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed && !a.mdnsStopping.Load() {
 				a.logger.Error("janus mdns front door stopped", zap.Error(serveErr))
@@ -872,7 +873,84 @@ func (a *App) checkMdnsSharedCoverage() (int, error) {
 	if !mdnsSharedSiteCovers(ha, port, a.Mdns.Name) {
 		return 0, mdnsSharedCoverageErr(port, a.Mdns.Name)
 	}
+	door := &mdnsFrontDoorInfo{address: fmt.Sprintf(":%d", port)}
+	for _, srv := range ha.Servers {
+		if !mdnsServerLANPort(srv, port) {
+			continue
+		}
+		door.routes = append(door.routes, srv.Routes)
+	}
+	a.mdnsDoor.Store(door)
 	return port, nil
+}
+
+// A host-only route describes the whole front door. Conditional routes
+// (paths, methods, headers, client IPs) cannot establish an operator URL.
+func mdnsHostOnlyRoute(route caddyhttp.Route) bool {
+	for _, set := range route.MatcherSets {
+		for _, matcher := range set {
+			switch matcher.(type) {
+			case caddyhttp.MatchHost, *caddyhttp.MatchHost:
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+const (
+	mdnsRoutePass = iota
+	mdnsRouteOwned
+	mdnsRouteBlocked
+)
+
+// Respect route and handler order. Unknown middleware may consume a request,
+// so discovery only claims routes that unambiguously reach Janus.
+func mdnsRouteOwner(routes caddyhttp.RouteList, name string) int {
+	for _, route := range routes {
+		hosts := routeHostUnion(intersectRouteHosts([][]string{{name}}, route.MatcherSets))
+		if hosts != nil && len(hosts) == 0 {
+			continue
+		}
+		if !mdnsHostOnlyRoute(route) {
+			return mdnsRouteBlocked
+		}
+		for _, handler := range route.Handlers {
+			switch h := handler.(type) {
+			case *Handler:
+				return mdnsRouteOwned
+			case *caddyhttp.Subroute:
+				if owner := mdnsRouteOwner(h.Routes, name); owner != mdnsRoutePass {
+					return owner
+				}
+			default:
+				return mdnsRouteBlocked
+			}
+		}
+		if route.Terminal || route.Group != "" {
+			return mdnsRouteBlocked
+		}
+	}
+	return mdnsRoutePass
+}
+
+func mdnsServerLANPort(srv *caddyhttp.Server, port int) bool {
+	for _, listen := range srv.Listen {
+		addr, err := caddy.ParseNetworkAddress(listen)
+		if err != nil || addr.IsUnixNetwork() || uint(port) < addr.StartPort || uint(port) > addr.EndPort {
+			continue
+		}
+		if addr.Host == "" {
+			return true
+		}
+		for _, host := range mdnsListenHostAddrs(addr.Host) {
+			if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsMulticast() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mdnsSharedSiteCovers reports whether any site route on a server
@@ -1063,8 +1141,8 @@ var mdnsIconPNG []byte
 // Inline the bundled icon once so the LAN status page stays self-contained.
 var mdnsPageHTML = []byte(strings.Replace(mdnsPageTemplate, "{{JANUS_ICON}}", base64.StdEncoding.EncodeToString(mdnsIconPNG), 1))
 
-// mdnsRoutes is the front door's route set, identical in both modes:
-// exactly two read-only routes. Unknown path → 404, known path with
+// mdnsRoutes is the front door's read-only dashboard and trust route set,
+// identical in both modes. Unknown path → 404, known path with
 // another method → 405 — enforced by routing, not convention.
 func (a *App) mdnsRoutes() http.Handler {
 	mux := http.NewServeMux()

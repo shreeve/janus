@@ -138,6 +138,22 @@ func TestTrustFrontDoor(t *testing.T) {
 	}
 }
 
+func TestTrustAutomaticCheckRequiresLocalName(t *testing.T) {
+	app := newTestSharedMdnsApp(t)
+	for _, host := range []string{"janus.local:8080", "edge.example", "127.0.0.1:7680"} {
+		r := httptest.NewRequest("GET", "https://"+host+"/trust", nil)
+		w := httptest.NewRecorder()
+		app.trustServePage(w, r)
+		want := "var canCheck = false;"
+		if host == "janus.local:8080" {
+			want = "var canCheck = true;"
+		}
+		if !strings.Contains(w.Body.String(), want) || strings.Contains(w.Body.String(), "{{CAN_CHECK}}") {
+			t.Errorf("%s did not receive the correct trust-check policy", host)
+		}
+	}
+}
+
 func TestMdnsFrontDoorName(t *testing.T) {
 	app := newTestSharedMdnsApp(t)
 	for host, want := range map[string]bool{

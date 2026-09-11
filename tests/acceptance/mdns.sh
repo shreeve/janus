@@ -1,7 +1,7 @@
 # Sourced by test.sh; fixture ownership and cleanup remain in the driver.
 # --- cases: mdns ---------------------------------------------------------------
 #
-# Capability 5: LAN presence (docs/20260722-034619-capability-mdns.md
+# Capability 4: LAN presence (docs/20260722-034619-capability-mdns.md
 # "Acceptance sketch"). Multicast itself is not CI-assertable, so no case
 # sends or receives a multicast packet: the group asserts the ADVERTISER'S
 # STATE (via /1.0/mdns — counters, the pinned state enum, the skipped
@@ -66,11 +66,22 @@ mdns_wait_gone() {
 	return 1
 }
 
-# mdns_wait_quiet — poll until the announce and withdraw counters hold
-# still for a second. An entry leaves /1.0/mdns the moment its withdrawal
-# is decided; the counter moves only after the responder's goodbye
-# returns, which can take seconds. A baseline read in that window is one
-# short and reads as a flap.
+# mdns_wait_withdrawn BASELINE — wait for a goodbye to complete. An entry
+# leaves /1.0/mdns before the blocking responder removal finishes, so its
+# absence alone cannot establish a baseline for the next case.
+mdns_wait_withdrawn() {
+	local baseline=$1 i
+	for i in $(seq 1 100); do
+		[[ "$(mdns_stat withdraws)" -gt "$baseline" ]] && return 0
+		sleep 0.1
+	done
+	echo "withdraws counter never moved past $baseline" >&2
+	return 1
+}
+
+# mdns_wait_quiet — check that counters hold still for a second after
+# preceding cases have explicitly awaited their withdrawals. A quiet
+# interval alone does not prove that no goodbye is still in flight.
 mdns_wait_quiet() {
 	local i prev cur
 	prev="$(mdns_stat announces)/$(mdns_stat withdraws)"
@@ -88,8 +99,7 @@ mdns_wait_quiet() {
 }
 
 # mdns_wait_settled — poll until no entry is still probing or awaiting
-# an Add retry (announces / withdraws quiesce so counter deltas are
-# attributable)
+# an Add retry. Withdrawals must be awaited separately.
 mdns_wait_settled() {
 	local i
 	for i in $(seq 1 100); do
@@ -127,6 +137,14 @@ case_mdns_state() {
 	# already claims janus.local (both are settled states; probing is not).
 	mdns_wait_advertised janus.local
 	mdns_wait_settled
+	local dashboard name
+	dashboard="$(mdns_stat dashboard_url)"
+	case "$dashboard" in
+		'http://127.0.0.1:7680/'|'http://[::1]:7680/') ;;
+		*) printf 'unexpected dashboard URL: %s' "$dashboard" >&2; return 1 ;;
+	esac
+	name="$(mdns_stat effective_name)"
+	eq "$(mdns_stat trust_url)" "http://${name}:7680/trust"
 	capi GET /1.0/mdns
 	if ! printf '%s' "$REPLY_BODY" | grep -qE '"name":"janus.local","state":"(announced|renamed)"'; then
 		printf 'janus.local never settled: %q' "$REPLY_BODY" >&2
@@ -329,13 +347,7 @@ case_mdns_delete_withdraws() {
 	mdns_wait_gone mdnsstore.local
 	# The counter moves once the goodbye lands — the library sends it per
 	# interface with real inter-packet delays, so poll rather than read.
-	local i
-	for i in $(seq 1 100); do
-		[[ "$(mdns_stat withdraws)" -gt "$w0" ]] && return 0
-		sleep 0.1
-	done
-	echo "withdraws counter never moved past $w0" >&2
-	return 1
+	mdns_wait_withdrawn "$w0"
 }
 
 case_mdns_reap_withdraws() {
@@ -350,9 +362,13 @@ case_mdns_reap_withdraws() {
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$MDNS_APP_FILE"
 	mdns_wait_advertised mdnsreap.local # mdns_hb keeps it alive while waiting
+	mdns_wait_settled                  # finish Add before starting the reap
+	local w0
+	w0="$(mdns_stat withdraws)"
 	rm -f "$MDNS_APP_FILE"              # heartbeats stop; the reap clock runs
 	sleep 3.5
 	mdns_wait_gone mdnsreap.local
+	mdns_wait_withdrawn "$w0"
 }
 
 case_mdns_reload_no_flap() {
