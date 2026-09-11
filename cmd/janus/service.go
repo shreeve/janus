@@ -43,7 +43,7 @@ default when it exists, and the service env file is loaded beside it.
 			if err := serviceEdgeReady(st); err != nil {
 				return err
 			}
-			janus.SetExposureScope(string(st.Scope))
+			janus.SetExposure(string(st.Scope), st.Interface, st.lan())
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			go exposureWatch(ctx, p)

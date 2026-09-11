@@ -37,6 +37,13 @@ the installed configuration or scope file is unusable. Restart also stops
 a foreground edge identified through its control listener and waits for it
 to release the listener before starting a replacement.
 
+`janus mode lan` advertises only the selected LAN interface's selected private
+IPv4 address. It never advertises the interface's IPv6 addresses, since LAN
+exposure accepts IPv6 only on loopback. Localhost and WAN modes advertise no
+LAN names. A mode/interface/address change replaces the mDNS records on the
+advertiser's next reconciliation pass. An explicit `mdns interface` list must
+include the selected LAN interface.
+
 `status --json` includes `dashboard_url` and `trust_url` when available.
 Janus resolves these from its configured front door, actual listener port,
 exposure, and conflict-resolved name. The dashboard can use a canonical
