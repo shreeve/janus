@@ -261,7 +261,7 @@ start_caddy() {
 	# survives provisioning (token resolves) and fails only at Start.
 	XDG_DATA_HOME="$TEST_RUN_DIR/caddy-data" \
 	JANUS_ABORT_TOKEN="acceptance-abort-token" \
-		"$CADDY_BIN" run --config "$ROOT/Caddyfile" >"$CADDY_LOG" 2>&1 &
+		"$CADDY_BIN" run --config "$ROOT/Caddyfile" >>"$CADDY_LOG" 2>&1 &
 	CADDY_PID=$!
 	printf '%s\n' "$CADDY_PID" >"$CADDY_PID_FILE"
 	local i
