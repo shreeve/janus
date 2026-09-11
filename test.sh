@@ -520,6 +520,7 @@ test "passhash mints; minted cred opens a wall; plain HTTP → 421" case_auth_mi
 test "restart wipes every session" case_auth_restart_wipes
 test "zero-users lockout fails janus validate" case_auth_zero_users_lockout
 test "parse rejections: every auth hard error fails janus adapt" case_auth_parse_rejections
+test "shared dashboard: HTTPS login, protected snapshot, public trust, sign-out" case_auth_dashboard
 stop_auth_fixtures
 
 group "files"
