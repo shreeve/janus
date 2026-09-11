@@ -165,11 +165,10 @@ func (h *Handler) provisionBrowse() error {
 
 // ServeHTTP handles admitted requests: on the plain-HTTP port with the
 // mdns front door in shared mode, the handler is the front-door decider
-// (mine serves the front door, not-mine passes through to the next
-// route on the same server — the auto-HTTPS redirects — never 421);
-// everywhere else, site-scoped /ping answers first when enabled and
-// everything else routes through the data plane (registry hosts →
-// upstreams; unknown hosts → 404).
+// (mine serves the front door, not-mine gets the redirect to HTTPS —
+// never 421); everywhere else, site-scoped /ping answers first when
+// enabled and everything else routes through the data plane (registry
+// hosts → upstreams; unknown hosts → 404).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	r.Header.Del(ripSiteHeader)
 	// A local name in wan mode: not served here, front door included.
@@ -180,18 +179,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		// The front door answers for its own names only: the configured
 		// name, the effective (post-conflict) name, and the canonical
 		// hostname. On the shared HTTP port every other Host — an app's
-		// .local host included — passes to the next route, the redirect
-		// to HTTPS, so the name a person types is the app they get. Over
-		// TLS the door's names serve too: https://janus.local/ is the
-		// status page, and /trust/check there is the handshake the trust
-		// page probes from plain HTTP.
+		// .local host included — is redirected to HTTPS here, so the name
+		// a person types is the app they get. The handler cannot leave
+		// that to Caddy's auto-HTTPS redirect routes: the Caddyfile
+		// adapter emits every site block as a terminal route, and a
+		// terminal route's next is an empty handler, so deferring would
+		// answer an empty 200. Over TLS the door's names serve too:
+		// https://janus.local/ is the status page, and /trust/check there
+		// is the handshake the trust page probes from plain HTTP.
 		shared := r.TLS == nil && requestLocalPort(r) == h.app.mdnsSharedPort
 		if (shared || r.TLS != nil) && h.app.mdnsFrontDoorName(normalizeHostHeader(r.Host)) {
 			h.app.mdnsSharedRoutes.ServeHTTP(w, r)
 			return nil
 		}
 		if shared {
-			return next.ServeHTTP(w, r)
+			mdnsSharedRedirect(w, r)
+			return nil
 		}
 	}
 	r, facts := attachAccessFactsRequest(r)

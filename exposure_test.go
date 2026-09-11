@@ -53,9 +53,9 @@ func TestWanExposureRefusesLocalNames(t *testing.T) {
 			}
 		}
 	}
-	// A public name on the shared HTTP port still passes through to the
-	// redirect, as it always does.
-	if code, nextCalled, err := serve("shop.example.com", false); err != nil || !nextCalled || code != http.StatusTeapot {
+	// A public name on the shared HTTP port still gets the redirect to
+	// HTTPS, as it always does.
+	if code, nextCalled, err := serve("shop.example.com", false); err != nil || nextCalled || code != http.StatusPermanentRedirect {
 		t.Errorf("shop.example.com: code %d next %v err %v", code, nextCalled, err)
 	}
 

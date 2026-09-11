@@ -114,11 +114,12 @@ func TestTrustFrontDoor(t *testing.T) {
 	}
 
 	// An app's host is the app's, not the door's. On the shared HTTP port
-	// it passes through to the redirect; over TLS the data plane serves it
-	// (unknown app socket → its 404) and next is never consulted.
+	// it gets the redirect to HTTPS; over TLS the data plane serves it
+	// (unknown app socket → its 404). next is never consulted either way.
 	rr, nextCalled, err := serve("/trust", "shop.local", false)
-	if err != nil || !nextCalled || rr.Code != http.StatusTeapot {
-		t.Errorf("shop.local over HTTP: err %v code %d next %v, want pass-through", err, rr.Code, nextCalled)
+	if err != nil || nextCalled || rr.Code != http.StatusPermanentRedirect || rr.Header().Get("Location") != "https://shop.local/trust" {
+		t.Errorf("shop.local over HTTP: err %v code %d Location %q next %v, want 308 to https://shop.local/trust",
+			err, rr.Code, rr.Header().Get("Location"), nextCalled)
 	}
 	rr, nextCalled, err = serve("/trust", "shop.local", true)
 	var herr caddyhttp.HandlerError

@@ -1051,6 +1051,26 @@ func requestLocalPort(r *http.Request) int {
 	return port
 }
 
+// mdnsSharedRedirect answers a not-mine request on the shared HTTP port
+// with the redirect Caddy's auto-HTTPS routes would have sent: 308 to
+// https://{host}{uri}, the Host stripped of its port and the connection
+// closed. The HTTPS port is never appended, as in Caddy: the standard
+// port cannot be changed externally, so a custom https_port is for
+// internal listening only.
+func mdnsSharedRedirect(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+	}
+	r.Close = true
+	w.Header().Set("Connection", "close")
+	w.Header().Set("Location", "https://"+host+r.URL.RequestURI())
+	w.WriteHeader(http.StatusPermanentRedirect)
+}
+
 // checkMdnsListenCollision refuses a dedicated front-door address that
 // an HTTP-app server in the same config also listens on: Caddy's
 // listener pooling would otherwise share the socket between two servers
@@ -1177,8 +1197,8 @@ func (a *App) mdnsRoutes() http.Handler {
 // mdnsFrontDoor is the dedicated-mode front-door handler: the Host
 // allowlist gate (421 for everything not mine — the listener serves
 // nothing else), then the routes. Shared mode never uses it: there the
-// janus site handler is the decider and not-mine passes through to the
-// HTTP server's other routes instead of 421.
+// janus site handler is the decider and not-mine gets the redirect to
+// HTTPS instead of 421.
 func (a *App) mdnsFrontDoor() http.Handler {
 	routes := a.mdnsRoutes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
