@@ -15,6 +15,8 @@ func TestSystemdUnit(t *testing.T) {
 		`Environment="PATH=/home/ann/.local/bin:/usr/bin:/bin"`,
 		"Restart=on-failure",
 		"RestartSec=10",
+		// A stop that Caddy cannot finish is ended here, not waited on.
+		"TimeoutStopSec=15",
 		"WantedBy=default.target",
 		"StandardOutput=append:/home/ann/.local/state/janus/log/supervisor.log",
 	} {

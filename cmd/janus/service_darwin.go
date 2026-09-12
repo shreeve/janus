@@ -104,6 +104,16 @@ func (l *launchdItem) load() error {
 	return launchctl("bootstrap", l.domain, l.plist)
 }
 
+// restart is launchd's own: kickstart -k ends the running instance
+// (SIGTERM, SIGKILL at ExitTimeOut) and starts it again from the plist
+// launchd holds. A job it does not hold is loaded instead.
+func (l *launchdItem) restart() error {
+	if loaded, _ := l.loaded(); !loaded {
+		return l.load()
+	}
+	return launchctl("kickstart", "-k", l.target())
+}
+
 // unregister removes the plist. A loaded job runs on until 'janus stop'
 // or logout — bootout would kill the edge, and off is not stop — and
 // launchd still revives it after a crash until then.
@@ -160,6 +170,8 @@ func launchdPlist(label string, p servicePaths, exe string) string {
 	</dict>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
+	<key>ExitTimeOut</key>
+	<integer>15</integer>
 	<key>ProcessType</key>
 	<string>Standard</string>
 	<key>StandardOutPath</key>

@@ -165,10 +165,12 @@ service env file is loaded beside it.
 	restart := &cobra.Command{
 		Use: "restart",
 		Long: `
-Stops the running edge gracefully, waits for it to exit (up to 10 s), and
-starts it again, under its autostart item when there is one. Connections
-drop for the moment in between; a config change alone is better served by
-'janus reload', which keeps them.
+Under its autostart item, the manager restarts the edge: a bounded stop
+(SIGTERM, then SIGKILL on the item's timeout) and the same start boot
+performs, so this ends with an edge on the current binary or with an
+error. A bare edge is asked to stop, given 10 s, and ended if it has not
+exited. Connections drop for the moment in between; a config change
+alone is better served by 'janus reload', which keeps them.
 
 This is how an installed upgrade takes effect: install the new binary,
 then 'janus restart'.

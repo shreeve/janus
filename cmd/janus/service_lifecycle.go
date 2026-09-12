@@ -34,6 +34,9 @@ type serviceItem interface {
 	// login or boot from then on. A job the manager still holds from an
 	// earlier file is replaced, so what runs is what the file says.
 	load() error
+	// restart has the manager end the running edge, escalating to a kill
+	// on its own timeout, and start it again from the item.
+	restart() error
 	// unregister removes the item and leaves a running edge alone.
 	// Reports whether there was one.
 	unregister() (bool, error)
@@ -103,7 +106,28 @@ func restartEdge(caddyStop, caddyStart *cobra.Command, p servicePaths, cmd *cobr
 			return fmt.Errorf("%s does not validate; the edge is left as it is:\n%v", p.config, err)
 		}
 	}
+	out := cmd.OutOrStdout()
 	pid := runningPID(p)
+	// An edge the item runs is the manager's to restart: its stop is
+	// bounded (SIGTERM, then SIGKILL on the item's timeout) and its start
+	// is the same one boot performs, so the restart ends with an edge on
+	// the current binary or with an error, never with a process that has
+	// closed its listeners and is waiting on a connection that will not
+	// end.
+	if item := itemFor(p); item != nil && item.registered() {
+		if loaded, ipid := item.loaded(); loaded && ipid > 0 && ipid == pid {
+			if err := item.restart(); err != nil {
+				return fmt.Errorf("restart under %s: %w", item.name(), err)
+			}
+			if !waitEdgeUp(p, 15*time.Second) {
+				return fmt.Errorf("the edge did not answer within 15s of its restart under %s: 'janus status', and the log at %s", item.name(), p.log)
+			}
+			fmt.Fprintf(out, "janus restarted under %s\n", item.name())
+			return nil
+		}
+	}
+	// A bare edge (or a pidfile edge the item is about to take over): ask
+	// it to stop, and end it if it will not.
 	if pid > 0 || controlReachable(p) {
 		// A fresh flag set: the stop and start below must not inherit
 		// anything the operator passed to restart (there is nothing to pass).
@@ -111,12 +135,53 @@ func restartEdge(caddyStop, caddyStart *cobra.Command, p servicePaths, cmd *cobr
 			return fmt.Errorf("stop: %w", err)
 		}
 		if !waitEdgeStopped(p, pid, 10*time.Second) {
-			return fmt.Errorf("the edge did not stop within 10s")
+			if err := forceStop(pid); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "the edge did not stop within 10s; ended pid %d\n", pid)
 		}
 	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), "janus was not running")
+		fmt.Fprintln(out, "janus was not running")
 	}
 	return caddyStart.RunE(caddyStart, nil)
+}
+
+// forceStop ends an edge that did not exit when asked: SIGTERM, then
+// SIGKILL. Caddy without a bounded grace period waits for its last
+// connection forever, and a hub socket never closes on its own; the seed
+// bounds the wait, and this is the floor under an edge that runs another
+// config.
+func forceStop(pid int) error {
+	if pid <= 0 {
+		return errors.New("the edge did not stop within 10s and its pid is unknown: end it yourself, then 'janus start'")
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	_ = proc.Signal(syscall.SIGTERM)
+	if waitGone(pid, 5*time.Second) {
+		return nil
+	}
+	_ = proc.Kill()
+	if waitGone(pid, 5*time.Second) {
+		return nil
+	}
+	return fmt.Errorf("pid %d did not end on SIGKILL", pid)
+}
+
+// waitEdgeUp waits for the control plane to answer.
+func waitEdgeUp(p servicePaths, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if controlReachable(p) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Foreground edges have no supervisor or pidfile. A restart must wait for

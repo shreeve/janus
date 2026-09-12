@@ -165,6 +165,7 @@ type fakeItem struct {
 	reg, isLoaded bool
 	pid           int
 	loads         int
+	restarts      int
 	removed       bool
 	body          string
 }
@@ -179,7 +180,8 @@ func (f *fakeItem) register(p servicePaths, exe string) (bool, error) {
 	f.body, f.reg = body, true
 	return changed, nil
 }
-func (f *fakeItem) load() error { f.loads++; f.isLoaded = true; return nil }
+func (f *fakeItem) load() error    { f.loads++; f.isLoaded = true; return nil }
+func (f *fakeItem) restart() error { f.restarts++; f.isLoaded = true; return nil }
 func (f *fakeItem) unregister() (bool, error) {
 	had := f.reg
 	f.reg, f.removed = false, true
@@ -723,16 +725,22 @@ func TestProbeControlLoopbackIdentity(t *testing.T) {
 func TestStatusJSON(t *testing.T) {
 	p := isolatedHome(t)
 	withFakeItem(t, &fakeItem{reg: true, isLoaded: true, pid: os.Getpid()})
+	// A process with no control plane answering is unresponsive: the
+	// state a stop that never finished leaves behind. Exit 1 (LSB: dead,
+	// but a process remains), and the JSON says which.
 	out, err := run(t, "status", "--json")
-	if err != nil {
-		t.Fatal(err)
+	if exitCode(err) != 1 {
+		t.Fatalf("unresponsive edge: want exit 1, got %v", err)
 	}
 	var st edgeStatus
 	if err := json.Unmarshal([]byte(out), &st); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, out)
 	}
-	if !st.Running || st.PID != os.Getpid() || !st.Autostart || !st.Loaded || st.Supervisor != "fake" || st.Config != p.config || st.Sites != p.sites {
+	if !st.Running || !st.Unresponsive || st.PID != os.Getpid() || !st.Autostart || !st.Loaded || st.Supervisor != "fake" || st.Config != p.config || st.Sites != p.sites {
 		t.Errorf("status: %+v", st)
+	}
+	if text, _ := run(t, "status"); !strings.Contains(text, "edge     unresponsive (pid "+fmtInt(os.Getpid())) || !strings.Contains(text, "'janus restart' replaces it") {
+		t.Errorf("status text:\n%s", text)
 	}
 	// Control did not answer: no apps count, rather than a misleading 0.
 	if st.Apps != nil || st.Control != "" || strings.Contains(out, `"apps"`) {
@@ -759,9 +767,9 @@ func TestStatusPidfileUnderRegisteredItem(t *testing.T) {
 	if err := os.WriteFile(p.pid, []byte(fmtInt(os.Getpid())), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, err := run(t, "status")
-	if err != nil || !strings.Contains(out, "under    pidfile "+p.pid+" (autostart on, but the item is not running it") {
-		t.Errorf("pidfile edge under a registered item: err=%v\n%s", err, out)
+	out, _ := run(t, "status")
+	if !strings.Contains(out, "under    pidfile "+p.pid+" (autostart on, but the item is not running it") {
+		t.Errorf("pidfile edge under a registered item:\n%s", out)
 	}
 	// pid 1 is alive (init) and is not a janus: stale.
 	if err := os.WriteFile(p.pid, []byte("1"), 0o644); err != nil {
