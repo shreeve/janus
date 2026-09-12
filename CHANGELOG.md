@@ -4,16 +4,77 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
-## Unreleased
+## 1.16.0 — 2026-09-11
 
-- On the shared mdns front door, a plain-HTTP request for any Host that
-  is not the door's own — an app's `.local` host, an IP literal —
-  answers 308 to `https://{host}{uri}` from the janus handler itself. It
-  used to defer to Caddy's auto-HTTPS redirect routes through `next`,
-  but the Caddyfile adapter emits every site block as a terminal route
-  and Caddy hands a terminal route an empty `next`, so
-  `http://rip.local/` answered an empty 200 while `http://janus.local/`
-  served the dashboard.
+- Site auth gates run before the shared status dashboard. A root
+  `gate /` protects both the page and `/status.json`, including on a
+  public HTTPS hostname; `/auth` handles login and sign-out without an
+  app registration. Public access requires DNS, a valid TLS certificate,
+  and network reachability.
+- Auth-enabled shared HTTP sites redirect dashboard GET/HEAD requests
+  to HTTPS and reject credentials submitted directly over HTTP. Exact
+  certificate-trust onboarding routes remain public so a new device
+  can establish HTTPS before signing in.
+- Configured, canonical, and conflict-renamed dashboard names follow
+  their matching site's auth policy. Auth is opt-in and site-scoped;
+  explicit `auth off` stays open. The dedicated `mdns listen` listener
+  is outside site auth; authenticated dashboards use shared mode.
+- Documentation and the example configuration cover protecting every
+  dashboard hostname and both protocols.
+
+## 1.15.2 — 2026-09-11
+
+- The shared mdns front door directly answers plain-HTTP requests for
+  other hosts with a 308 redirect to HTTPS, preserving the path and
+  query. This fixes empty 200 responses for URLs such as
+  `http://cart.local/cart?item=3`: Caddy's terminal site routes prevent
+  handing these requests to its automatic HTTPS redirects.
+- Regression coverage includes terminal routes, port handling,
+  IPv4/IPv6 literals, and front-door behavior.
+
+## 1.15.1 — 2026-09-11
+
+- Managed LAN mode advertises exactly the selected private IPv4 address
+  on the selected interface for Janus and app names. This fixes
+  intermittent `.local` failures from advertising IPv6 addresses that
+  the LAN exposure policy does not serve.
+- Mode, interface, and address changes withdraw and replace the
+  advertisements; identical configuration reloads remain stable.
+  Localhost and WAN modes do not advertise unreachable LAN names.
+- Explicit mdns interface restrictions must include the selected LAN
+  interface. Standalone Caddy configurations retain IPv4/IPv6 discovery.
+
+## 1.15.0 — 2026-09-11
+
+- The status dashboard uses the circular Janus icon and a light/dark
+  toggle that remembers the selection in the browser without a URL
+  parameter. The browser dashboard remains read-only; tenants own app
+  lifecycle and re-register after an edge restart.
+- `janus status` inspects the service's CA and configured storage,
+  preferring the running edge's certificate. Status JSON includes
+  resolved dashboard and peer trust URLs when available. Public HTTPS
+  on the trust page does not imply trust in Janus's local CA.
+- `/1.0` reports `app_count` and the running `heartbeat_ttl`;
+  `/1.0/mdns` reports `dashboard_url` and `trust_url`, accounting for
+  custom ports, renamed hosts, listener reach, and route ownership.
+- Config-selected `janus stop` loads the service environment and accepts
+  `--envfile`. Explicit `stop --address` works with broken service
+  configuration. Restart stops foreground edges through their control
+  listener. Configuration commands share Caddy envfile semantics and
+  service config identity.
+- Root autostart checks the executable, symlinks, and every path
+  component. Binary installation is atomic and preserves required
+  permissions and capabilities before replacing the executable.
+- App listings include site patterns and aliases. Directory serving
+  validates setup before announcing success. CLI control transports
+  are reused and closed.
+- Control requests reject repeated JSON keys. Confined file serving
+  rejects special files without blocking. Shared route inventories
+  preserve nested host constraints, and ineffective heartbeat-TTL
+  reloads fail explicitly.
+- Service command modules and acceptance cases are split by concern;
+  acceptance fixtures use isolated run directories. Operator contracts,
+  migration guidance, and macOS, Linux, and tenant checks are updated.
 
 ## 1.14.1 — 2026-09-10
 
