@@ -4,7 +4,7 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
-## Unreleased
+## 1.17.0 — 2026-09-12
 
 - A restart always finishes. Under the autostart item, `janus restart`
   is the manager's own restart, a bounded stop with SIGKILL on its
