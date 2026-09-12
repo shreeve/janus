@@ -103,10 +103,9 @@ func TestStatusReportsExposure(t *testing.T) {
 	p := isolatedHome(t)
 	fakeHostPf(t).bare()
 	withFakeItem(t, &fakeItem{reg: true, isLoaded: true, pid: os.Getpid()})
-	out, err := run(t, "status", "--json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The fake pid has no control plane, so status exits 1 (unresponsive);
+	// the JSON is complete regardless, and exposure is what this reads.
+	out, _ := run(t, "status", "--json")
 	var st edgeStatus
 	if err := json.Unmarshal([]byte(out), &st); err != nil {
 		t.Fatal(err)

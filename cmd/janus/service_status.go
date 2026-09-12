@@ -64,26 +64,30 @@ func adminClient(address string) (*http.Client, string) {
 
 // edgeStatus is what 'janus status' knows, in one value.
 type edgeStatus struct {
-	Running     bool   `json:"running"`
-	PID         int    `json:"pid,omitempty"`
-	Uptime      string `json:"uptime,omitempty"`
-	Supervisor  string `json:"supervisor,omitempty"` // item name, or "pidfile"
-	Autostart   bool   `json:"autostart"`            // the item file exists
-	Loaded      bool   `json:"loaded"`               // the manager holds the job
-	Binary      string `json:"binary"`
-	Version     string `json:"version"`
-	Janus       string `json:"janus"`
-	Caddy       string `json:"caddy"`
-	BinaryNewer bool   `json:"binary_newer"`
-	Config      string `json:"config"`
-	Sites       string `json:"sites"`
-	Env         string `json:"env"`
-	State       string `json:"state"`
-	Socket      string `json:"socket"` // control internal socket
-	Admin       string `json:"admin"`  // Caddy admin socket
-	Log         string `json:"log"`
-	Control     string `json:"control,omitempty"`
-	Apps        *int   `json:"apps,omitempty"` // only when control answered
+	Running bool `json:"running"`
+	// Unresponsive: a process, but no control plane answers. An edge
+	// draining after a stop that never finishes looks exactly like this;
+	// so does one that crashed short of its listeners.
+	Unresponsive bool   `json:"unresponsive,omitempty"`
+	PID          int    `json:"pid,omitempty"`
+	Uptime       string `json:"uptime,omitempty"`
+	Supervisor   string `json:"supervisor,omitempty"` // item name, or "pidfile"
+	Autostart    bool   `json:"autostart"`            // the item file exists
+	Loaded       bool   `json:"loaded"`               // the manager holds the job
+	Binary       string `json:"binary"`
+	Version      string `json:"version"`
+	Janus        string `json:"janus"`
+	Caddy        string `json:"caddy"`
+	BinaryNewer  bool   `json:"binary_newer"`
+	Config       string `json:"config"`
+	Sites        string `json:"sites"`
+	Env          string `json:"env"`
+	State        string `json:"state"`
+	Socket       string `json:"socket"` // control internal socket
+	Admin        string `json:"admin"`  // Caddy admin socket
+	Log          string `json:"log"`
+	Control      string `json:"control,omitempty"`
+	Apps         *int   `json:"apps,omitempty"` // only when control answered
 	// The local CA that signs .local and .localhost names: its root
 	// certificate on disk, whether this machine's trust store accepts it,
 	// and the front door a phone trusts it from (when mdns answered).
@@ -148,6 +152,7 @@ func gatherStatus(p servicePaths) edgeStatus {
 		}
 	}
 	st.Running = st.PID > 0 || st.Control != ""
+	st.Unresponsive = st.PID > 0 && st.Control == ""
 	gatherCA(&st, p)
 	if st.PID > 0 {
 		st.Uptime = elapsed(st.PID)
@@ -296,17 +301,25 @@ func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool, note string) er
 		}
 		printStatus(out, p, st)
 	}
-	if !st.Running {
-		// Exit 3 (LSB "not running") for scripts; the output already
-		// said it, so no error text.
+	// LSB exit codes for scripts, with the text already on the output:
+	// 3 for "not running", 1 for "dead, but a process remains".
+	switch {
+	case !st.Running:
 		cmd.SilenceErrors = true
 		return &exitError{code: 3, err: errors.New("janus is not running")}
+	case st.Unresponsive:
+		cmd.SilenceErrors = true
+		return &exitError{code: 1, err: errors.New("janus is not answering")}
 	}
 	return nil
 }
 
 func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 	switch {
+	case st.Unresponsive && st.Uptime != "":
+		fmt.Fprintf(out, "edge     unresponsive (pid %d, up %s): a process, but no control plane answers; 'janus restart' replaces it\n", st.PID, st.Uptime)
+	case st.Unresponsive:
+		fmt.Fprintf(out, "edge     unresponsive (pid %d): a process, but no control plane answers; 'janus restart' replaces it\n", st.PID)
 	case st.Running && st.PID > 0 && st.Uptime != "":
 		fmt.Fprintf(out, "edge     running (pid %d, up %s)\n", st.PID, st.Uptime)
 	case st.Running && st.PID > 0:

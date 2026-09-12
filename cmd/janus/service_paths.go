@@ -102,6 +102,12 @@ func seedConfig(p servicePaths) string {
 		protocols h1 h2
 	}
 
+	# A stop, restart, or reload gives open connections this long to
+	# finish, then closes them. Without a bound Caddy waits for the last
+	# connection forever, and a hub socket is open forever: the edge
+	# would drop its listeners and never exit.
+	grace_period 10s
+
 	# The local names below use the edge's own CA, one certificate per
 	# name, minted at the first handshake for names registered with the
 	# edge (a wildcard would not do: clients reject *.local and

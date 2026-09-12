@@ -4,6 +4,22 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## Unreleased
+
+- A restart always finishes. Under the autostart item, `janus restart`
+  is the manager's own restart, a bounded stop with SIGKILL on its
+  timeout (`TimeoutStopSec=15`, `ExitTimeOut` 15) and then the start
+  boot performs; a bare edge that has not exited 10 s after its stop is
+  ended with SIGTERM, then SIGKILL, before the new one starts. Before,
+  restart gave up after 10 s and left an edge that had closed its
+  listeners and was waiting on a connection that would never end.
+- The seeded Caddyfile bounds the shutdown grace period (`grace_period
+  10s`). Without a bound Caddy waits for its last connection forever,
+  and a hub socket is open forever. An existing Caddyfile takes the
+  line by hand; `janus reload` applies it.
+- `janus status` names an edge that is alive without a control plane
+  as `unresponsive` (exit 1), instead of `running`.
+
 ## 1.16.0 — 2026-09-11
 
 - Site auth gates run before the shared status dashboard. A root

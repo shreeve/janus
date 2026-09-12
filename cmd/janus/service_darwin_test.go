@@ -19,6 +19,8 @@ func TestLaunchdPlist(t *testing.T) {
 		"<key>RunAtLoad</key>\n\t<true/>",
 		"<key>SuccessfulExit</key>\n\t\t<false/>",
 		"<integer>10</integer>",
+		// A stop that Caddy cannot finish is ended here, not waited on.
+		"<key>ExitTimeOut</key>\n\t<integer>15</integer>",
 		// Normal scheduling priority: the browser is waiting on every
 		// request through the edge, and launchd's Background band would
 		// starve it under load.

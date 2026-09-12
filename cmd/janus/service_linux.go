@@ -109,6 +109,15 @@ func (s *systemdItem) load() error {
 	return err
 }
 
+// restart is systemd's own: SIGTERM, SIGKILL at TimeoutStopSec, then the
+// unit starts again on the binary the file names. A hit start limit is
+// cleared first, as in load.
+func (s *systemdItem) restart() error {
+	_, _ = s.systemctl("reset-failed", s.service())
+	_, err := s.systemctl("restart", s.service())
+	return err
+}
+
 // unregister disables and removes the unit; a running edge keeps running.
 func (s *systemdItem) unregister() (bool, error) {
 	if !s.registered() {
@@ -155,6 +164,7 @@ ExecReload=%q reload --config %q --adapter caddyfile
 WorkingDirectory=%s
 %sRestart=on-failure
 RestartSec=10
+TimeoutStopSec=15
 StandardOutput=append:%s
 StandardError=append:%s
 
