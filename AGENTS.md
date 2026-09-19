@@ -164,6 +164,8 @@ Benchmarks: [`bench/README.md`](bench/README.md) — measures, never gates.
 
 ## Pointers
 
-- `HANDOFF.md` — optional untracked session snapshot; never committed.
+- [HANDOFF.md](HANDOFF.md) — the newcomer's entry point: reading order, tree
+  map, how work moves, what trips a newcomer, and a dated state snapshot
+  to refresh when an area changes.
 - [certs/README.md](certs/README.md) — the intentional public
   `*.ripdev.io` TLS material.
