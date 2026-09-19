@@ -237,12 +237,10 @@ Verified at main `25501a8`, 2026-09-18:
 - **Release.** `v1.17.0` (2026-09-12) is the latest tag and sits on
   main's head. `go test ./...` passes on this machine (module,
   `cmd/janus`, `internal/strictjson`). No open pull requests.
-- **Pins are stale.** README's `go install …@v1.14.1` and `bash -s
-  v1.14.1` lines and `install.sh`'s header example still say 1.14.1;
-  releases 1.15.0 through 1.17.0 were tagged on merge commits without
-  the pin bump. `install.sh` itself resolves the latest release, so
-  only the documentation is behind. The next release branch should
-  bring all three to its version.
+- **Pins.** README's `go install …@v1.17.0` and `bash -s v1.17.0` lines and
+  `install.sh`'s header example name the latest tag; a release branch
+  bumps all three with the changelog entry. `install.sh` itself
+  resolves the latest release at run time.
 - **Recent work (1.14.1 → 1.17.0).** A stewardship round
   ([review](docs/20260910-100643-stewardship-review.md),
   [resolution](docs/20260910-120000-stewardship-resolution.md)) fixed
