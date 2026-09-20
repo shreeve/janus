@@ -4,6 +4,40 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.18.0 — 2026-09-20
+
+- On macOS a user's janus installs as an application bundle,
+  `~/Applications/Janus.app`, with the `janus` command on PATH a symlink
+  into it. macOS identifies the bundle: its row under System Settings →
+  Privacy & Security → Local Network reads "Janus" with the logo, and
+  the permission prompt carries a usage description. Upgrades swap in a
+  complete new bundle under the same identifier and path, so the row and
+  its grant survive. Root keeps the bare binary in `/usr/local/bin`; a
+  launchd daemon is exempt from Local Network privacy. Linux and Windows
+  are unchanged.
+- Every macOS build is signed ad hoc as `com.github.shreeve.janus`:
+  `make janus`, the release workflow, the archive installer, and
+  `install.sh` for older archives. An unnamed Go binary appears to macOS
+  as `a.out`, and a launchd agent filed under that name was silently
+  denied inbound multicast, so `janus.local` was announced and never
+  answered.
+- `janus autostart` registers the executable inside the bundle and names
+  the bundle in the item (`AssociatedBundleIdentifiers`). `janus restart`
+  rewrites and reloads a service item whose file no longer names the
+  installed executable, and says so, instead of restarting the old spec.
+- The installers stage a verified copy and swap it in by rename, refuse a
+  bundle signed under another identifier, a non-bundle at the
+  destination, and a quarantined download (naming the `xattr` command
+  that clears it), and touch the executable so `janus status` still
+  reports a newer binary. `install.sh --uninstall` refuses while the
+  service item is installed and removes the bundle with the command.
+- `make install` chooses its destination as `install.sh` does
+  (`~/.local/bin` for a user, `/usr/local/bin` for root); `make bundle`
+  builds `Janus.app` from `bin/janus`.
+- Documentation: the Local Network privacy record with the one-pass
+  setup for a new Mac and the Recovery reset, the application-bundle
+  contract, and the operator procedure.
+
 ## 1.17.0 — 2026-09-12
 
 - A restart always finishes. Under the autostart item, `janus restart`
