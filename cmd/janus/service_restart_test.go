@@ -63,6 +63,10 @@ func TestRestartUnderItemIsTheManagers(t *testing.T) {
 	p := isolatedHome(t)
 	f := &fakeItem{reg: true, isLoaded: true, pid: os.Getpid()}
 	withFakeItem(t, f)
+	// The item already names this executable: nothing to re-register.
+	if exe, err := installedExe(p); err == nil {
+		f.register(p, exe)
+	}
 	if err := os.MkdirAll(p.run, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -137,5 +141,40 @@ func TestSeedBoundsTheGracePeriod(t *testing.T) {
 	p := isolatedHome(t)
 	if !strings.Contains(seedConfig(p), "\n\tgrace_period 10s\n") {
 		t.Fatalf("seed lacks a bounded grace period:\n%s", seedConfig(p))
+	}
+}
+
+// An item whose file names another executable (an install that moved the
+// edge into Janus.app behind the same command) is rewritten and reloaded
+// by restart, so the edge that comes back is the installed one.
+func TestRestartReregistersStaleItem(t *testing.T) {
+	p := isolatedHome(t)
+	f := &fakeItem{reg: true, isLoaded: true, pid: os.Getpid(), body: "/old/janus " + p.config}
+	withFakeItem(t, f)
+	if err := os.MkdirAll(p.run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", p.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"type":"janus","control":[{"mode":"internal","listen":%q}]}`, p.sock)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	calls := []string{}
+	stop := &cobra.Command{RunE: func(*cobra.Command, []string) error { calls = append(calls, "stop"); return nil }}
+	start := &cobra.Command{RunE: func(*cobra.Command, []string) error { calls = append(calls, "start"); return nil }}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := restartEdge(stop, start, p, cmd); err != nil {
+		t.Fatal(err)
+	}
+	exe, _ := installedExe(p)
+	if f.loads != 1 || f.restarts != 0 || len(calls) != 0 || f.body != exe+" "+p.config ||
+		!strings.Contains(out.String(), "fake now runs "+exe) || !strings.Contains(out.String(), "janus restarted under fake") {
+		t.Fatalf("loads=%d restarts=%d calls=%v body=%q output=%s", f.loads, f.restarts, calls, f.body, out.String())
 	}
 }

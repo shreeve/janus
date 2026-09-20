@@ -35,6 +35,19 @@ func TestLaunchdPlist(t *testing.T) {
 	if strings.Contains(got, "<key>KeepAlive</key>\n\t<true/>") {
 		t.Error("KeepAlive is unconditional")
 	}
+	// A bare executable names no bundle; one inside Janus.app does.
+	if strings.Contains(got, "AssociatedBundleIdentifiers") {
+		t.Error("bare executable names a bundle")
+	}
+	bundled := launchdPlist("janus.edge", p, "/Users/ann/Applications/Janus.app/Contents/MacOS/janus")
+	for _, want := range []string{
+		"<string>/Users/ann/Applications/Janus.app/Contents/MacOS/janus</string>",
+		"<key>AssociatedBundleIdentifiers</key>\n\t<array>\n\t\t<string>com.github.shreeve.janus</string>\n\t</array>",
+	} {
+		if !strings.Contains(bundled, want) {
+			t.Errorf("bundled plist lacks %q:\n%s", want, bundled)
+		}
+	}
 	item := newServiceItem(p).(*launchdItem)
 	if item.plist != "/Users/ann/Library/LaunchAgents/janus.edge.plist" || !strings.HasPrefix(item.domain, "gui/") {
 		t.Errorf("user item: %+v", item)

@@ -4,8 +4,7 @@ Read this first, then the documents it points to. It says what Janus
 is, how work moves through this repository, what a newcomer trips on,
 and where the current state of each area is recorded. It states
 present facts; `git log` holds the history. State snapshot taken
-2026-09-18 at main `25501a8` (tag `v1.17.0`); anything dated below is
-verified as of then.
+2026-09-20 at tag `v1.18.0`; anything dated below is verified as of then.
 
 ## Reading order
 
@@ -78,6 +77,8 @@ certs/              the intentional public *.ripdev.io wildcard pair (127.0.0.1)
 Caddyfile           working multi-site cascade config; Caddyfile.minimal (operator start),
                     Caddyfile.example (every knob) both validate standalone
 install.sh          curl | bash installer for the prebuilt archives; scripts/ packages them
+scripts/            package-release.sh (archives), release-install.sh (the archive installer and
+                    make install), bundle-macos.sh (Janus.app from a built binary)
 .github/workflows/  check.yml (Go on ubuntu-24.04 + macos-15, then foreground acceptance on
                     macos-15) and release.yml (checks, then five archives, then the Release)
 ```
@@ -189,6 +190,25 @@ certificate for them, and mdns announces nothing.
   (or the configured, canonical, or conflict-renamed name) gets the
   dashboard; an app's `.local` host on the shared plain-HTTP port gets
   a 308 to HTTPS. Site auth gates (`gate /`) run before the dashboard.
+- **macOS Local Network privacy gates the agent.** Since macOS 15 a user
+  launchd agent needs its own Local Network grant; daemons, root, and
+  Terminal children are exempt. A denied edge announces `janus.local`
+  and never hears a query, from anyone, with nothing logged: the kernel
+  drops inbound multicast for that process. `dns-sd -B _http._tcp` then
+  shows `janus` on interface 1 (loopback) only. Fix: System Settings →
+  Privacy & Security → Local Network, turn on the janus row, `janus
+  restart`. The row is named by the code-signing identifier: `install.sh`,
+  the archives, and `make install` sign every binary as
+  `com.github.shreeve.janus` (an unnamed Go binary is `a.out`). On
+  macOS they install `~/Applications/Janus.app` and link the command
+  into it, so the row reads "Janus" with the logo and `janus autostart`
+  registers the bundle's executable. Never
+  re-sign an installed binary under another name, and never `cp` over
+  it in place; replace it with a new file renamed into place. The
+  policy lives in `/Library/Preferences/com.apple.networkextension.plist`
+  (world-readable, `plutil -p`), not in TCC. `janus run` from a shell
+  cannot reproduce it. Full account and one-pass setup:
+  [docs/20260919-225500-macos-local-network-privacy.md](docs/20260919-225500-macos-local-network-privacy.md).
 - **macOS binds the wildcard.** Low ports without root force the
   wildcard socket, so a pf anchor (`/etc/pf.anchors/janus`) is what
   scopes `localhost` and `lan`; `sudo janus firewall` is the single
@@ -225,23 +245,23 @@ certificate for them, and mdns announces nothing.
   tenant; its `packages/sites/rip.caddy` is the drop-in an app ships
   into `~/.config/janus/sites/`), `duckdb-harbor` (whose service verbs
   Janus's mirror), `medlabs` (the production tenant).
-- Installed edges: this machine and the `live` host (Linux, user
-  systemd unit `janus.service`, `wan`) both run 1.17.0; live's seed is
-  current (hub bridge on). An edge's own Caddyfile, sites drop-ins,
+- Installed edges: this machine (macOS 27, `Janus.app`, `lan`) and the
+  `live` host (Linux, user systemd unit `janus.service`, `wan`); live's
+  seed is current (hub bridge on). An edge's own Caddyfile, sites drop-ins,
   and CA live under `~/.config/janus/` and `~/.local/state/janus/`.
 
 ## State of the tree
 
-Verified at main `25501a8`, 2026-09-18:
+Verified 2026-09-20:
 
-- **Release.** `v1.17.0` (2026-09-12) is the latest tag and sits on
+- **Release.** `v1.18.0` (2026-09-20) is the latest tag and sits on
   main's head. `go test ./...` passes on this machine (module,
   `cmd/janus`, `internal/strictjson`). No open pull requests.
-- **Pins.** README's `go install …@v1.17.0` and `bash -s v1.17.0` lines and
+- **Pins.** README's `go install …@v1.18.0` and `bash -s v1.18.0` lines and
   `install.sh`'s header example name the latest tag; a release branch
   bumps all three with the changelog entry. `install.sh` itself
   resolves the latest release at run time.
-- **Recent work (1.14.1 → 1.17.0).** A stewardship round
+- **Recent work (1.14.1 → 1.18.0).** A stewardship round
   ([review](docs/20260910-100643-stewardship-review.md),
   [resolution](docs/20260910-120000-stewardship-resolution.md)) fixed
   the reproduced defects across the service commands, control
@@ -253,7 +273,12 @@ Verified at main `25501a8`, 2026-09-18:
   to HTTPS (1.15.2); site auth gates run before the dashboard, and
   auth-enabled shared HTTP sites redirect dashboard requests to HTTPS
   (1.16.0); `janus restart` always finishes, with a bounded stop and
-  SIGKILL, and the seed carries `grace_period 10s` (1.17.0).
+  SIGKILL, and the seed carries `grace_period 10s` (1.17.0); macOS
+  installs `Janus.app` signed as `com.github.shreeve.janus`, after a
+  launchd agent filed as `a.out` was silently denied inbound multicast
+  by Local Network privacy
+  ([record](docs/20260919-225500-macos-local-network-privacy.md),
+  [contract](docs/20260920-001500-macos-app-bundle.md)) (1.18.0).
 - **Exposure modes** (1.13.0–1.14.1) are the front-door contract in
   [exposure-modes](docs/20260907-000352-exposure-modes.md); the wan
   refusals of local name families are in `exposure.go` and pinned in

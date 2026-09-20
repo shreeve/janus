@@ -259,7 +259,7 @@ make janus        # go build ./cmd/janus -> bin/janus
 From anywhere, against a published version:
 
 ```bash
-go install github.com/shreeve/janus/cmd/janus@v1.17.0
+go install github.com/shreeve/janus/cmd/janus@v1.18.0
 ```
 
 Janus also remains a plain Caddy module: builders that assemble their own
@@ -318,6 +318,18 @@ hub (bridge mode, same-origin pages), precompressed files, and an access
 log in the janus format beside the process log. Apps register hosts under
 both, and everything else is a drop-in `*.caddy` file of your own.
 
+On macOS a user's janus is installed as an application bundle,
+`~/Applications/Janus.app`, and the `janus` command on PATH is a symlink
+into it. The bundle is what macOS identifies: its row under Local Network
+reads "Janus" with the logo, and the service item runs the executable
+inside it. Upgrades swap in a complete new bundle and keep the same
+identifier and path, so the one row and its grant survive; `janus restart`
+re-registers the service item when an install moved the edge. Root keeps
+the bare binary in `/usr/local/bin` (a daemon is exempt from Local
+Network privacy). `install.sh --uninstall` removes the command and the
+bundle once `janus autostart off stop` has taken the item down. Linux
+installs the bare binary as before.
+
 The supervisor is launchd on macOS and systemd on Linux. As a user the
 service is a login item (`~/Library/LaunchAgents/janus.edge.plist`, or a
 systemd user unit, for which `autostart` also enables lingering so the
@@ -325,6 +337,32 @@ edge survives logout); as root it is a system service
 (`/Library/LaunchDaemons`, or `/etc/systemd/system/janus.service`). It runs
 `janus run --config <Caddyfile>` in the foreground, restarts it after a
 crash, and never after a clean exit.
+
+On macOS the user-level service is subject to Local Network privacy
+(macOS 15 and later). A launchd agent is judged on its own, so a denied
+edge announces `janus.local` while every query for it, from this machine
+or a phone, goes unanswered, with nothing in its log: the kernel drops
+inbound multicast for that one process. The fix is System Settings →
+Privacy & Security → Local Network: turn on the row for the janus
+executable, then `janus restart`. The row carries the executable's
+code-signing identifier. `install.sh`, the release archives, and `make
+install` sign every janus binary as `com.github.shreeve.janus`, so the
+row keeps its name and its grant across upgrades (an unnamed Go binary
+would appear as `a.out`). Never re-sign an installed binary under another
+name: macOS then holds several identities for one build UUID and can
+strand the edge deaf under all of them. Replace the binary the way
+`install.sh` does, a new file renamed over the old one; a `cp` onto the
+existing file keeps an inode whose signature macOS has cached, and every
+later launch of it is killed. The full account and the one-pass
+setup for a new Mac are in
+[docs/20260919-225500-macos-local-network-privacy.md](docs/20260919-225500-macos-local-network-privacy.md). A root service (a
+launchd daemon) and a tool run from Terminal are exempt, so `janus run`
+from a shell always hears the LAN even when the agent does not. `tccutil`
+does not cover this list, and `sudo` cannot remove the policy file. Linux
+has no equivalent. A phone that opens `http://janus.local/trust` then
+takes three steps of its own: download the profile, install it under
+General → VPN & Device Management, and enable it under General → About →
+Certificate Trust Settings.
 
 The service's files:
 
@@ -473,7 +511,7 @@ curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bas
 Then `janus autostart` makes it the host's edge
 ([Running as a service](#running-as-a-service)).
 
-Pin a version with `... | bash -s v1.17.0`. Uninstall with
+Pin a version with `... | bash -s v1.18.0`. Uninstall with
 `... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
 units, and certificates stay.
 
@@ -512,7 +550,8 @@ For a local development build:
 make janus              # working tree -> bin/janus
 make unit               # fast Go test suite
 make test               # build + unit + acceptance suite
-make install            # build + install -> /usr/local/bin/janus
+make install            # build + install: ~/.local/bin as a user, /usr/local/bin as root
+#                         (macOS: ~/Applications/Janus.app, with janus linked into it)
 # make install BIN="$HOME/bin"
 ```
 

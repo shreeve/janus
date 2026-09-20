@@ -116,6 +116,26 @@ func restartEdge(caddyStop, caddyStart *cobra.Command, p servicePaths, cmd *cobr
 	// end.
 	if item := itemFor(p); item != nil && item.registered() {
 		if loaded, ipid := item.loaded(); loaded && ipid > 0 && ipid == pid {
+			// The item runs what its file says. When this command no
+			// longer resolves to that executable (an install that moved
+			// the edge into Janus.app behind the same command name), the
+			// file is rewritten and the manager reloads it, so the edge
+			// that comes back is the installed one.
+			if exe, err := installedExe(p); err == nil {
+				if changed, err := item.register(p, exe); err != nil {
+					return fmt.Errorf("update %s: %w", item.name(), err)
+				} else if changed {
+					fmt.Fprintf(out, "%s now runs %s\n", item.name(), exe)
+					if err := item.load(); err != nil {
+						return fmt.Errorf("reload %s: %w", item.name(), err)
+					}
+					if !waitEdgeUp(p, 15*time.Second) {
+						return fmt.Errorf("the edge did not answer within 15s of its restart under %s: 'janus status', and the log at %s", item.name(), p.log)
+					}
+					fmt.Fprintf(out, "janus restarted under %s\n", item.name())
+					return nil
+				}
+			}
 			if err := item.restart(); err != nil {
 				return fmt.Errorf("restart under %s: %w", item.name(), err)
 			}
@@ -430,10 +450,12 @@ func serviceEdgeReady(st scopeState) error {
 	return foreignListener(st, runtime.GOOS, dialTCP)
 }
 
-// installedExe is the binary the item runs: this one, by the path it was
-// invoked as when that names the same file (a versioned install's stable
-// symlink rather than the resolved target that vanishes on upgrade). A
-// root item refuses a binary that someone other than root can change.
+// installedExe is the executable the item runs: this one, by the path it
+// was invoked as when that names the same file (a versioned install's
+// stable symlink rather than a target that vanishes on upgrade), except
+// that a command resolving into an application bundle registers the
+// bundle's own executable (bundleExecutable). A root item refuses a binary
+// that someone other than root can change.
 func installedExe(p servicePaths) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -450,6 +472,7 @@ func installedExe(p servicePaths) (string, error) {
 			}
 		}
 	}
+	exe = bundleExecutable(exe)
 	if p.root && !rootOwnedAndPrivate(exe) {
 		return "", fmt.Errorf("%s is not root-owned and unwritable by others; a system service must not run a binary another user can change (install as root: 'curl -fsSL .../install.sh | sudo bash' puts it in /usr/local/bin)", exe)
 	}
@@ -470,4 +493,38 @@ func runOut(name string, args ...string) ([]byte, error) {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
 	}
 	return stdout.Bytes(), nil
+}
+
+// bundleExecutable returns the executable inside an application bundle
+// when exe resolves into one (…/Name.app/Contents/MacOS/…), and exe itself
+// otherwise. The command on PATH is a symlink into Janus.app on macOS;
+// macOS attributes the process to the bundle (its identity for Local
+// Network privacy, its name and icon in System Settings) only when the
+// bundle's own executable is what launchd starts.
+// bundleIdentifier is Janus.app's CFBundleIdentifier, the name macOS files
+// Local Network privacy decisions under; the Makefile and the installers
+// carry the same literal.
+const bundleIdentifier = "com.github.shreeve.janus"
+
+func bundleExecutable(exe string) string {
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil || !inBundle(resolved) {
+		return exe
+	}
+	return resolved
+}
+
+// inBundle reports whether path is an executable inside an application
+// bundle.
+func inBundle(path string) bool {
+	macos := filepath.Dir(path)
+	contents := filepath.Dir(macos)
+	return filepath.Base(macos) == "MacOS" && filepath.Base(contents) == "Contents" &&
+		strings.HasSuffix(filepath.Dir(contents), ".app")
+}
+
+// bundlePath is the .app directory holding an executable inBundle reports
+// true for.
+func bundlePath(exe string) string {
+	return filepath.Dir(filepath.Dir(filepath.Dir(exe)))
 }

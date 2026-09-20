@@ -118,3 +118,71 @@ Plain HTTP LAN discovery and `/trust` are intentional bootstrap paths:
 a device cannot necessarily validate the local CA before installing it.
 Future public redirect/HSTS changes must preserve that bootstrap and the
 exposure-mode contract.
+
+## macOS Local Network privacy
+
+macOS 15 and later subject a user launchd agent to Local Network
+privacy. Daemons, processes running as root, and tools run from Terminal
+(with their children) are exempt; the user service that `janus autostart`
+installs is not.
+
+Symptom: `/1.0/mdns` reports `janus.local` announced, TCP on ports 80 and
+443 works by address, yet no device resolves the name, this machine
+included. The kernel drops inbound multicast for the denied process
+before it reaches the socket, so the edge log is silent and no drop
+counter moves. `dns-sd -B _http._tcp` shows the `janus` instance on
+interface 1 (loopback) only; a healthy edge shows it on the LAN interface
+too.
+
+Check: the policy is world-readable.
+
+```bash
+plutil -p /Library/Preferences/com.apple.networkextension.plist | grep -n -A20 '"Path" =>' | grep -E 'janus|DenyMulticast|MulticastPreferenceSet'
+```
+
+A rule with `DenyMulticast => true` for the executable's path is the
+denial. `tccutil` does not manage this list, and `sudo rm` of the policy
+file is refused.
+
+Fix: System Settings → Privacy & Security → Local Network, turn on the
+row for the janus executable, then `janus restart`. The restart is
+required: a process keeps the decision it received when it started, so
+an edge that was running when the row was turned on stays deaf until it
+is restarted. An allowed process that still hears nothing after a reboot
+is a known macOS defect; turning the row off and on, then restarting the
+edge, clears it.
+
+Replace the binary by writing a new file and renaming it over the old
+one, as `install.sh` and `make install` do. Overwriting the executable in
+place (`cp` onto the existing file, `codesign -f` on it) keeps the inode
+whose signature macOS has already cached: every later launch of it is
+killed outright (exit 137), and an edge already started from it has no
+identity macOS can match, so no Local Network rule is ever created for
+it.
+
+On macOS the installers lay down `~/Applications/Janus.app` for a user and
+make `$BIN/janus` a symlink into it; `janus autostart` registers the
+bundle's executable, so the row reads "Janus" with the logo and the
+permission prompt names it. Root keeps the bare binary, exempt as a daemon.
+A Mac upgraded from a bare install keeps the old row for the bare binary,
+inert; `janus restart` re-registers the item onto the bundle, the "Janus"
+row appears at that start, turn it on once and restart again. Contract:
+[macos-app-bundle](../20260920-001500-macos-app-bundle.md).
+
+Identity: the row is named by the executable's code-signing identifier
+and keyed with its path and build UUID. `install.sh`, the release
+archives, and `make install` (`scripts/release-install.sh`) sign every
+janus binary as `com.github.shreeve.janus`, on the staged copy before it
+is renamed into place, so the name and its grant survive upgrades. A
+binary built some other way is `a.out` until it is signed the same way:
+
+```bash
+codesign -s - -f -i com.github.shreeve.janus bin/janus
+```
+
+Do not rename an installed binary: each name creates another rule for
+the same build UUID, macOS may then resolve the process to none of them,
+and the edge stays deaf under every name until a freshly built binary
+replaces it. Rows for deleted executables cannot be removed from the
+list; they are inert. The investigation record and the one-pass setup for a
+new Mac: [20260919-225500-macos-local-network-privacy.md](../20260919-225500-macos-local-network-privacy.md).
