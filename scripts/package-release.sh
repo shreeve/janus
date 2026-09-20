@@ -43,8 +43,16 @@ else
     echo "package-release: bin/janus not found" >&2
     exit 2
   }
-  cp bin/janus "$root/janus"
-  chmod 0755 "$root/janus"
+  if [[ "$PLAT" == osx-* ]]; then
+    # macOS ships the application bundle (what Local Network privacy
+    # identifies) and the command as a symlink into it, so the extracted
+    # archive runs in place and install.sh installs the bundle.
+    scripts/bundle-macos.sh bin/janus "$root/Janus.app" "${TAG#v}"
+    ln -s Janus.app/Contents/MacOS/janus "$root/janus"
+  else
+    cp bin/janus "$root/janus"
+    chmod 0755 "$root/janus"
+  fi
   install -m 0755 scripts/release-install.sh "$root/install.sh"
 fi
 

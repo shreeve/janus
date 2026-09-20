@@ -141,13 +141,19 @@ func launchdPlist(label string, p servicePaths, exe string) string {
 	for _, k := range keys {
 		fmt.Fprintf(&envXML, "\t\t<key>%s</key>\n\t\t<string>%s</string>\n", xmlEscape(k), xmlEscape(env[k]))
 	}
+	// An executable inside Janus.app names its bundle, so macOS knows the
+	// responsible code (its Login Items row, its Local Network identity).
+	associated := ""
+	if inBundle(exe) {
+		associated = "\t<key>AssociatedBundleIdentifiers</key>\n\t<array>\n\t\t<string>" + bundleIdentifier + "</string>\n\t</array>\n"
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>Label</key>
 	<string>%s</string>
-	<key>ProgramArguments</key>
+%s	<key>ProgramArguments</key>
 	<array>
 		<string>%s</string>
 		<string>run</string>
@@ -180,7 +186,7 @@ func launchdPlist(label string, p servicePaths, exe string) string {
 	<string>%s</string>
 </dict>
 </plist>
-`, xmlEscape(label), xmlEscape(exe), xmlEscape(p.config), xmlEscape(p.state), envXML.String(), xmlEscape(p.sup), xmlEscape(p.sup))
+`, xmlEscape(label), associated, xmlEscape(exe), xmlEscape(p.config), xmlEscape(p.state), envXML.String(), xmlEscape(p.sup), xmlEscape(p.sup))
 }
 
 func xmlEscape(s string) string {

@@ -58,6 +58,13 @@ jobs:
             go build -trimpath -ldflags "-X main.version=$stamp" \
               -o "bin/janus$suffix" ./cmd/janus
 
+      # macOS Local Network privacy files its allow/deny under the executable's
+      # code-signing identifier; one stable name keeps the grant across
+      # upgrades. The archive installer and install.sh apply the same name.
+      - name: Sign (macOS)
+        if: matrix.goos == 'darwin'
+        run: codesign -s - -f -i com.github.shreeve.janus bin/janus
+
       - name: Package
         shell: bash
         run: |
@@ -90,10 +97,18 @@ jobs:
             BIN="$install_bin" "$RUNNER_TEMP/janus-smoke/$name/install.sh"
             exe="$install_bin/janus"
             [[ -x "$exe" ]]
-            cmp "$packaged_exe" "$exe"
             if [[ "${{ matrix.goos }}" == darwin ]]; then
+              # The command is a symlink into the installed bundle, which is
+              # a verified copy of the packaged one.
+              [[ -L "$exe" ]]
+              [[ "$(readlink "$exe")" == "$HOME/Applications/Janus.app/Contents/MacOS/janus" ]]
+              cmp "$RUNNER_TEMP/janus-smoke/$name/Janus.app/Contents/MacOS/janus" "$HOME/Applications/Janus.app/Contents/MacOS/janus"
+              codesign --verify --strict "$HOME/Applications/Janus.app"
+              [[ "$(codesign -dv "$HOME/Applications/Janus.app" 2>&1 | sed -n 's/^Identifier=//p')" == com.github.shreeve.janus ]]
+              [[ "$(plutil -extract CFBundleShortVersionString raw "$HOME/Applications/Janus.app/Contents/Info.plist")" == "${package_tag#v}" ]]
               [[ "$(stat -f '%Lp' "$install_bin")" == 700 ]]
             else
+              cmp "$packaged_exe" "$exe"
               [[ "$(stat -c '%a' "$install_bin")" == 700 ]]
             fi
             # Installing to the extraction directory is a safe no-op; the
@@ -158,4 +173,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Janus $GITHUB_REF_NAME" \
             --generate-notes \
-            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. The binary is named janus and bundles the Route 53 DNS provider for DNS-01 wildcard certificates. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes the janus binary, Caddyfile.minimal, Caddyfile.example, README, and license; Unix archives also include install.sh."
+            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. The binary is named janus and bundles the Route 53 DNS provider for DNS-01 wildcard certificates. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes janus (on macOS as Janus.app with the command linked into it), Caddyfile.minimal, Caddyfile.example, README, and license; Unix archives also include install.sh."

@@ -24,6 +24,7 @@ are immutable.
 | [`20260826-184613-v1.7-hardening.md`](20260826-184613-v1.7-hardening.md) | v1.7 authoritative addendum: throughput, reload lifecycle, security, and release hardening across the nine capabilities |
 | [`20260719-141200-tls-ask.md`](20260719-141200-tls-ask.md) | On-demand TLS gating via `/1.0/tls/ask` |
 | [`20260907-000352-exposure-modes.md`](20260907-000352-exposure-modes.md) | Exposure modes (`localhost` \| `lan` \| `wan`): the front-door contract, what holds it on each platform, the measured connection matrix, and the doors closed on the way |
+| [`20260920-001500-macos-app-bundle.md`](20260920-001500-macos-app-bundle.md) | Janus as `Janus.app` on macOS: the bundle, its identity, where it installs, the command symlink, and how the service item points at it |
 
 ## Measurements (claims and their evidence)
 
@@ -67,3 +68,4 @@ mark, and social card. `janus-circle.png` is embedded in the status-page header.
 | --- | --- |
 | [`20260910-100643-stewardship-review.md`](20260910-100643-stewardship-review.md) | v1.14.1 review: reproduced defects, POLS, cleanup boundaries, installed capability gaps, and documentation corrections |
 | [`20260910-120000-stewardship-resolution.md`](20260910-120000-stewardship-resolution.md) | Finding-by-finding fixes, commit mapping, validation, and boundaries for installed settings and future product ideas |
+| [`20260919-225500-macos-local-network-privacy.md`](20260919-225500-macos-local-network-privacy.md) | macOS Local Network privacy: why a launchd-run edge announced `janus.local` but answered no one, the stable signing identifier that fixed it, and the one-pass setup for a new Mac |

@@ -6,7 +6,7 @@
 #
 # Pin a version by passing a tag (with or without the leading v):
 #
-#   curl -fsSL .../install.sh | bash -s v1.17.0
+#   curl -fsSL .../install.sh | bash -s v1.18.0
 #
 # Downloads the release archive for this platform, verifies its sha256
 # against the published checksums, and runs the archive's own installer.
@@ -45,8 +45,23 @@ tildify() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s
 uninstall() {
   if [ "$(id -u)" = 0 ]; then BIN="${BIN:-/usr/local/bin}"
   else BIN="${BIN:-$HOME/.local/bin}"; fi
-  [ -e "$BIN/$NAME" ] || fail "$NAME is not installed at $(tildify "$BIN/$NAME") (BIN= if it lives elsewhere; sudo for a system install)"
+  [ -e "$BIN/$NAME" ] || [ -L "$BIN/$NAME" ] || fail "$NAME is not installed at $(tildify "$BIN/$NAME") (BIN= if it lives elsewhere; sudo for a system install)"
+  # A registered service item would keep trying to start what is about to
+  # go; the operator takes it down first.
+  if [ "$(uname -s)" = Darwin ]; then
+    if [ "$(id -u)" = 0 ]; then plist="/Library/LaunchDaemons/${JANUS_SERVICE_LABEL:-janus.edge}.plist"; else plist="$HOME/Library/LaunchAgents/${JANUS_SERVICE_LABEL:-janus.edge}.plist"; fi
+    [ -e "$plist" ] && fail "the service item $(tildify "$plist") is still installed; run 'janus autostart off stop' first"
+  fi
   rm -f "$BIN/$NAME" || fail "cannot remove $(tildify "$BIN/$NAME") — re-run under sudo if it was installed system-wide"
+  # macOS: the command was a symlink into the application bundle; the
+  # bundle goes with it.
+  if [ "$(uname -s)" = Darwin ] && [ "$(id -u)" != 0 ]; then
+    app="$HOME/Applications/Janus.app"
+    if [ -d "$app" ] && [ -f "$app/Contents/Info.plist" ]; then
+      rm -rf "$app" || fail "cannot remove $(tildify "$app")"
+      printf "${Green}Janus was removed from ${Bold_Green}%s${Color_Off}\n" "$(tildify "$(dirname "$app")")"
+    fi
+  fi
   printf "${Green}$NAME was removed from ${Bold_Green}%s${Color_Off}\n" "$(tildify "$BIN")"
   info "your Caddyfile, service units, and certificates are untouched"
 }
@@ -138,6 +153,17 @@ main() {
   had_caps=
   if [ "$os" = Linux ] && command -v getcap >/dev/null; then
     had_caps=$(getcap "$dest" 2>/dev/null || true)
+  fi
+
+  # macOS: Local Network privacy keys its grant to the code-signing
+  # identifier. Archives packaged since that signing landed carry the name,
+  # and their installer restores it; for an older archive sign the extracted
+  # binary (a fresh file) before handing it over, so the installed edge keeps
+  # one identity across upgrades. Makefile and the archive installer carry
+  # the same literal.
+  if [ "$os" = Darwin ] && ! grep -q codesign "$tmp/$NAME-$tag-$plat/install.sh"; then
+    codesign -s - -f -i com.github.shreeve.janus "$tmp/$NAME-$tag-$plat/$NAME" 2>/dev/null \
+      || info "could not sign $NAME; its Local Network row keeps the default name"
   fi
 
   bash "$tmp/$NAME-$tag-$plat/install.sh"
