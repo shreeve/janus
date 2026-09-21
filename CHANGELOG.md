@@ -4,6 +4,22 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.18.1 — 2026-09-20
+
+- The status page reloads without a flash. What its script would decide
+  later is decided before the first paint: a page that arrived over https
+  omits the trust card in CSS, the theme toggle shows whenever scripting
+  is on, the data regions hold their space until the first render, and a
+  reload renders from the tab's last snapshot before its first frame.
+- The logo is inline SVG, the doorway mark on a disc with a soft shadow,
+  in place of an embedded 84 KB bitmap. The page is 33 KB where it was
+  142 KB, and stays under 48 KiB by test. `docs/janus-badge.svg` is the
+  same badge as a standalone file.
+- The footer shows the running release. `/status.json` carries a
+  `version` field with the string `janus version` prints; the footer shows
+  its `x.y.z` and keeps a development build's suffix as a tooltip. A
+  custom Caddy build reports the module's version from its build info.
+
 ## 1.18.0 — 2026-09-20
 
 - On macOS a user's janus installs as an application bundle,
