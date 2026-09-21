@@ -4,6 +4,17 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.18.3 — 2026-09-21
+
+- The status page reloads without a flash over a slower link too. The
+  page arrives whole on a LAN, but across the internet a new or idle
+  connection delivers the first 14 KB, waits a round trip, and sends the
+  rest, and the browser could paint that first piece: the header with an
+  empty data area, filled in a moment later. Nothing is drawn now until
+  the first render, so the browser keeps the previous page on screen and
+  then shows the new one complete. A 2 s bound in the head script shows
+  whatever has arrived if the document or its first fetch stalls.
+
 ## 1.18.2 — 2026-09-20
 
 - `janus restart` restarts the edge on Linux when it rewrites the service
