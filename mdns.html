@@ -29,6 +29,9 @@ function applyTheme() {
 // page that arrived over https already trusts the CA (the trust card does not).
 document.documentElement.dataset.js = "";
 if (location.protocol === "https:") document.documentElement.dataset.trusted = "";
+// The page stays undrawn until its first render marks it ready. This bound
+// shows whatever has arrived if the document or its first fetch stalls.
+setTimeout(function () { document.documentElement.dataset.ready = ""; }, 2000);
 applyTheme();
 systemTheme.addEventListener("change", function () { if (!themePreference) applyTheme(); });
 window.addEventListener("storage", function (event) {
@@ -203,9 +206,11 @@ window.addEventListener("storage", function (event) {
   [hidden] { display: none !important; }
   :root[data-trusted] #trust { display: none; }
   :root:not([data-js]) .theme-toggle { display: none; }
-  /* Until the first render lands, the data regions hold their space and
-     show nothing: no placeholder is ever painted and then replaced. */
-  :root[data-js]:not([data-ready]) main, :root[data-js]:not([data-ready]) #hdr-sub, :root[data-js]:not([data-ready]) .live, :root[data-js]:not([data-ready]) .foot span { visibility: hidden; }
+  /* Until the first render lands nothing is drawn, so a document that
+     arrives in pieces is never painted half-built: the browser keeps the
+     page it had on screen, or the bare background, and then shows this
+     one complete. */
+  :root[data-js]:not([data-ready]) body { visibility: hidden; }
   @media (max-width: 960px) { .grid { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 600px) {
     .inner { padding: 12px 14px; }
@@ -613,8 +618,8 @@ function maybeHandoff(canonical) {
 
 document.getElementById("refresh").addEventListener("click", refresh);
 // This script runs before the first paint, so a saved snapshot is on screen
-// from the first frame. Without one, the data regions stay blank until the
-// fetch answers, then appear once.
+// from the first frame. Without one, the page stays undrawn until the
+// fetch answers, then appears once.
 try {
   var saved = JSON.parse(sessionStorage.getItem(SNAPSHOT_KEY) || "null");
   if (saved && saved.data && typeof saved.data === "object") {
