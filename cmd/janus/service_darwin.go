@@ -114,6 +114,29 @@ func (l *launchdItem) restart() error {
 	return launchctl("kickstart", "-k", l.target())
 }
 
+// exe reads ProgramArguments[0] from the plist.
+func (l *launchdItem) exe() string {
+	b, err := os.ReadFile(l.plist)
+	if err != nil {
+		return ""
+	}
+	return parseLaunchdExe(b)
+}
+
+var launchdExe = regexp.MustCompile(`<key>ProgramArguments</key>\s*<array>\s*<string>([^<]*)</string>`)
+
+func parseLaunchdExe(plist []byte) string {
+	m := launchdExe.FindSubmatch(plist)
+	if m == nil {
+		return ""
+	}
+	return strings.NewReplacer("&lt;", "<", "&gt;", ">", "&amp;", "&").Replace(string(m[1]))
+}
+
+// relaunch hands launchd the file again: load boots the held job out and
+// bootstraps the plist, which ends the running edge and starts the new one.
+func (l *launchdItem) relaunch() error { return l.load() }
+
 // unregister removes the plist. A loaded job runs on until 'janus stop'
 // or logout — bootout would kill the edge, and off is not stop — and
 // launchd still revives it after a crash until then.

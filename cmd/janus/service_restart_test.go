@@ -63,10 +63,13 @@ func TestRestartUnderItemIsTheManagers(t *testing.T) {
 	p := isolatedHome(t)
 	f := &fakeItem{reg: true, isLoaded: true, pid: os.Getpid()}
 	withFakeItem(t, f)
-	// The item already names this executable: nothing to re-register.
+	// The item names this executable, and its file differs in every other
+	// way a shell could make it differ (the environment autostart wrote):
+	// restart leaves the file alone and restarts.
 	if exe, err := installedExe(p); err == nil {
-		f.register(p, exe)
+		f.exePath = exe
 	}
+	f.body = "written by autostart from another shell"
 	if err := os.MkdirAll(p.run, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -88,8 +91,9 @@ func TestRestartUnderItemIsTheManagers(t *testing.T) {
 	if err := restartEdge(stop, start, p, cmd); err != nil {
 		t.Fatal(err)
 	}
-	if f.restarts != 1 || len(calls) != 0 || !strings.Contains(out.String(), "janus restarted under fake") {
-		t.Fatalf("restarts=%d calls=%v output=%s", f.restarts, calls, out.String())
+	if f.restarts != 1 || f.relaunches != 0 || f.loads != 0 || len(calls) != 0 || f.body != "written by autostart from another shell" ||
+		strings.Contains(out.String(), "now runs") || !strings.Contains(out.String(), "janus restarted under fake") {
+		t.Fatalf("restarts=%d relaunches=%d loads=%d calls=%v body=%q output=%s", f.restarts, f.relaunches, f.loads, calls, f.body, out.String())
 	}
 }
 
@@ -145,11 +149,12 @@ func TestSeedBoundsTheGracePeriod(t *testing.T) {
 }
 
 // An item whose file names another executable (an install that moved the
-// edge into Janus.app behind the same command) is rewritten and reloaded
-// by restart, so the edge that comes back is the installed one.
+// edge into Janus.app behind the same command) is rewritten and relaunched
+// by restart, so the edge that comes back is the installed one. relaunch,
+// never load: on systemd load is `start`, a no-op on a running unit.
 func TestRestartReregistersStaleItem(t *testing.T) {
 	p := isolatedHome(t)
-	f := &fakeItem{reg: true, isLoaded: true, pid: os.Getpid(), body: "/old/janus " + p.config}
+	f := &fakeItem{reg: true, isLoaded: true, pid: os.Getpid(), body: "/old/janus " + p.config, exePath: "/old/janus"}
 	withFakeItem(t, f)
 	if err := os.MkdirAll(p.run, 0o755); err != nil {
 		t.Fatal(err)
@@ -173,8 +178,8 @@ func TestRestartReregistersStaleItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	exe, _ := installedExe(p)
-	if f.loads != 1 || f.restarts != 0 || len(calls) != 0 || f.body != exe+" "+p.config ||
+	if f.relaunches != 1 || f.loads != 0 || f.restarts != 0 || len(calls) != 0 || f.body != exe+" "+p.config ||
 		!strings.Contains(out.String(), "fake now runs "+exe) || !strings.Contains(out.String(), "janus restarted under fake") {
-		t.Fatalf("loads=%d restarts=%d calls=%v body=%q output=%s", f.loads, f.restarts, calls, f.body, out.String())
+		t.Fatalf("relaunches=%d loads=%d restarts=%d calls=%v body=%q output=%s", f.relaunches, f.loads, f.restarts, calls, f.body, out.String())
 	}
 }

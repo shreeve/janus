@@ -35,6 +35,16 @@ func TestLaunchdPlist(t *testing.T) {
 	if strings.Contains(got, "<key>KeepAlive</key>\n\t<true/>") {
 		t.Error("KeepAlive is unconditional")
 	}
+	// The item reports the executable its file names, unescaped.
+	if got := parseLaunchdExe([]byte(got)); got != "/Users/ann/.local/bin/janus" {
+		t.Errorf("parseLaunchdExe = %q", got)
+	}
+	if got := parseLaunchdExe([]byte(launchdPlist("janus.edge", p, "/Users/a&b/janus"))); got != "/Users/a&b/janus" {
+		t.Errorf("parseLaunchdExe with an escape = %q", got)
+	}
+	if parseLaunchdExe([]byte("<plist/>")) != "" {
+		t.Error("parseLaunchdExe invented an executable")
+	}
 	// A bare executable names no bundle; one inside Janus.app does.
 	if strings.Contains(got, "AssociatedBundleIdentifiers") {
 		t.Error("bare executable names a bundle")
