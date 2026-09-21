@@ -3,7 +3,6 @@ package janus
 import (
 	"context"
 	_ "embed"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -1174,14 +1173,13 @@ func mdnsListenHostAddrs(h string) []string {
 
 // --- the front door -------------------------------------------------------------
 
+// The status page is one self-contained document: markup, styles, script,
+// and the logo as inline SVG (the doorway mark in docs/janus-doorway-mark.svg
+// on a disc). It is small enough to arrive and parse in one piece, which is
+// what lets its script draw the first frame complete.
+//
 //go:embed mdns.html
-var mdnsPageTemplate string
-
-//go:embed docs/janus-circle.png
-var mdnsIconPNG []byte
-
-// Inline the bundled icon once so the LAN status page stays self-contained.
-var mdnsPageHTML = []byte(strings.Replace(mdnsPageTemplate, "{{JANUS_ICON}}", base64.StdEncoding.EncodeToString(mdnsIconPNG), 1))
+var mdnsPageHTML []byte
 
 // mdnsRoutes is the front door's read-only dashboard and trust route set,
 // identical in both modes. Unknown path → 404, known path with
@@ -1294,6 +1292,7 @@ type mdnsStatusSnapshot struct {
 	SkippedHosts  int             `json:"skipped_hosts"`
 	Apps          []mdnsStatusApp `json:"apps"`
 	Hub           mdnsStatusHub   `json:"hub"`
+	Version       string          `json:"version"`
 }
 
 // mdnsStatusSnapshot reads registry, data plane, and hub state
@@ -1302,6 +1301,7 @@ func (a *App) mdnsStatusSnapshot() mdnsStatusSnapshot {
 	ms := a.Mdns
 	adv := a.state.mdns.snapshot(ms.Name)
 	out := mdnsStatusSnapshot{
+		Version:       Version(),
 		Name:          ms.Name,
 		EffectiveName: adv.effectiveName,
 		Canonical:     ms.Canonical,

@@ -60,7 +60,9 @@ plus its runnable artifacts.
 | [`20260722-134812-capability-auth.md`](20260722-134812-capability-auth.md) | Original capability 5 design ledger; superseded by the current auth contract above |
 
 Images (`janus-*.png`, `janus-doorway-mark.svg`) are the project logo,
-mark, and social card. `janus-circle.png` is embedded in the status-page header.
+mark, and social card. The status-page header draws the mark as inline SVG
+(`janus-doorway-mark.svg` on a disc, as `janus-badge.svg`); `janus-1024.png`
+is the application-bundle icon, with `janus-circle.png` its fallback.
 
 ## Reviews (findings, not implementation contracts)
 

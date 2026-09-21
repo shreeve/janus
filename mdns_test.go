@@ -1290,6 +1290,20 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 	if strings.Contains(page, "innerHTML") {
 		t.Error("status page uses innerHTML (contract: text nodes only)")
 	}
+	// The logo is inline SVG, not an embedded bitmap, and the page stays small
+	// enough to parse in one piece.
+	if strings.Contains(page, "data:image") || strings.Contains(page, "{{") {
+		t.Error("status page embeds a bitmap or an unfilled placeholder")
+	}
+	if len(page) > 48<<10 {
+		t.Errorf("status page is %d bytes; keep it under 48 KiB", len(page))
+	}
+	// Nothing the script decides later may be painted first: the trust card
+	// and the toggle follow attributes the head script sets, the data regions
+	// wait for the first render, and a reload draws from the tab's snapshot.
+	if strings.Contains(page, "themeToggle.hidden") || strings.Contains(page, `getElementById("trust").hidden`) {
+		t.Error("status page still reveals or hides layout from the body script")
+	}
 	for _, external := range []string{"<link", "script src", "https://cdn", "@import"} {
 		if strings.Contains(page, external) {
 			t.Errorf("status page references an external resource (%q)", external)
@@ -1299,6 +1313,10 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 		"/status.json", "No apps registered", "textContent", "no-cors", "location.replace",
 		"@media (max-width: 600px)", "min-height: 44px", `href="/trust"`, "publicly trusted LAN hostname",
 		"No concrete launch host configured", "prefers-color-scheme: dark",
+		`<svg class="logo"`, "feDropShadow", "dataset.js", "dataset.trusted",
+		":root[data-trusted] #trust", ":root:not([data-js]) .theme-toggle",
+		":root[data-js]:not([data-ready]) main", "sessionStorage", "dataset.ready",
+		`id="version"`, "data.version",
 	} {
 		if !strings.Contains(page, required) {
 			t.Errorf("status page is missing %q", required)

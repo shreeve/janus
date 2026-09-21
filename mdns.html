@@ -24,6 +24,11 @@ function applyTheme() {
     button.title = dark ? "Switch to light mode" : "Switch to dark mode";
   }
 }
+// Decided before the first paint, so nothing the script would change later
+// is ever drawn the wrong way: scripting is on (the toggle shows), and a
+// page that arrived over https already trusts the CA (the trust card does not).
+document.documentElement.dataset.js = "";
+if (location.protocol === "https:") document.documentElement.dataset.trusted = "";
 applyTheme();
 systemTheme.addEventListener("change", function () { if (!themePreference) applyTheme(); });
 window.addEventListener("storage", function (event) {
@@ -85,7 +90,7 @@ window.addEventListener("storage", function (event) {
   .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
   .logo {
     width: 48px; height: 48px; flex: none;
-    display: block; object-fit: contain; filter: drop-shadow(0 3px 4px rgba(0,0,0,.2));
+    display: block; overflow: visible;
   }
   .brand h1 { margin: 0; font-size: 22px; font-weight: 700; }
   .brand p { margin: 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
@@ -196,6 +201,11 @@ window.addEventListener("storage", function (event) {
   #diagnostic tr:last-child td { border-bottom: 0; }
   .foot .inner { font-size: 13px; color: var(--text-2); }
   [hidden] { display: none !important; }
+  :root[data-trusted] #trust { display: none; }
+  :root:not([data-js]) .theme-toggle { display: none; }
+  /* Until the first render lands, the data regions hold their space and
+     show nothing: no placeholder is ever painted and then replaced. */
+  :root[data-js]:not([data-ready]) main, :root[data-js]:not([data-ready]) #hdr-sub, :root[data-js]:not([data-ready]) .live, :root[data-js]:not([data-ready]) .foot span { visibility: hidden; }
   @media (max-width: 960px) { .grid { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 600px) {
     .inner { padding: 12px 14px; }
@@ -216,7 +226,15 @@ window.addEventListener("storage", function (event) {
   <div class="bar">
     <div class="inner header">
       <div class="brand">
-        <img class="logo" src="data:image/png;base64,{{JANUS_ICON}}" alt="" width="48" height="48">
+        <svg class="logo" viewBox="0 0 512 512" width="48" height="48" aria-hidden="true">
+          <defs>
+            <radialGradient id="logo-disc" cx="50%" cy="22%" r="85%"><stop offset="0" stop-color="#1b3a7a"/><stop offset=".55" stop-color="#0b1f4d"/><stop offset="1" stop-color="#050f2b"/></radialGradient>
+            <linearGradient id="logo-mark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#2563eb"/></linearGradient>
+            <filter id="logo-shadow" x="-25%" y="-25%" width="150%" height="160%"><feDropShadow dx="0" dy="28" stdDeviation="26" flood-color="#000" flood-opacity=".28"/></filter>
+          </defs>
+          <circle cx="256" cy="256" r="256" fill="url(#logo-disc)" filter="url(#logo-shadow)"/>
+          <g fill="url(#logo-mark)" transform="translate(0 12)"><path d="M144 92H368L315 136H197Z"/><path d="M112 96L190 142V348L112 396Z"/><path d="M400 96L322 142V348L400 396Z"/></g>
+        </svg>
         <div>
           <h1>Janus</h1>
           <p id="hdr-sub">connecting…</p>
@@ -234,7 +252,7 @@ window.addEventListener("storage", function (event) {
             <circle class="prog" id="arc" cx="18" cy="18" r="16" fill="none" stroke-width="2.5" stroke-linecap="round"/>
           </svg>
         </button>
-        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false" hidden>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false">
           <svg class="moon" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
             <path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13z"/>
           </svg>
@@ -343,6 +361,7 @@ window.addEventListener("storage", function (event) {
   <div class="bar foot">
     <div class="inner">
       <span>read-only · refreshes every 10s</span>
+      <span id="version"></span>
       <span id="updated">Updated —</span>
     </div>
   </div>
@@ -356,7 +375,6 @@ themeToggle.addEventListener("click", function () {
   applyTheme();
 });
 applyTheme();
-themeToggle.hidden = false;
 
 // Rendering discipline: every dynamic value lands via textContent (or an
 // element property like href built from a validated hostname), never as
@@ -524,7 +542,12 @@ function setEdge(connected, data) {
   document.getElementById("arc").className.baseVal = "prog" + (connected ? "" : " paused");
 }
 
-function render(data) {
+// The last snapshot, kept for this tab, is what a reload draws from before
+// its first paint; the fetch that follows only changes what changed.
+var SNAPSHOT_KEY = "janus.status";
+function ready() { document.documentElement.dataset.ready = ""; }
+
+function render(data, when) {
   var name = data.effective_name || data.name || "";
   var sub = name;
   if (data.effective_name && data.name && data.effective_name !== data.name) {
@@ -533,7 +556,16 @@ function render(data) {
   setText("hdr-sub", sub);
   renderApps(data.apps);
   renderStats(data);
-  setText("updated", "Updated " + new Date().toLocaleTimeString());
+  // The footer shows the release number; a development build's full
+  // version string (pseudo-version, +dirty) is the element's tooltip.
+  var release = /^\d+\.\d+\.\d+/.exec(data.version || "");
+  var versionEl = document.getElementById("version");
+  versionEl.textContent = data.version ? "Janus " + (release ? release[0] : data.version) : "";
+  versionEl.title = data.version || "";
+  setText("updated", "Updated " + (when || new Date()).toLocaleTimeString());
+  if (!when) {
+    try { sessionStorage.setItem(SNAPSHOT_KEY, JSON.stringify({ at: Date.now(), data: data })); } catch (e) {}
+  }
 }
 
 var stale = document.getElementById("stale");
@@ -551,7 +583,7 @@ function refresh() {
       maybeHandoff(data.canonical);
     })
     .catch(function () { stale.style.display = "block"; setEdge(false, null); })
-    .then(function () { refreshing = false; document.getElementById("refresh-icon").classList.remove("spin"); });
+    .then(function () { refreshing = false; document.getElementById("refresh-icon").classList.remove("spin"); ready(); });
 }
 
 // Canonical hand-off: probe client-side (the server cannot know whether
@@ -579,9 +611,18 @@ function maybeHandoff(canonical) {
     });
 }
 
-// A device that loaded this page over https already trusts the CA.
-if (location.protocol === "https:") document.getElementById("trust").hidden = true;
 document.getElementById("refresh").addEventListener("click", refresh);
+// This script runs before the first paint, so a saved snapshot is on screen
+// from the first frame. Without one, the data regions stay blank until the
+// fetch answers, then appear once.
+try {
+  var saved = JSON.parse(sessionStorage.getItem(SNAPSHOT_KEY) || "null");
+  if (saved && saved.data && typeof saved.data === "object") {
+    setEdge(true, saved.data);
+    render(saved.data, new Date(saved.at));
+    ready();
+  }
+} catch (e) {}
 refresh();
 setInterval(refresh, 10000);
 </script>
