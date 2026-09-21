@@ -1315,7 +1315,8 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 		"No concrete launch host configured", "prefers-color-scheme: dark",
 		`<svg class="logo"`, "feDropShadow", "dataset.js", "dataset.trusted",
 		":root[data-trusted] #trust", ":root:not([data-js]) .theme-toggle",
-		":root[data-js]:not([data-ready]) main", "sessionStorage", "dataset.ready",
+		":root[data-js]:not([data-ready]) body { visibility: hidden; }", "sessionStorage", "dataset.ready",
+		`setTimeout(function () { document.documentElement.dataset.ready = ""; }, 2000)`,
 		`id="version"`, "data.version",
 	} {
 		if !strings.Contains(page, required) {
