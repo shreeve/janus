@@ -168,6 +168,8 @@ type fakeItem struct {
 	restarts      int
 	removed       bool
 	body          string
+	exePath       string // what the item's file names; exe() reports it
+	relaunches    int
 }
 
 func (f *fakeItem) name() string        { return "fake" }
@@ -180,8 +182,10 @@ func (f *fakeItem) register(p servicePaths, exe string) (bool, error) {
 	f.body, f.reg = body, true
 	return changed, nil
 }
-func (f *fakeItem) load() error    { f.loads++; f.isLoaded = true; return nil }
-func (f *fakeItem) restart() error { f.restarts++; f.isLoaded = true; return nil }
+func (f *fakeItem) exe() string     { return f.exePath }
+func (f *fakeItem) relaunch() error { f.relaunches++; f.isLoaded = true; return nil }
+func (f *fakeItem) load() error     { f.loads++; f.isLoaded = true; return nil }
+func (f *fakeItem) restart() error  { f.restarts++; f.isLoaded = true; return nil }
 func (f *fakeItem) unregister() (bool, error) {
 	had := f.reg
 	f.reg, f.removed = false, true

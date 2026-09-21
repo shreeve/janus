@@ -119,6 +119,42 @@ func (s *systemdItem) restart() error {
 }
 
 // unregister disables and removes the unit; a running edge keeps running.
+// exe reads the executable from the unit's ExecStart line.
+func (s *systemdItem) exe() string {
+	b, err := os.ReadFile(s.unit)
+	if err != nil {
+		return ""
+	}
+	return parseSystemdExe(b)
+}
+
+// parseSystemdExe returns the first word of ExecStart, which the unit
+// writer quotes with %q.
+func parseSystemdExe(unit []byte) string {
+	for _, line := range strings.Split(string(unit), "\n") {
+		rest, ok := strings.CutPrefix(line, "ExecStart=")
+		if !ok {
+			continue
+		}
+		quoted, err := strconv.QuotedPrefix(rest)
+		if err != nil {
+			return ""
+		}
+		exe, err := strconv.Unquote(quoted)
+		if err != nil {
+			return ""
+		}
+		return exe
+	}
+	return ""
+}
+
+// relaunch restarts the unit. register has already reloaded the manager,
+// so the restart runs the file as it now is; `start`, which load uses, is
+// a no-op on a unit that is already active and would leave the old edge
+// running.
+func (s *systemdItem) relaunch() error { return s.restart() }
+
 func (s *systemdItem) unregister() (bool, error) {
 	if !s.registered() {
 		return false, nil

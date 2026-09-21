@@ -37,6 +37,15 @@ type serviceItem interface {
 	// restart has the manager end the running edge, escalating to a kill
 	// on its own timeout, and start it again from the item.
 	restart() error
+	// exe is the executable the item's file names, "" when it cannot be
+	// read. restart compares it with the installed executable.
+	exe() string
+	// relaunch restarts the edge from the item's file as it now is, after
+	// register rewrote it: a manager that keeps the spec it was last handed
+	// (launchd) is given the file again, and one that re-reads its files
+	// (systemd, reloaded by register) restarts the unit. It always ends the
+	// running edge; load does not, on a manager where the job is already up.
+	relaunch() error
 	// unregister removes the item and leaves a running edge alone.
 	// Reports whether there was one.
 	unregister() (bool, error)
@@ -116,18 +125,20 @@ func restartEdge(caddyStop, caddyStart *cobra.Command, p servicePaths, cmd *cobr
 	// end.
 	if item := itemFor(p); item != nil && item.registered() {
 		if loaded, ipid := item.loaded(); loaded && ipid > 0 && ipid == pid {
-			// The item runs what its file says. When this command no
-			// longer resolves to that executable (an install that moved
-			// the edge into Janus.app behind the same command name), the
-			// file is rewritten and the manager reloads it, so the edge
-			// that comes back is the installed one.
-			if exe, err := installedExe(p); err == nil {
-				if changed, err := item.register(p, exe); err != nil {
+			// The item runs the executable its file names. When this
+			// command no longer resolves to that one (an install that
+			// moved the edge into Janus.app behind the same command name),
+			// the file is rewritten and the edge relaunched from it, so
+			// what comes back is the installed one. Only the executable
+			// decides: the file's environment is autostart's to write, and
+			// a restart from a shell with another PATH leaves it alone.
+			if exe, err := installedExe(p); err == nil && item.exe() != "" && item.exe() != exe {
+				if _, err := item.register(p, exe); err != nil {
 					return fmt.Errorf("update %s: %w", item.name(), err)
-				} else if changed {
+				} else {
 					fmt.Fprintf(out, "%s now runs %s\n", item.name(), exe)
-					if err := item.load(); err != nil {
-						return fmt.Errorf("reload %s: %w", item.name(), err)
+					if err := item.relaunch(); err != nil {
+						return fmt.Errorf("relaunch %s: %w", item.name(), err)
 					}
 					if !waitEdgeUp(p, 15*time.Second) {
 						return fmt.Errorf("the edge did not answer within 15s of its restart under %s: 'janus status', and the log at %s", item.name(), p.log)

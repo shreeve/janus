@@ -76,3 +76,17 @@ func TestParseSystemdShow(t *testing.T) {
 		t.Errorf("inactive: %q %d", state, pid)
 	}
 }
+
+// The unit reports the executable its ExecStart names, however the unit
+// writer had to quote it, and restart compares that with the installed one.
+func TestParseSystemdExe(t *testing.T) {
+	p := servicePathsFor(false, "/home/ann", func(string) string { return "" })
+	for _, exe := range []string{"/home/ann/.local/bin/janus", `/home/ann/my "bin"/janus`, "/opt/with space/janus"} {
+		if got := parseSystemdExe([]byte(systemdUnitFile(p, exe))); got != exe {
+			t.Errorf("parseSystemdExe = %q, want %q", got, exe)
+		}
+	}
+	if parseSystemdExe([]byte("[Service]\nType=simple\n")) != "" {
+		t.Error("parseSystemdExe invented an executable")
+	}
+}
