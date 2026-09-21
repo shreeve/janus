@@ -4,6 +4,19 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.18.2 — 2026-09-20
+
+- `janus restart` restarts the edge on Linux when it rewrites the service
+  item. Since 1.18.0 a restart that found the unit file different from
+  what it would write rewrote it and asked systemd to `start` the unit,
+  which does nothing to one that is running: the old edge kept serving
+  and the command reported success. The difference was usually only the
+  `PATH` line, copied from the invoking shell. Restart now rewrites the
+  item only when it names another executable than the installed one, and
+  relaunches through each manager's real restart (`systemctl restart`;
+  bootout and bootstrap under launchd). The item's environment stays as
+  `autostart` wrote it.
+
 ## 1.18.1 — 2026-09-20
 
 - The status page reloads without a flash. What its script would decide
