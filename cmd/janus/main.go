@@ -28,7 +28,7 @@ import (
 
 	_ "github.com/caddy-dns/route53"
 	_ "github.com/caddyserver/caddy/v2/modules/standard"
-	_ "github.com/shreeve/janus"
+	"github.com/shreeve/janus"
 )
 
 // version is stamped by release builds (-ldflags "-X main.version=$tag");
@@ -36,6 +36,8 @@ import (
 var version string
 
 func main() {
+	// The status page's footer shows what `janus version` prints.
+	janus.SetVersion(janusVersion())
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "-v", "-V", "--version":

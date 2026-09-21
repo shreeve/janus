@@ -4,7 +4,7 @@ Read this first, then the documents it points to. It says what Janus
 is, how work moves through this repository, what a newcomer trips on,
 and where the current state of each area is recorded. It states
 present facts; `git log` holds the history. State snapshot taken
-2026-09-20 at tag `v1.18.0`; anything dated below is verified as of then.
+2026-09-20 at tag `v1.18.1`; anything dated below is verified as of then.
 
 ## Reading order
 
@@ -254,14 +254,14 @@ certificate for them, and mdns announces nothing.
 
 Verified 2026-09-20:
 
-- **Release.** `v1.18.0` (2026-09-20) is the latest tag and sits on
+- **Release.** `v1.18.1` (2026-09-20) is the latest tag and sits on
   main's head. `go test ./...` passes on this machine (module,
   `cmd/janus`, `internal/strictjson`). No open pull requests.
-- **Pins.** README's `go install …@v1.18.0` and `bash -s v1.18.0` lines and
+- **Pins.** README's `go install …@v1.18.1` and `bash -s v1.18.1` lines and
   `install.sh`'s header example name the latest tag; a release branch
   bumps all three with the changelog entry. `install.sh` itself
   resolves the latest release at run time.
-- **Recent work (1.14.1 → 1.18.0).** A stewardship round
+- **Recent work (1.14.1 → 1.18.1).** A stewardship round
   ([review](docs/20260910-100643-stewardship-review.md),
   [resolution](docs/20260910-120000-stewardship-resolution.md)) fixed
   the reproduced defects across the service commands, control
@@ -278,7 +278,9 @@ Verified 2026-09-20:
   launchd agent filed as `a.out` was silently denied inbound multicast
   by Local Network privacy
   ([record](docs/20260919-225500-macos-local-network-privacy.md),
-  [contract](docs/20260920-001500-macos-app-bundle.md)) (1.18.0).
+  [contract](docs/20260920-001500-macos-app-bundle.md)) (1.18.0); the
+  status page reloads without a flash, draws its logo as inline SVG,
+  and shows the running release in its footer (1.18.1).
 - **Exposure modes** (1.13.0–1.14.1) are the front-door contract in
   [exposure-modes](docs/20260907-000352-exposure-modes.md); the wan
   refusals of local name families are in `exposure.go` and pinned in

@@ -259,7 +259,7 @@ make janus        # go build ./cmd/janus -> bin/janus
 From anywhere, against a published version:
 
 ```bash
-go install github.com/shreeve/janus/cmd/janus@v1.18.0
+go install github.com/shreeve/janus/cmd/janus@v1.18.1
 ```
 
 Janus also remains a plain Caddy module: builders that assemble their own
@@ -511,7 +511,7 @@ curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bas
 Then `janus autostart` makes it the host's edge
 ([Running as a service](#running-as-a-service)).
 
-Pin a version with `... | bash -s v1.18.0`. Uninstall with
+Pin a version with `... | bash -s v1.18.1`. Uninstall with
 `... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
 units, and certificates stay.
 
@@ -604,6 +604,7 @@ heartbeats every third of that interval (5s for older edges without it).
 | `caddyfile.go` | Caddyfile wiring: global `janus` block + site directive parsing, directive order |
 | `doc.go` | Package overview (the `go doc` face of the module) |
 | `state.go` | Pooled process state (registry, data plane, hubs survive reloads) |
+| `version.go` | The running version, published by the binary or read from build info |
 | `cascade.go` | Cascade helpers shared by every site-scoped capability |
 | `control.go` | Control listener config (`control internal/local/public`, `token:…`) |
 | `control_api.go` | Control listeners + `/1.0` mux (meta, health, tls/ask) |

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-48 -32 608 624" role="img" aria-labelledby="title desc">
+  <title id="title">Janus badge</title>
+  <desc id="desc">The Janus doorway mark on a dark blue disc with a soft drop shadow.</desc>
+  <defs>
+    <radialGradient id="disc" cx="50%" cy="22%" r="85%">
+      <stop offset="0" stop-color="#1b3a7a"/>
+      <stop offset=".55" stop-color="#0b1f4d"/>
+      <stop offset="1" stop-color="#050f2b"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="28" stdDeviation="26" flood-color="#000" flood-opacity=".28"/>
+    </filter>
+  </defs>
+  <circle cx="256" cy="256" r="256" fill="url(#disc)" filter="url(#shadow)"/>
+  <!-- The three paths of janus-doorway-mark.svg, lowered 12 units to sit
+       optically centered on the disc. -->
+  <g fill="url(#mark)" transform="translate(0 12)">
+    <path d="M144 92H368L315 136H197Z"/>
+    <path d="M112 96L190 142V348L112 396Z"/>
+    <path d="M400 96L322 142V348L400 396Z"/>
+  </g>
+</svg>

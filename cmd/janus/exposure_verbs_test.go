@@ -142,7 +142,9 @@ func TestStatusReportsExposure(t *testing.T) {
 			t.Errorf("status lacks %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "2601") || strings.Contains(out, "*:443") {
+	// The fixture's public IPv6 address, by its prefix: a bare "2601" also
+	// matches the status line's own pid when the test happens to run as 2601.
+	if strings.Contains(out, "2601:") || strings.Contains(out, "*:443") {
 		t.Errorf("status overclaims:\n%s", out)
 	}
 	// A broken scope.json is reported, not repaired.
