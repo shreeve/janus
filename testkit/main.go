@@ -15,6 +15,8 @@
 //	testkit precompress --input FILE
 //	testkit fetch --ca FILE --accept CODINGS URL
 //	testkit now-ns
+//	testkit udp-echo --listen ADDR
+//	testkit wt --url URL [--ca FILE] [--origin O] [--resolve IP:PORT] [--n N] [--size B]
 package main
 
 import (
@@ -57,6 +59,10 @@ func main() {
 		cmdPrecompress(args)
 	case "fetch":
 		cmdFetch(args)
+	case "udp-echo":
+		runUDPEcho(args)
+	case "wt":
+		runWT(args)
 	case "now-ns":
 		fmt.Println(time.Now().UnixNano())
 	default:

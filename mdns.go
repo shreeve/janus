@@ -208,6 +208,10 @@ type mdnsAdvertiser struct {
 	respondDone chan struct{}
 	runIfaces   []string      // the interface set the live responder was built with
 	runExposure exposureState // address policy used by the live advertisements
+	// wtHosts lists webtransport relay-route hosts to announce beside the
+	// registered app hosts (a relay a browser cannot resolve is useless).
+	// Set once the pooled relay exists; read under mu on each reconcile.
+	wtHosts func() []string
 
 	announces atomic.Uint64
 	withdraws atomic.Uint64
@@ -643,6 +647,19 @@ func (a *mdnsAdvertiser) desiredLocked(cfg *mdnsConfig) map[string]*mdnsEntry {
 	}
 	front := &mdnsEntry{name: cfg.name, typ: mdnsTypeFrontDoor, port: cfg.port}
 	out[front.key()] = front
+	// Relay-route hosts announce regardless of the apps knob: a webtransport
+	// route a browser cannot resolve is useless, and these are not app hosts.
+	if a.wtHosts != nil {
+		for _, h := range a.wtHosts() {
+			if !mdnsAdvertisableHost(h) {
+				continue
+			}
+			e := &mdnsEntry{name: h, app: wtMdnsApp, typ: mdnsTypeAppHost, port: 443}
+			if _, taken := out[e.key()]; !taken {
+				out[e.key()] = e
+			}
+		}
+	}
 	if !cfg.apps || a.registry == nil {
 		a.skipped = map[string]bool{}
 		return out

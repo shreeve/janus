@@ -241,6 +241,9 @@ func (a *App) controlMuxAt(base string) *http.ServeMux {
 	mux.HandleFunc("GET "+base+"/1.0/mdns/{$}", a.handleMdnsState)
 	mux.HandleFunc("GET "+base+"/1.0/mdns/status", a.handleMdnsStatus)
 
+	mux.HandleFunc("GET "+base+"/1.0/webtransport", a.handleWebtransportState)
+	mux.HandleFunc("GET "+base+"/1.0/webtransport/{$}", a.handleWebtransportState)
+
 	// Auth wall state, always on: {"enabled": false} when no site's
 	// effective auth is on; counters, the session list, and
 	// revocation (observe and revoke — never configure).

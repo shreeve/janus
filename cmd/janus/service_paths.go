@@ -96,8 +96,9 @@ func seedConfig(p servicePaths) string {
 	# here on purpose: nothing but the stored mode fills it in.
 	default_bind {$JANUS_BIND}
 
-	# HTTP/1.1 and HTTP/2 only. HTTP/3 would open UDP listeners beside
-	# the scoped TCP ones, which the exposure mode does not cover.
+	# HTTP/1.1 and HTTP/2 only. HTTP/3 stays off because it would bind the
+	# webtransport relay's UDP port: the relay is the one UDP listener the
+	# exposure mode covers.
 	servers {
 		protocols h1 h2
 	}

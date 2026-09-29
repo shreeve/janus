@@ -43,6 +43,9 @@ default when it exists, and the service env file is loaded beside it.
 			if err := serviceEdgeReady(st); err != nil {
 				return err
 			}
+			if err := webtransportAnchorReady(hostFwOps(), p, st, adaptServiceConfig); err != nil {
+				return err
+			}
 			janus.SetExposure(string(st.Scope), st.Interface, st.lan())
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

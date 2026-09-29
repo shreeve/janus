@@ -1,0 +1,30 @@
+Janus capability 10 (webtransport) — raw measurement provenance
+Recorded 2026-09-28 23:25 MDT.
+
+Path: Chrome-engine client on macOS 27 (this Mac, Wi-Fi) →
+  Janus relay on pup (Ubuntu 26.04, 10.0.0.249, Wi-Fi), lan mode,
+  janus 1.19.0-noclone, TLS internal CA (on-demand), trusted on the client →
+  UDP echo fixture on pup 127.0.0.1:7690.
+Tool: testkit wt (dials WebTransport, sends N datagrams of SIZE, awaits each
+  echo; p50/p99 are per-datagram round trip in ms). PMTUD off unless noted, so
+  the carried size is the QUIC first-flight budget.
+
+2000 x 1152 B, PMTUD off:
+  status 200, sent 2000, received 2000, mismatched 0, bytes 2304000
+  p50 4.575 ms, p99 24.54 ms
+500 x 1200 B (ceiling), PMTUD off:
+  status 200, sent 500, received 500, mismatched 0, bytes 600000
+  p50 4.791 ms, p99 20.145 ms
+100 x 1152 B, PMTUD on:
+  status 200, sent 100, received 100, mismatched 0, bytes 115200
+  p50 8.046 ms, p99 269.398 ms (Wi-Fi jitter + PMTUD probing)
+Missing Origin: status 403 (refused_origin). Foreign Origin: status 403.
+Relay counters after the run: datagrams_in/out balanced, dropped_queue 0,
+  dropped_oversize_in/out 0, streams_reset 0, panics 0.
+
+Browser trust proof (decision 9): Chrome opened WebTransport to the relay
+  presenting pup's local-CA (tls internal) leaf, over a non-loopback Wi-Fi
+  path, WITHOUT serverCertificateHashes, after the device trusted pup's CA
+  root via http://pup-janus.local/trust. Largest datagram carried each way
+  in this run: 1200 B (the configured ceiling). No pinned mode required for
+  the trusted-CA path.

@@ -38,6 +38,9 @@ type Handler struct {
 	// persistent cold roots for this exact-host site.
 	Browse *BrowseSiteSettings `json:"browse,omitempty"`
 
+	// Webtransport lists this exact-host site's relay routes (capability 10).
+	Webtransport []*WebtransportRoute `json:"webtransport,omitempty"`
+
 	app    *App
 	dp     *dataPlane
 	logger *zap.Logger
@@ -252,6 +255,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		h.app.mdnsSharedRoutes.ServeHTTP(w, r)
 		return nil
 	}
+	// The relay descriptor: a route's path over TCP answers the JSON a page
+	// reads before it dials, keyed on this site's routes and independent of
+	// registry resolution, before a static root could shadow it.
+	if route := h.wtRouteFor(r.URL.Path); route != nil {
+		h.serveWebtransportDescriptor(w, r, route)
+		return nil
+	}
 	requestPath, err := validatedRequestPath(r)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -372,6 +382,17 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return err
 			}
 			h.Browse = browse
+		case "webtransport":
+			route, err := parseWebtransportRoute(d)
+			if err != nil {
+				return err
+			}
+			for _, existing := range h.Webtransport {
+				if existing.Path == route.Path {
+					return d.Errf("webtransport: path %s is declared twice in this site", route.Path)
+				}
+			}
+			h.Webtransport = append(h.Webtransport, route)
 		case "control":
 			return d.Err("control is process-wide; configure it in the global janus options block")
 		case "mdns":

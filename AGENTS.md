@@ -9,7 +9,7 @@ eligible hub WebSockets; committed admission changes can close affected
 connections. Janus runtime state is memory-only by contract: a
 restart empties the registry and tenants re-register.
 
-**Era: stewardship.** Nine capabilities are shipped. Ongoing work is
+**Era: stewardship.** Ten capabilities are shipped. Ongoing work is
 fix, harden, and measure. New behavior arrives as a capability through
 the proven loop: **design contract → adversarial review → revise →
 implement → pin in tests → measure**.
@@ -32,7 +32,7 @@ implement → pin in tests → measure**.
 
 4. **Capabilities are the unit of product work.** Numbered by landing
    order; the story (ping → control → hub → mdns → auth → files →
-   sendfile → browse → access log) never reorders in docs or `test.sh`.
+   sendfile → browse → access log → webtransport) never reorders in docs or `test.sh`.
    A new one starts at "When adding a
    capability" below — contract doc and adversarial review before code.
 
@@ -86,10 +86,11 @@ implement → pin in tests → measure**.
 | 7 | **sendfile** | Always-on final upstream `X-Sendfile` transformation: application authorization, Janus validators, ranges, and streaming (cascades: no; configuration: none). |
 | 8 | **browse** | Navigable hot and cold roots, embedded/custom themes, bounded extension renderers, strict leases, cold-host reservations, and redacted status (cascades: yes). |
 | 9 | **access log** | Durable JSON-compatible Caddy encoder plus bounded app-scoped live NDJSON observation (cascades: no; configured by each site's `log`). |
+| 10 | **webtransport** | WebTransport (HTTP/3 over QUIC) terminated on the edge's own UDP 443 listener, relaying datagrams opaque and byte-exact to a config-fixed UDP target; routes per exact-host site, tickets carry the auth gate's decision (cascades: no; process-wide listener, site routes). |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,
 heartbeat, tls, hub, tenant, mdns, auth, files, sendfile,
-browse, access.
+browse, access, webtransport.
 
 ## Architecture (short)
 

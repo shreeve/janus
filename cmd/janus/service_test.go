@@ -226,6 +226,11 @@ func isolatedHome(t *testing.T) servicePaths {
 	prevDial := dialTCP
 	dialTCP = func(string, time.Duration) (net.Conn, error) { return nil, errors.New("connection refused") }
 	t.Cleanup(func() { dialTCP = prevDial })
+	// status adapts the service Caddyfile in-process here: re-executed as
+	// 'adapt', the test binary would run the tests.
+	prevAdapt := adaptServiceConfig
+	adaptServiceConfig = adaptInProcess
+	t.Cleanup(func() { adaptServiceConfig = prevAdapt })
 	return currentPaths()
 }
 

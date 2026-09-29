@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/caddyserver/caddy/v2"
+	caddycmd "github.com/caddyserver/caddy/v2/cmd"
 	"github.com/spf13/cobra"
 	"io"
 	"net"
@@ -107,7 +108,8 @@ type edgeStatus struct {
 }
 
 type listenerStatus struct {
-	Role  string `json:"role"`
+	Role  string `json:"role"` // http, https, or webtransport (the relay's UDP)
+	Proto string `json:"proto"`
 	Addr  string `json:"addr"`
 	Reach Reach  `json:"reach"`
 }
@@ -183,8 +185,88 @@ func gatherExposure(st *edgeStatus, p servicePaths) {
 		return
 	}
 	for _, l := range plan {
-		st.Listeners = append(st.Listeners, listenerStatus{Role: l.Role.String(), Addr: l.Addr.String(), Reach: classifyReach(l.Addr.Addr())})
+		st.Listeners = append(st.Listeners, listenerStatus{Role: l.Role.String(), Proto: "tcp", Addr: l.Addr.String(), Reach: classifyReach(l.Addr.Addr())})
 	}
+	// The webtransport relay's UDP 443, at the https addresses, when the
+	// service Caddyfile carries the global block. A Caddyfile that does not
+	// adapt is 'janus validate''s to report; here it means no relay rows.
+	if cfg, err := adaptServiceConfig(p); err == nil && hasWebtransport(cfg) {
+		for _, l := range plan {
+			if l.Role == RoleHTTPS {
+				st.Listeners = append(st.Listeners, listenerStatus{Role: "webtransport", Proto: "udp", Addr: l.Addr.String(), Reach: classifyReach(l.Addr.Addr())})
+			}
+		}
+	}
+}
+
+// adaptServiceConfig adapts the service Caddyfile as the edge adapts it —
+// this binary's own 'janus adapt', with the env file beside the Caddyfile
+// and the mode's bind — and returns Caddy's JSON. Out of process, as
+// validateConfig is: Caddy narrates adapting on stderr, and status
+// reports and changes nothing, its own environment included. A variable
+// so tests adapt in-process (a test binary re-executed as 'adapt' runs
+// the tests).
+var adaptServiceConfig = func(p servicePaths) ([]byte, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"adapt", "--config", p.config, "--adapter", "caddyfile"}
+	if fileExists(p.env) {
+		args = append(args, "--envfile", p.env)
+	}
+	return exec.Command(exe, args...).Output()
+}
+
+// adaptInProcess is what 'janus adapt' does, without the process; the
+// environment it borrows for the adapter's {$VAR} placeholders is put
+// back before it returns.
+func adaptInProcess(p servicePaths) ([]byte, error) {
+	defer restoreEnv(os.Environ())
+	if err := loadEnvFile(p.env); err != nil {
+		return nil, err
+	}
+	if _, err := setBindEnv(p); err != nil {
+		return nil, err
+	}
+	cfg, _, _, err := caddycmd.LoadConfig(p.config, "caddyfile")
+	return cfg, err
+}
+
+// restoreEnv puts the process environment back to a snapshot from
+// os.Environ: what was added goes, what changed is reset.
+func restoreEnv(snapshot []string) {
+	was := make(map[string]string, len(snapshot))
+	for _, kv := range snapshot {
+		k, v, _ := strings.Cut(kv, "=")
+		was[k] = v
+	}
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, ok := was[k]; !ok {
+			os.Unsetenv(k)
+		}
+	}
+	for k, v := range was {
+		if now, ok := os.LookupEnv(k); !ok || now != v {
+			os.Setenv(k, v)
+		}
+	}
+}
+
+// hasWebtransport reports whether an adapted config carries the global
+// webtransport block: the janus app's config then has a "webtransport" key.
+func hasWebtransport(cfgJSON []byte) bool {
+	var cfg struct {
+		Apps struct {
+			Janus map[string]json.RawMessage `json:"janus"`
+		} `json:"apps"`
+	}
+	if json.Unmarshal(cfgJSON, &cfg) != nil {
+		return false
+	}
+	_, ok := cfg.Apps.Janus["webtransport"]
+	return ok
 }
 
 // localCARoot is the root certificate of Caddy's internal CA, where the
@@ -396,6 +478,14 @@ func printExposure(out io.Writer, st edgeStatus) {
 	}
 	if len(st.Listeners) > 0 {
 		fmt.Fprintln(out, "http     the same addresses on port 80")
+	}
+	label = "udp      "
+	for _, l := range st.Listeners {
+		if l.Proto != "udp" {
+			continue
+		}
+		fmt.Fprintf(out, "%s%-24s %-24s webtransport relay\n", label, l.Addr, l.Reach)
+		label = "         "
 	}
 }
 
