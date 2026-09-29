@@ -38,26 +38,46 @@ func isFrontDoorPort(port uint16) bool {
 }
 
 // verifyExposure checks the process's sockets against the scope on an OS.
-// UDP on a front-door port is always a violation (HTTP/3 beside scoped
-// TCP). On macOS the socket is wildcard by design and pf is the scope
-// truth, so TCP is not judged there; elsewhere every front-door TCP
-// listener must be in the plan — fewer is fine, more or wider is not.
+// TCP on a front-door port must be in the plan — fewer is fine, more or
+// wider is not. UDP on the front door is the webtransport relay's alone:
+// port 443 at the plan's HTTPS addresses (fewer is fine again), never port
+// 80, never an address outside the plan — HTTP/3, or a relay on a wider
+// bind, would be exactly that. On macOS the socket is wildcard by design
+// and pf is the scope truth, so nothing is judged by address there: TCP is
+// not judged at all and UDP by port alone. UDP on other ports (mdns) is not
+// a front-door concern.
 func verifyExposure(st scopeState, goos string, socks []boundSocket) error {
 	var violations []string
-	var tcp []netip.AddrPort
+	var tcp, udp []netip.AddrPort
 	for _, s := range socks {
 		if !isFrontDoorPort(s.addr.Port()) {
 			continue
 		}
-		if s.proto == "udp" {
-			violations = append(violations, fmt.Sprintf("UDP listener on %s (HTTP/3 must stay off: 'protocols h1 h2')", s.addr))
-			continue
+		switch {
+		case s.proto != "udp":
+			tcp = append(tcp, s.addr)
+		case s.addr.Port() != 443:
+			violations = append(violations, udpViolation(s.addr))
+		default:
+			udp = append(udp, s.addr)
 		}
-		tcp = append(tcp, s.addr)
 	}
 	if goos != "darwin" {
 		if err := VerifyBound(st.Scope, st.lan(), tcp); err != nil {
 			violations = append(violations, err.Error())
+		}
+		if plan, err := PlanListeners(st.Scope, st.lan()); err == nil {
+			want := map[netip.AddrPort]struct{}{}
+			for _, l := range plan {
+				if l.Role == RoleHTTPS {
+					want[normalizeAddrPort(l.Addr)] = struct{}{}
+				}
+			}
+			for _, a := range udp {
+				if _, ok := want[normalizeAddrPort(a)]; !ok {
+					violations = append(violations, udpViolation(a))
+				}
+			}
 		}
 	}
 	if len(violations) > 0 {
@@ -65,6 +85,12 @@ func verifyExposure(st scopeState, goos string, socks []boundSocket) error {
 		return fmt.Errorf("%s", strings.Join(violations, "; "))
 	}
 	return nil
+}
+
+// udpViolation names the one capability that may open UDP on the front
+// door, so an operator reading the log knows where the socket came from.
+func udpViolation(a netip.AddrPort) string {
+	return fmt.Sprintf("UDP listener on %s: only the webtransport relay may listen on UDP 443, and only at the mode's addresses", a)
 }
 
 // exposureWatch verifies the edge's sockets against scope.json — read

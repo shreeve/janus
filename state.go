@@ -22,14 +22,15 @@ var janusPool = caddy.NewUsagePool()
 const janusStateKey = "janus.process"
 
 type janusState struct {
-	registry   *appRegistry
-	hubs       *hubSet
-	dp         *dataPlane
-	mdns       *mdnsAdvertiser
-	auth       *authStore
-	browse     *browseSupervisor
-	ctlSockets *controlSocketPool
-	logger     *zap.Logger
+	registry     *appRegistry
+	hubs         *hubSet
+	dp           *dataPlane
+	mdns         *mdnsAdvertiser
+	auth         *authStore
+	browse       *browseSupervisor
+	ctlSockets   *controlSocketPool
+	webtransport *wtRelay
+	logger       *zap.Logger
 }
 
 // newJanusState builds the pooled holder. ttl is the configured heartbeat
@@ -55,14 +56,15 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 		return nil, err
 	}
 	st := &janusState{
-		registry:   reg,
-		hubs:       newHubSet(),
-		dp:         newDataPlane(reg, logger.Named("dataplane")),
-		mdns:       newMdnsAdvertiser(reg, logger.Named("mdns")),
-		auth:       auth,
-		browse:     newBrowseSupervisor(),
-		ctlSockets: &controlSocketPool{},
-		logger:     logger,
+		registry:     reg,
+		hubs:         newHubSet(),
+		dp:           newDataPlane(reg, logger.Named("dataplane")),
+		mdns:         newMdnsAdvertiser(reg, logger.Named("mdns")),
+		auth:         auth,
+		browse:       newBrowseSupervisor(),
+		ctlSockets:   &controlSocketPool{},
+		webtransport: newWtRelay(logger.Named("webtransport")),
+		logger:       logger,
 	}
 	reg.browse = st.browse
 	// DELETE and TTL reap tear the app's hub down; PATCH host removal
@@ -73,6 +75,10 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 	reg.hubHostsRemoved = st.hubs.hostsRemoved
 	reg.pruneUpstreams = st.dp.pruneState
 	reg.mdnsNotify = st.mdns.kickReconcile
+	// The relay announces its route hosts through the advertiser, and wakes
+	// it when the route set changes, so a browser can resolve the relay.
+	st.mdns.wtHosts = st.webtransport.hostList
+	st.webtransport.notify = st.mdns.kickReconcile
 	st.mdns.run()
 	st.auth.run()
 	reg.startSweeper(logger.Named("registry"))
@@ -82,6 +88,7 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 // Destruct runs when the last config generation using the holder is
 // released: the process is done with Janus entirely.
 func (st *janusState) Destruct() error {
+	st.webtransport.closeAll()
 	st.registry.stopSweeper()
 	st.auth.stop()
 	detached := st.registry.tombstoneAll("generation_stop")

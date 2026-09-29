@@ -458,3 +458,80 @@ func TestRootHasExposureVerbs(t *testing.T) {
 		t.Error("repair exists; setting the mode again is the repair")
 	}
 }
+
+// The listener rows carry their protocol: TCP for the front door as
+// always, and UDP 443 for the webtransport relay at the https addresses
+// once the service Caddyfile carries the global block. The seed has no
+// block, so the real adaptation finds none; a Caddyfile that does not
+// adapt is validate's to report and adds no rows here.
+func TestStatusPrintsRelayRows(t *testing.T) {
+	p := isolatedHome(t)
+	fakeHostPf(t).bare()
+	withFakeItem(t, &fakeItem{reg: true, isLoaded: true, pid: os.Getpid()})
+	if err := writeScope(p, lanState()); err != nil {
+		t.Fatal(err)
+	}
+	seedAt(t, p)
+	rows := func() (edgeStatus, string) {
+		t.Helper()
+		out, _ := run(t, "status", "--json")
+		var st edgeStatus
+		if err := json.Unmarshal([]byte(out), &st); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		text, _ := run(t, "status")
+		return st, text
+	}
+	st, text := rows()
+	if len(st.Listeners) != 6 || strings.Contains(text, "\nudp") || strings.Contains(text, "webtransport") {
+		t.Errorf("seed without the block: %+v\n%s", st.Listeners, text)
+	}
+	for _, l := range st.Listeners {
+		if l.Proto != "tcp" || (l.Role != "http" && l.Role != "https") {
+			t.Errorf("tcp row %+v", l)
+		}
+	}
+	prev := adaptServiceConfig
+	t.Cleanup(func() { adaptServiceConfig = prev })
+	adaptServiceConfig = func(servicePaths) ([]byte, error) {
+		return []byte(`{"apps":{"janus":{"webtransport":{}}}}`), nil
+	}
+	st, text = rows()
+	var udp []listenerStatus
+	for _, l := range st.Listeners {
+		if l.Proto == "udp" {
+			udp = append(udp, l)
+			if l.Role != "webtransport" || !strings.HasSuffix(l.Addr, ":443") {
+				t.Errorf("udp row %+v", l)
+			}
+		}
+	}
+	if len(st.Listeners) != 9 || len(udp) != 3 {
+		t.Errorf("with the block: %+v", st.Listeners)
+	}
+	for _, want := range []string{"http     the same addresses on port 80\nudp      127.0.0.1:443            " + string(ReachLoopback), "         10.0.0.211:443           " + string(ReachRFC1918) + "  webtransport relay"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("status lacks %q:\n%s", want, text)
+		}
+	}
+	adaptServiceConfig = func(servicePaths) ([]byte, error) { return nil, errors.New("syntax error") }
+	if st, text := rows(); len(st.Listeners) != 6 || strings.Contains(text, "udp") {
+		t.Errorf("unadaptable Caddyfile must add no rows: %+v\n%s", st.Listeners, text)
+	}
+}
+
+// The block is found under the janus app and nowhere else.
+func TestHasWebtransport(t *testing.T) {
+	for cfg, want := range map[string]bool{
+		`{"apps":{"janus":{"webtransport":{}}}}`:                             true,
+		`{"apps":{"janus":{"ping":true,"webtransport":{"max_sessions":8}}}}`: true,
+		`{"apps":{"janus":{"ping":true}}}`:                                   false,
+		`{"apps":{"http":{"servers":{"srv0":{"webtransport":{}}}}}}`:         false,
+		`{"webtransport":{}}`:                                                false,
+		`not json`:                                                           false,
+	} {
+		if got := hasWebtransport([]byte(cfg)); got != want {
+			t.Errorf("hasWebtransport(%s) = %v, want %v", cfg, got, want)
+		}
+	}
+}

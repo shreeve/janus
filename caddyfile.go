@@ -106,6 +106,15 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return err
 				}
 				a.Browse = browse
+			case "webtransport":
+				if a.Webtransport != nil {
+					return d.Err("duplicate webtransport directive in the same block")
+				}
+				ws, err := parseWebtransportGlobal(d)
+				if err != nil {
+					return err
+				}
+				a.Webtransport = ws
 			case "heartbeat_ttl":
 				if a.HeartbeatTTL != 0 {
 					return d.Err("duplicate heartbeat_ttl directive")

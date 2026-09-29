@@ -7,9 +7,12 @@ require (
 	github.com/brutella/dnssd v1.2.15-0.20260227152348-8c9d3cd68d00
 	github.com/caddy-dns/route53 v1.6.2
 	github.com/caddyserver/caddy/v2 v2.11.4
+	github.com/caddyserver/certmagic v0.25.3
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/compress v1.18.7
+	github.com/quic-go/quic-go v0.59.1
+	github.com/quic-go/webtransport-go v0.10.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.53.0
@@ -51,7 +54,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1 // indirect
 	github.com/aws/smithy-go v1.25.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/caddyserver/certmagic v0.25.3 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/ccoveille/go-safecast/v2 v2.0.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -66,6 +68,7 @@ require (
 	github.com/dgraph-io/ristretto v0.2.0 // indirect
 	github.com/dgryski/go-farm v0.0.0-20200201041132-a6ae2369ad13 // indirect
 	github.com/dlclark/regexp2 v1.12.0 // indirect
+	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-chi/chi/v5 v5.3.2 // indirect
@@ -113,7 +116,6 @@ require (
 	github.com/prometheus/otlptranslator v1.0.0 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect

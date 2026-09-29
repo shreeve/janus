@@ -75,24 +75,67 @@ func TestVerifyExposure(t *testing.T) {
 	if err := verifyExposure(local, "darwin", wide); err != nil {
 		t.Errorf("darwin wildcard: %v", err)
 	}
-	// UDP on a front-door port is HTTP/3 leaking beside the scope, anywhere.
-	h3 := []boundSocket{sock("tcp", "0.0.0.0:443"), sock("udp", "0.0.0.0:443")}
-	for _, goos := range []string{"darwin", "linux"} {
-		if err := verifyExposure(scopeState{Scope: ScopeWAN}, goos, h3); err == nil || !strings.Contains(err.Error(), "UDP") {
-			t.Errorf("%s h3: %v", goos, err)
+	// UDP on the front door is the webtransport relay's: port 443 at the
+	// plan's HTTPS addresses, in every mode, fewer being fine as for TCP.
+	// UDP on 80 is a violation in every mode on every OS, and the text
+	// names the relay so an operator knows which capability opened it.
+	for _, st := range []scopeState{local, lanState(), {Scope: ScopeWAN}} {
+		plan, err := PlanListeners(st.Scope, st.lan())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var relay []boundSocket
+		for _, l := range plan {
+			relay = append(relay, sock("tcp", l.Addr.String()))
+			if l.Role == RoleHTTPS {
+				relay = append(relay, sock("udp", l.Addr.String()))
+			}
+		}
+		if err := verifyExposure(st, "linux", relay); err != nil {
+			t.Errorf("%s relay at the https addresses: %v", st.Scope, err)
+		}
+		if err := verifyExposure(st, "linux", relay[:3]); err != nil {
+			t.Errorf("%s relay at fewer addresses: %v", st.Scope, err)
+		}
+		for _, goos := range []string{"darwin", "linux"} {
+			udp80 := append(relay[:3:3], sock("udp", relay[0].addr.String()))
+			err := verifyExposure(st, goos, udp80)
+			if err == nil || !strings.Contains(err.Error(), "UDP listener on "+relay[0].addr.String()) || !strings.Contains(err.Error(), "webtransport relay") {
+				t.Errorf("%s %s udp 80: %v", st.Scope, goos, err)
+			}
 		}
 	}
-	// A lan edge bound on an address that is not its stored one.
+	// A mapped form of a planned address is its plain self.
+	if err := verifyExposure(local, "linux", []boundSocket{sock("udp", "[::ffff:127.0.0.1]:443")}); err != nil {
+		t.Errorf("mapped udp: %v", err)
+	}
+	// UDP 443 outside the plan: a lan address that is not the stored one,
+	// and the wildcard outside wan (HTTP/3 beside the scoped bind).
 	lan := lanState()
+	if err := verifyExposure(lan, "linux", []boundSocket{sock("tcp", "10.0.0.211:443"), sock("udp", "10.0.0.212:443")}); err == nil || !strings.Contains(err.Error(), "UDP listener on 10.0.0.212:443: only the webtransport relay") {
+		t.Errorf("stray lan udp: %v", err)
+	}
+	h3 := []boundSocket{sock("tcp", "0.0.0.0:443"), sock("udp", "0.0.0.0:443")}
+	if err := verifyExposure(local, "linux", h3); err == nil || !strings.Contains(err.Error(), "UDP listener on 0.0.0.0:443") {
+		t.Errorf("linux wildcard udp in localhost: %v", err)
+	}
+	// macOS judges UDP by port alone, as it does not judge TCP by address:
+	// the wildcard socket is the bind there and pf scopes it.
+	if err := verifyExposure(local, "darwin", h3); err != nil {
+		t.Errorf("darwin wildcard udp: %v", err)
+	}
+	// A lan edge bound on an address that is not its stored one.
 	if err := verifyExposure(lan, "linux", []boundSocket{sock("tcp", "10.0.0.211:443"), sock("tcp", "10.0.0.212:443")}); err == nil || !strings.Contains(err.Error(), "10.0.0.212:443") {
 		t.Errorf("stray lan address: %v", err)
 	}
 }
 
 // The watch ends the process on a violation and stays quiet otherwise. A
-// UDP socket on a front-door port is a violation on every OS (HTTP/3
-// beside scoped TCP), so this runs everywhere. The scope is read from disk
-// each time: a violation must be seen twice, two seconds apart.
+// UDP socket on a front-door port other than 443 is a violation on every
+// OS (only the webtransport relay may open UDP, and only on 443), so this
+// runs everywhere with a high port swapped into edgePorts. The scope is
+// read from disk each time: a violation must be seen twice, two seconds
+// apart.
 func TestExposureWatchExitsOnViolation(t *testing.T) {
 	p := isolatedHome(t)
 	if err := writeScope(p, lanState()); err != nil {

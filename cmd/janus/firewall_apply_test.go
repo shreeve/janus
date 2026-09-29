@@ -125,31 +125,112 @@ func lanState() scopeState {
 	return scopeState{Scope: ScopeLAN, Interface: "en0", LANV4: "10.0.0.211", OnLinkV4: "10.0.0.0/24"}
 }
 
-// normalizedPf is the anchor the way pfctl prints it: one rule per source
-// and port, "no state" for stateless, "block drop" for block.
+// normalizedPf is the anchor the way pfctl prints it: one rule per
+// protocol, source, and port, "no state" for stateless, "block drop" for
+// block, and each run of rules with one action ordered as pfctl's
+// optimizer orders it. The optimizer takes the field (address family,
+// protocol, source, port — in that order on a tie) whose largest set of
+// equal values is biggest, groups the rules by it in order of first
+// appearance, and does the same again inside each group; the anchor's 80
+// and 443 lines come out interleaved. The on-host test holds this to the
+// real pfctl.
 func normalizedPf(anchor string) string {
 	var b strings.Builder
+	var run []pfRule
+	flush := func() {
+		for _, r := range pfReorder(run, []func(pfRule) string{
+			func(r pfRule) string { return r.af },
+			func(r pfRule) string { return r.proto },
+			func(r pfRule) string { return r.src },
+			func(r pfRule) string { return r.port },
+		}) {
+			b.WriteString(r.String())
+		}
+		run = nil
+	}
 	for _, line := range strings.Split(anchor, "\n") {
 		if !strings.HasPrefix(line, "pass") && !strings.HasPrefix(line, "block") {
 			continue
 		}
-		head, rest, _ := strings.Cut(line, " from ")
+		head, rest, _ := strings.Cut(line, " proto ")
+		protos, rest, _ := strings.Cut(rest, " from ")
 		srcs, rest, _ := strings.Cut(rest, " to ")
-		dst, ports, _ := strings.Cut(rest, " port ")
-		ports, tail, _ := strings.Cut(ports, "}")
+		dst, rest, _ := strings.Cut(rest, " port ")
+		ports, tail := rest, ""
+		if strings.HasPrefix(ports, "{") {
+			ports, tail, _ = strings.Cut(ports, "}")
+		} else {
+			ports, tail, _ = strings.Cut(ports, " ")
+		}
 		tail = strings.TrimSpace(strings.ReplaceAll(tail, "flags any", ""))
-		head = strings.Replace(head, "block in", "block drop in", 1)
-		for _, src := range strings.Fields(strings.Trim(srcs, "{} ")) {
-			for _, port := range strings.Fields(strings.Trim(ports, "{ ")) {
-				b.WriteString(head + " from " + src + " to " + dst + " port = " + port)
-				if tail != "" {
-					b.WriteString(" " + tail)
+		action, af := strings.Replace(head, "block in", "block drop in", 1), ""
+		for _, family := range []string{"inet6", "inet"} {
+			if strings.HasSuffix(action, " "+family) {
+				action, af = strings.TrimSuffix(action, " "+family), family
+				break
+			}
+		}
+		if len(run) > 0 && run[0].action != action {
+			flush()
+		}
+		for _, proto := range strings.Fields(strings.Trim(protos, "{} ")) {
+			for _, src := range strings.Fields(strings.Trim(srcs, "{} ")) {
+				for _, port := range strings.Fields(strings.Trim(ports, "{} ")) {
+					run = append(run, pfRule{action: action, af: af, proto: proto, src: src, dst: dst, port: port, tail: tail})
 				}
-				b.WriteString("\n")
 			}
 		}
 	}
+	flush()
 	return b.String()
+}
+
+type pfRule struct{ action, af, proto, src, dst, port, tail string }
+
+func (r pfRule) String() string {
+	s := r.action
+	if r.af != "" {
+		s += " " + r.af
+	}
+	s += " proto " + r.proto + " from " + r.src + " to " + r.dst + " port = " + r.port
+	if r.tail != "" {
+		s += " " + r.tail
+	}
+	return s + "\n"
+}
+
+// pfReorder is the optimizer's ordering of one run of rules (see
+// normalizedPf).
+func pfReorder(rules []pfRule, fields []func(pfRule) string) []pfRule {
+	if len(rules) <= 1 || len(fields) == 0 {
+		return rules
+	}
+	best, largest := 0, 0
+	for i, f := range fields {
+		counts := map[string]int{}
+		for _, r := range rules {
+			counts[f(r)]++
+			if counts[f(r)] > largest {
+				best, largest = i, counts[f(r)]
+			}
+		}
+	}
+	by := fields[best]
+	rest := append(append([]func(pfRule) string{}, fields[:best]...), fields[best+1:]...)
+	var order []string
+	groups := map[string][]pfRule{}
+	for _, r := range rules {
+		k := by(r)
+		if _, seen := groups[k]; !seen {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], r)
+	}
+	var out []pfRule
+	for _, k := range order {
+		out = append(out, pfReorder(groups[k], rest)...)
+	}
+	return out
 }
 
 // The janus lines go before Apple's filter anchor (quick rules in an
@@ -377,8 +458,11 @@ func TestCheckPfVerdicts(t *testing.T) {
 	}
 }
 
-// The real pfctl parses what PfAnchor writes: the passes stateless, the
-// block on every destination. Parse only (-n): nothing is loaded.
+// The real pfctl parses what PfAnchor writes: the passes stateless, TCP
+// alone on 80 and TCP with the relay's UDP on 443, the blocks on every
+// destination for both. Parse only (-n): nothing is loaded. The fake's
+// normalization is held to pfctl's own listing here, so the other tests'
+// fake host prints what the real one would.
 func TestPfAnchorParsesOnHost(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("pfctl is macOS's")
@@ -397,8 +481,23 @@ func TestPfAnchorParsesOnHost(t *testing.T) {
 			t.Fatalf("%s: pfctl -nvf: %v\n%s", scope, err, anchor)
 		}
 		got := string(out)
-		if !strings.Contains(got, "block drop in quick proto tcp from any to any port = 443") || !strings.Contains(got, "from 127.0.0.0/8 to any port = 80 no state") || strings.Contains(got, "keep state") {
+		for _, want := range []string{
+			"block drop in quick proto tcp from any to any port = 80",
+			"block drop in quick proto tcp from any to any port = 443",
+			"block drop in quick proto udp from any to any port = 443",
+			"pass in quick inet proto tcp from 127.0.0.0/8 to any port = 80 no state",
+			"pass in quick inet proto udp from 127.0.0.0/8 to any port = 443 no state",
+			"pass in quick inet6 proto udp from ::1 to any port = 443 no state",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: pfctl listing lacks %q:\n%s", scope, want, got)
+			}
+		}
+		if strings.Contains(got, "proto udp from 127.0.0.0/8 to any port = 80") || strings.Contains(got, "proto udp from any to any port = 80") || strings.Contains(got, "keep state") {
 			t.Errorf("%s: pfctl normalized the anchor unexpectedly:\n%s", scope, got)
+		}
+		if !pfRulesEqual(got, normalizedPf(anchor)) {
+			t.Errorf("%s: the fake's normalization differs from pfctl's:\n%s\nfake:\n%s", scope, got, normalizedPf(anchor))
 		}
 	}
 }

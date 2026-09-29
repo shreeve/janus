@@ -234,7 +234,7 @@ stop_owned_pid() {
 require_ports_free() {
 	local port listeners busy=0
 	for port in "$@"; do
-		listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 {print}' || true)"
+		listeners="$( { lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null; lsof -nP -iUDP:"$port" 2>/dev/null | awk '$9 !~ /->/'; } | awk 'NR > 1 && $1 != "COMMAND" {print}' || true)"
 		if [[ -n "$listeners" ]]; then
 			echo "test port $port is already in use:" >&2
 			printf '%s\n' "$listeners" >&2
@@ -338,6 +338,7 @@ source "$ROOT/tests/acceptance/files.sh"
 source "$ROOT/tests/acceptance/sendfile.sh"
 source "$ROOT/tests/acceptance/browse.sh"
 source "$ROOT/tests/acceptance/access.sh"
+source "$ROOT/tests/acceptance/webtransport.sh"
 
 # --- main -----------------------------------------------------------------
 
@@ -555,6 +556,13 @@ group "access"
 test "register process app and report exact access status" case_access_setup_and_status
 test "stream one event and retain durable JSON" case_access_stream_and_durable_json
 test "strict method and cursor syntax reject" case_access_protocol_rejections
+
+group "webtransport"
+test "relay listens on UDP 443; route and echo fixture in place" case_webtransport_setup
+test "descriptor JSON at the route path, no-store, GET and HEAD only" case_webtransport_descriptor
+test "1152- and 1200-byte datagrams relay byte-exact both ways" case_webtransport_echo
+test "missing or foreign Origin and unknown path are refused" case_webtransport_refusals
+test "gated site: descriptor needs a session, ticket admits once" case_webtransport_ticket
 
 report
 exit $?

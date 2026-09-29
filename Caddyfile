@@ -76,6 +76,10 @@
 	auto_https disable_redirects # the redirect server would bind :80; this dev/CI config runs unprivileged
 	skip_install_trust
 
+	servers {
+		protocols h1 h2 # HTTP/3 would bind the webtransport relay's UDP port
+	}
+
 	on_demand_tls {
 		permission janus
 	}
@@ -86,6 +90,7 @@
 		control local
 		heartbeat_ttl {$JANUS_HEARTBEAT_TTL:15s}
 		hub # 3) site-scoped default: on (path /hub, origin same)
+		webtransport # 10) process-wide relay listener on UDP 443; routes are per site
 		mdns {
 			# 4) process-wide LAN presence
 			listen :7680 # dedicated dev/test listener; default (no listen) shares the :80 HTTP server
@@ -327,5 +332,24 @@ https://:8443 {
 	janus {
 		hub off
 		auth off
+	}
+}
+
+# 10) webtransport: a relay route on an exact-host site; the suite's UDP
+# echo fixture stands in for a UDP application.
+wt.ripdev.io {
+	import ripdev_tls
+	janus {
+		auth off # the plain relay; wtgate.ripdev.io below keeps the cascaded gate
+		webtransport /relay udp/127.0.0.1:7690
+	}
+}
+
+# The same route behind the cascaded auth gate: the descriptor is served
+# to a signed-in user with a ticket the relay requires.
+wtgate.ripdev.io {
+	import ripdev_tls
+	janus {
+		webtransport /relay udp/127.0.0.1:7690
 	}
 }

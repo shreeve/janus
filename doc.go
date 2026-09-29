@@ -30,6 +30,10 @@
 // content-addressed theme and bounded extension renderers. Access log
 // (9) wraps Caddy's JSON encoder without changing durable bytes and
 // publishes bounded app-scoped NDJSON through the control plane.
+// Webtransport (10) terminates WebTransport on the edge's own UDP 443
+// listener and relays each datagram, opaque and byte-exact, to a UDP
+// target fixed per exact-host site; a gated site's descriptor mints the
+// ticket that carries the auth wall's decision to the relay.
 //
 // The registry, data plane, and hub state live in pooled process state
 // (caddy.UsagePool), so Caddy config reloads preserve registrations and

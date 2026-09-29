@@ -64,6 +64,10 @@ type App struct {
 	// variable is honored as a fallback when this is unset.
 	HeartbeatTTL caddy.Duration `json:"heartbeat_ttl,omitempty"`
 
+	// Webtransport enables and tunes the process-wide WebTransport relay
+	// listener (capability 10); routes are declared per site.
+	Webtransport *WebtransportSettings `json:"webtransport,omitempty"`
+
 	logger *zap.Logger
 	hubLog *zap.Logger // named child logger for the hub subsystem
 	ctx    caddy.Context
@@ -236,6 +240,18 @@ func (a *App) Start() error {
 		a.stopBrowse()
 		return err
 	}
+	if err := a.startWebtransport(); err != nil {
+		a.stopAccessStreams()
+		if serr := a.stopControlListeners(); serr != nil {
+			a.logger.Error("janus control unwind", zap.Error(serr))
+		}
+		if serr := a.stopMdns(); serr != nil {
+			a.logger.Error("janus mdns unwind", zap.Error(serr))
+		}
+		a.stopBrowse()
+		a.state.webtransport.retire(a)
+		return err
+	}
 	a.stageReconciliation()
 	if !a.hasActivePredecessor() {
 		a.commitReconciliation()
@@ -283,6 +299,7 @@ func (a *App) Cleanup() error {
 		deleted, err := janusPool.Delete(janusStateKey)
 		if !deleted {
 			a.state.mdns.generationRetired(a)
+			a.state.webtransport.retire(a)
 		}
 		stateErr = err
 		a.state = nil
@@ -312,6 +329,9 @@ func (a *App) commitReconciliation() bool {
 	a.reconcileMu.Unlock()
 	a.closeDisabledHubHosts()
 	a.reconcileAuth()
+	if a.state != nil && a.state.webtransport != nil {
+		a.state.webtransport.commit(a)
+	}
 	return true
 }
 

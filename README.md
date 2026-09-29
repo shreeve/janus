@@ -133,6 +133,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 7 | **sendfile** | Always-on final upstream `X-Sendfile` transformation with validators, ranges, and streaming | [`capability-sendfile`](docs/20260801-020600-capability-sendfile.md) |
 | 8 | **browse** | Navigable hot and cold roots, content-addressed themes, bounded extension renderers, and process leases | [`capability-browse`](docs/20260801-042700-capability-browse.md) |
 | 9 | **access log** | JSON-compatible durable access log plus bounded app-scoped NDJSON streams on `/1.0` | [`capability-access-log`](docs/20260801-081600-capability-access-log.md) |
+| 10 | **webtransport** | WebTransport (HTTP/3 over QUIC) on the edge's own UDP 443, relaying datagrams byte-exact to a config-fixed UDP target; auth-gate tickets | [`capability-webtransport`](docs/20260928-200621-capability-webtransport.md) |
 
 ```bash
 make janus   # go build ./cmd/janus -> bin/janus
@@ -247,6 +248,32 @@ curl -s http://127.0.0.1:7600/1.0/access
 curl -sN "http://127.0.0.1:7600/1.0/apps/$APP_ID/access?after=0"
 ```
 
+### 10. webtransport
+
+A web page cannot send UDP. `webtransport` terminates WebTransport (HTTP/3 over QUIC) on a UDP 443 listener the edge owns, at the same addresses as the HTTPS servers, and relays each datagram, opaque and byte-exact, between a browser session and one UDP address fixed in the Caddyfile: one connected UDP socket per session, one datagram in and one out, drop rather than queue. The global block enables the listener; a route on an exact-host site names the path and the target. `GET <path>` over TCP answers the descriptor the page dials from; on a site with `auth`, the descriptor carries a 60 s single-use ticket for the signed-in user, which the relay requires. HTTP/3 stays off on the servers sharing the port (`servers { protocols h1 h2 }`).
+
+```caddyfile
+{
+	janus {
+		webtransport
+	}
+}
+lyte.trusthealth.com {
+	janus {
+		auth {
+			user steve <passhash>
+			gate / { steve }
+		}
+		browse { root /srv/lyte/www }
+		webtransport /lyte udp/127.0.0.1:41151
+	}
+}
+```
+
+```bash
+curl -s http://127.0.0.1:7600/1.0/webtransport
+```
+
 ## Build and run
 
 From this repository:
@@ -259,7 +286,7 @@ make janus        # go build ./cmd/janus -> bin/janus
 From anywhere, against a published version:
 
 ```bash
-go install github.com/shreeve/janus/cmd/janus@v1.18.3
+go install github.com/shreeve/janus/cmd/janus@v1.19.0
 ```
 
 Janus also remains a plain Caddy module: builders that assemble their own
@@ -447,8 +474,9 @@ service Caddyfile binds through `default_bind {$JANUS_BIND}`, which `run`,
 `reload`, `validate`, and `adapt` fill in from the stored mode; the mode
 is the one source of that value. The running edge checks its own sockets
 against the mode every few seconds and stops, loudly, rather than serve
-wider than the mode allows. HTTP/3 stays off in the seed: it would open UDP
-listeners beside the scoped TCP ones.
+wider than the mode allows. The webtransport relay's UDP 443 is the one UDP
+listener the mode covers, at the same addresses as HTTPS; HTTP/3 stays off
+in the seed because it would bind the relay's port.
 
 In `wan` the local name families are off: a request whose Host is
 `<name>.local`, `<name>.localhost`, `localhost`, `via.rip`, or
@@ -511,7 +539,7 @@ curl -fsSL https://raw.githubusercontent.com/shreeve/janus/main/install.sh | bas
 Then `janus autostart` makes it the host's edge
 ([Running as a service](#running-as-a-service)).
 
-Pin a version with `... | bash -s v1.18.3`. Uninstall with
+Pin a version with `... | bash -s v1.19.0`. Uninstall with
 `... | bash -s -- --uninstall` — the binary goes; your Caddyfile, service
 units, and certificates stay.
 

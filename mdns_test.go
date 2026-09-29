@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1570,5 +1571,42 @@ func TestMdnsStartRejectsMissingInterface(t *testing.T) {
 	err := app.startMdns()
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("missing pinned interface: %v", err)
+	}
+}
+
+// TestMdnsAdvertisesWebtransportHosts pins that a relay-route host joins the
+// advertised set (capability 10), regardless of the apps knob, and deduped
+// against a registered app host of the same name. A-only in lan mode is the
+// advertiser's global address policy (exposure lan), exercised elsewhere.
+func TestMdnsAdvertisesWebtransportHosts(t *testing.T) {
+	adv := newMdnsAdvertiser(nil, zap.NewNop())
+	adv.runExposure = exposureState{scope: "lan", iface: "en0", lanIPv4: netip.MustParseAddr("10.0.0.249")}
+	adv.wtHosts = func() []string { return []string{"lyte.local", "multi.label.local", "other.local"} }
+
+	has := func(out map[string]*mdnsEntry, name string) bool {
+		for _, e := range out {
+			if e.name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, apps := range []bool{true, false} {
+		out := adv.desiredLocked(&mdnsConfig{name: "pup-janus.local", port: 80, apps: apps})
+		if !has(out, "lyte.local") || !has(out, "other.local") {
+			t.Fatalf("apps=%v: relay hosts not advertised: %v", apps, out)
+		}
+		if has(out, "multi.label.local") {
+			t.Errorf("apps=%v: a multi-label .local relay host must not be advertised", apps)
+		}
+	}
+
+	// A relay host that is also the configured front-door name does not
+	// displace the front door; a relay host that is also a registered app
+	// host is announced once (the app entry wins the key).
+	out := adv.desiredLocked(&mdnsConfig{name: "lyte.local", port: 80, apps: true})
+	if e := out[mdnsEntryKey(mdnsTypeFrontDoor, "lyte.local", 80)]; e == nil || e.app != "" {
+		t.Fatal("front-door entry for the configured name was clobbered by a relay host")
 	}
 }

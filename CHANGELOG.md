@@ -4,6 +4,42 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## 1.19.0 — 2026-09-29
+
+- Capability 10, `webtransport`: a browser datagram relay. The edge
+  terminates WebTransport (HTTP/3 over QUIC) on its own UDP 443
+  listener, at the addresses the HTTPS servers bind, and relays each
+  datagram, opaque and byte-exact, between a browser session and one UDP
+  address fixed in the Caddyfile: one connected UDP socket per session,
+  one datagram in and one out, drop rather than queue, datagrams only.
+  The global block enables the listener; `webtransport <path>
+  udp/<ip>:<port>` on an exact-host site declares a route. `GET <path>`
+  over TCP answers the descriptor a page dials from; on a site with
+  `auth`, the descriptor carries a 60 s single-use ticket for the
+  signed-in user, which the relay requires. `GET /1.0/webtransport`
+  publishes the counters. UDP 443 joins the exposure contract: the mode
+  verifies it at the plan's HTTPS addresses, the macOS pf anchor passes
+  it, Windows gets a second rule, and on macOS the edge refuses to start
+  under an anchor written before this release until `janus mode` rewrites
+  it. HTTP/3 stays off on the servers sharing the port. Dependency:
+  `webtransport-go` v0.10.0 on Caddy's quic-go v0.59.1.
+
+- The relay is reachable by name on the LAN: Janus mDNS announces each
+  relay-route host (A-only in lan mode), independent of the mdns `apps`
+  knob and deduped against app hosts, so a browser can resolve a relay on
+  a Janus-owned name without per-host Avahi/Bonjour changes.
+
+- Browser trust over QUIC: Chrome enforces Certificate Transparency on the
+  WebTransport handshake even when the server's root is a locally-trusted
+  CA (the page over TCP is CT-exempt and loads with a lock; the dial is
+  not). So the descriptor publishes the current leaf's SHA-256 in
+  `certificate_hashes` when the leaf is short-lived (the internal CA's
+  ECDSA P-256, ≤14-day leaf qualifies), and the page pins it with
+  `serverCertificateHashes`, which exempts the dial from CA/CT. A public,
+  CT-compliant cert needs no hash. Verified end to end in Chrome 152: a
+  remote desktop (video, audio, input) over the relay, byte-exact, zero
+  drops.
+
 ## 1.18.3 — 2026-09-21
 
 - The status page reloads without a flash over a slower link too. The
