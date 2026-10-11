@@ -570,7 +570,13 @@ func TestAuthRevokeIDRequiresMinimumPrefix(t *testing.T) {
 	}
 	tok, _ := st.mint("alice", "app.test", "")
 	id := st.sessionListRaw()[0].ID
-	for _, prefix := range []string{id[:1], id[:7], strings.ToUpper(id[:8]), "", id[:7] + "z"} {
+	refused := []string{id[:1], id[:7], "", id[:7] + "z", id[:7] + "A"}
+	// Uppercase is refused, but only a prefix holding a hex letter changes
+	// under ToUpper: an all-digit prefix (about 1 id in 40) is still valid.
+	if upper := strings.ToUpper(id[:8]); upper != id[:8] {
+		refused = append(refused, upper)
+	}
+	for _, prefix := range refused {
 		if found, ambiguous := st.revokeID(prefix); found || ambiguous {
 			t.Errorf("revokeID(%q) = %v/%v, want refused", prefix, found, ambiguous)
 		}

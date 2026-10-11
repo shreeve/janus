@@ -89,6 +89,7 @@ func cmdFetch(args []string) {
 		die("testkit fetch: CA file contains no certificates")
 	}
 	transport := &http.Transport{
+		DialContext:        dialLoopback,
 		DisableCompression: true,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
