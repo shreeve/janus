@@ -66,7 +66,7 @@ VistA on em, each session one em process running `XWBP^%ZISTCPS`.
 ```caddyfile
 vista.example.org {
 	janus {
-		vista /rpc unix//run/openvista/xwb.sock {
+		vista /rpc unix//run/openvista/rpc.sock {
 			max_sessions 256           # sessions on this route, default 256, range 1–65535
 			max_unsigned 32            # sessions not yet signed on, default 32, range 1–max_sessions
 			per_client 64              # sessions from one client key, default 64, range 1–max_sessions
@@ -88,7 +88,7 @@ vista.example.org {
 endpoint clients post to (`/rpc` in RPC-HTTPS); it is absolute,
 exact, unique within the site, and canonical (no empty, `.`, or `..`
 segment, no trailing `/`, no percent escape). The target is a Caddy
-network address with network `unix` (`unix//run/openvista/xwb.sock`), an
+network address with network `unix` (`unix//run/openvista/rpc.sock`), an
 absolute, clean path, no port. Each option appears at most once and an
 empty block takes every default.
 
@@ -389,7 +389,7 @@ routes, otherwise:
 {
   "routes": {
     "vista.example.org/rpc": {
-      "target": "unix//run/openvista/xwb.sock",
+      "target": "unix//run/openvista/rpc.sock",
       "sessions": 3, "unsigned": 1, "running": 1, "queued": 0, "draining": 0,
       "oldest_running_ms": 840,
       "max_sessions": 256, "max_unsigned": 32,
