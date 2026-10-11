@@ -12,14 +12,18 @@ package main
 // Mechanism, settled per platform:
 //   - Linux, Windows: bind the exact addresses directly (Linux needs
 //     CAP_NET_BIND_SERVICE for the low ports; Windows needs nothing).
-//   - macOS: cannot bind an exact low port unprivileged, so every mode binds
-//     the wildcard and the host firewall (pf) enforces the scope. The mode is
+//   - macOS: cannot bind an exact low port unprivileged, so localhost and lan
+//     bind the wildcards and the host firewall (pf) enforces the scope; wan
+//     binds the IPv4 wildcard alone. The scope of localhost and lan is
 //     therefore invisible to the Caddyfile on macOS.
 //
 // lan is IPv4: localhost plus one private (RFC1918) address of one interface.
 // A private address is unreachable from the internet by addressing alone, so
 // lan needs no firewall where the bind is exact; only macOS's wildcard socket
-// needs one. IPv6 stays on the loopback (::1) and on wan (::).
+// needs one. wan is IPv4 too: every interface's IPv4 addresses. IPv6 stays on
+// the loopback (::1) alone, where no other machine can reach it: a global IPv6
+// address is routable from anywhere, and an edge that keys limits on client
+// addresses would give an IPv6 client a /64 of fresh keys for the price of one.
 
 import (
 	"fmt"
@@ -34,7 +38,7 @@ type Scope string
 const (
 	ScopeLocalhost Scope = "localhost" // 127.0.0.1 + ::1 only — absolute, host-enforced
 	ScopeLAN       Scope = "lan"       // localhost + one interface's private IPv4 address
-	ScopeWAN       Scope = "wan"       // all interfaces (0.0.0.0 + ::)
+	ScopeWAN       Scope = "wan"       // all interfaces, IPv4 only (0.0.0.0)
 )
 
 // DefaultScope is the mode when none is named. localhost is the one mode that
@@ -119,10 +123,7 @@ func PlanListeners(scope Scope, lan netip.Addr) ([]ListenerSpec, error) {
 		}
 		addrs = append(loopbackAddrs(), normalizeAddr(lan))
 	case ScopeWAN:
-		addrs = []netip.Addr{
-			netip.IPv4Unspecified(),
-			netip.IPv6Unspecified(),
-		}
+		addrs = []netip.Addr{netip.IPv4Unspecified()}
 	default:
 		return nil, fmt.Errorf("unknown exposure mode %q", scope)
 	}
@@ -210,8 +211,9 @@ func VerifyBound(scope Scope, lan netip.Addr, bound []netip.AddrPort) error {
 
 // BindPlan returns the addresses Caddy's default_bind should listen on for a
 // scope on a given OS (goos = runtime.GOOS): what JANUS_BIND carries. macOS
-// cannot bind an exact low port unprivileged, so every mode binds the
-// wildcard there and the host firewall (pf) enforces the scope — the mode is
+// cannot bind an exact low port unprivileged, so localhost and lan bind the
+// wildcards there and the host firewall (pf) enforces the scope, while wan
+// binds the IPv4 wildcard alone — the mode is
 // invisible to the Caddyfile. Linux and Windows bind the exact addresses
 // directly.
 func BindPlan(scope Scope, goos string, lan netip.Addr) ([]string, error) {
@@ -219,6 +221,11 @@ func BindPlan(scope Scope, goos string, lan netip.Addr) ([]string, error) {
 		return nil, err // validates inputs, e.g. lan requires an interface address
 	}
 	if goos == "darwin" {
+		if scope == ScopeWAN {
+			// IPv4 alone; macOS binds the IPv4 wildcard on a low port
+			// unprivileged.
+			return []string{"0.0.0.0"}, nil
+		}
 		return []string{"0.0.0.0", "::"}, nil
 	}
 	switch scope {
@@ -227,7 +234,7 @@ func BindPlan(scope Scope, goos string, lan netip.Addr) ([]string, error) {
 	case ScopeLAN:
 		return []string{"127.0.0.1", "::1", normalizeAddr(lan).String()}, nil
 	case ScopeWAN:
-		return []string{"0.0.0.0", "::"}, nil
+		return []string{"0.0.0.0"}, nil
 	}
 	return nil, fmt.Errorf("unknown exposure mode %q", scope)
 }

@@ -210,7 +210,7 @@ func setScope(cmd *cobra.Command, caddyReload *cobra.Command, p servicePaths, pr
 		fmt.Fprintf(out, "firewall %s\n", verdict)
 	}
 	if next.Scope == ScopeWAN {
-		fmt.Fprintln(out, "wildcard exposure active: the edge answers on every interface")
+		fmt.Fprintln(out, "wildcard exposure active: the edge answers on every interface's IPv4 address")
 	}
 	return applyToEdge(cmd, caddyReload, p)
 }

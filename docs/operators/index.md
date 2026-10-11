@@ -38,9 +38,12 @@ a foreground edge identified through its control listener and waits for it
 to release the listener before starting a replacement.
 
 `janus mode lan` advertises only the selected LAN interface's selected private
-IPv4 address. It never advertises the interface's IPv6 addresses, since LAN
-exposure accepts IPv6 only on loopback. Localhost and WAN modes advertise no
-LAN names. A mode/interface/address change replaces the mDNS records on the
+IPv4 address. It never advertises the interface's IPv6 addresses: every mode
+accepts IPv6 only on loopback, `wan` included, which binds `0.0.0.0`. A `wan`
+edge's DNS names carry A records only; an AAAA record would send clients to
+an address nothing answers. Localhost and WAN modes advertise no LAN names.
+The service edge refuses a dedicated mdns `listen` in every mode: the front
+door shares the HTTP port, the one the mode governs. A mode/interface/address change replaces the mDNS records on the
 advertiser's next reconciliation pass. An explicit `mdns interface` list must
 include the selected LAN interface.
 

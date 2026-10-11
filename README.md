@@ -467,14 +467,14 @@ into the sites directory; the edge itself is Janus's to run.
 
 ### Exposure modes
 
-The edge listens where its exposure mode says, on ports 80 and 443, IPv4
-and IPv6 as separate sockets:
+The edge listens where its exposure mode says, on ports 80 and 443. IPv6
+is on the loopback alone:
 
 | Mode | Listens on | Reachable by |
 | --- | --- | --- |
 | `localhost` | `127.0.0.1` and `::1` | this machine only — the default |
 | `lan` | localhost plus one interface's private IPv4 address | this machine and its local network; a private address is unreachable from the internet by addressing alone |
-| `wan` | every interface | anyone the network lets through |
+| `wan` | every interface's IPv4 address (`0.0.0.0`) | anyone the network lets through; its DNS names carry no AAAA record |
 
 `janus autostart --scope lan` installs with a mode, `janus mode <scope>`
 changes it later, and `janus status` reports it. `lan` uses the interface
@@ -482,9 +482,11 @@ the default route leaves through, the one this host reaches its network
 by; `--interface <name>` pins another (`--interface auto` returns to the
 default route), and when the interface has several private addresses
 `--v4` names the one to use — the address is never guessed among
-several. `lan` is IPv4 only: a public address is `wan`, and IPv6 (whose
-interface addresses are globally routable) stays on the loopback and on
-`wan`. Link-local addresses and tunnel, bridge, and VM interfaces are
+several. `lan` and `wan` are IPv4: a public address is `wan`, and IPv6
+(whose interface addresses are globally routable, and whose /64s would
+hand one client thousands of addresses for the login throttle and session
+caps to count) stays on the loopback. A client on an IPv6-only network
+reaches a `wan` edge through its carrier's NAT64. Link-local addresses and tunnel, bridge, and VM interfaces are
 never candidates.
 
 The mode is stored in `scope.json` under the state directory, and the

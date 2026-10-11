@@ -213,7 +213,7 @@ func TestModeWANStoresAndStarts(t *testing.T) {
 	if err != nil || st.Scope != ScopeWAN {
 		t.Errorf("stored %+v %v", st, err)
 	}
-	if !strings.Contains(out, "wildcard exposure active") || !strings.Contains(out, "bind     0.0.0.0 ::") || f.loads != 1 {
+	if !strings.Contains(out, "wildcard exposure active") || !strings.Contains(out, "bind     0.0.0.0\n") || f.loads != 1 {
 		t.Errorf("out=%q loads=%d", out, f.loads)
 	}
 	out, err = run(t, "mode", "localhost")

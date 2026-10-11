@@ -89,13 +89,18 @@ func TestPlanWAN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(specs) != 4 {
-		t.Fatalf("wan: want 4 listeners, got %d", len(specs))
+	if len(specs) != 2 {
+		t.Fatalf("wan: want 2 listeners (IPv4 only), got %d", len(specs))
 	}
 	got := addrSet(specs)
-	for _, want := range []string{"0.0.0.0:80", "0.0.0.0:443", "[::]:80", "[::]:443"} {
+	for _, want := range []string{"0.0.0.0:80", "0.0.0.0:443"} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("wan: missing %s", want)
+		}
+	}
+	for _, never := range []string{"[::]:80", "[::]:443"} {
+		if _, ok := got[never]; ok {
+			t.Errorf("wan: plans IPv6 listener %s", never)
 		}
 	}
 }
@@ -123,8 +128,8 @@ func TestBindPlan(t *testing.T) {
 	lan := mustAddr("10.0.0.211")
 	wild := []string{"0.0.0.0", "::"}
 
-	// macOS: every mode binds the wildcard; pf enforces the scope.
-	for _, sc := range []Scope{ScopeLocalhost, ScopeLAN, ScopeWAN} {
+	// macOS: localhost and lan bind the wildcards; pf enforces the scope.
+	for _, sc := range []Scope{ScopeLocalhost, ScopeLAN} {
 		got, err := BindPlan(sc, "darwin", lan)
 		if err != nil {
 			t.Fatal(err)
@@ -133,15 +138,18 @@ func TestBindPlan(t *testing.T) {
 			t.Errorf("darwin %s: got %v, want wildcard", sc, got)
 		}
 	}
+	// wan is IPv4 everywhere.
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		if got, _ := BindPlan(ScopeWAN, goos, netip.Addr{}); !eqStrs(got, []string{"0.0.0.0"}) {
+			t.Errorf("%s wan: got %v, want the IPv4 wildcard alone", goos, got)
+		}
+	}
 	// Linux/Windows bind the exact addresses.
 	if got, _ := BindPlan(ScopeLocalhost, "linux", netip.Addr{}); !eqStrs(got, []string{"127.0.0.1", "::1"}) {
 		t.Errorf("linux localhost: %v", got)
 	}
 	if got, _ := BindPlan(ScopeLAN, "linux", lan); !eqStrs(got, []string{"127.0.0.1", "::1", "10.0.0.211"}) {
 		t.Errorf("linux lan: %v", got)
-	}
-	if got, _ := BindPlan(ScopeWAN, "windows", netip.Addr{}); !eqStrs(got, wild) {
-		t.Errorf("windows wan: %v", got)
 	}
 	// lan requires an interface address on every OS — on macOS the pf on-link
 	// rule needs it even though the bind is wildcard.
@@ -208,9 +216,22 @@ func TestVerifyBoundSurplus(t *testing.T) {
 }
 
 func TestVerifyBoundWANAcceptsWildcard(t *testing.T) {
-	bound := aps("0.0.0.0:80", "0.0.0.0:443", "[::]:80", "[::]:443")
+	bound := aps("0.0.0.0:80", "0.0.0.0:443")
 	if err := VerifyBound(ScopeWAN, netip.Addr{}, bound); err != nil {
-		t.Errorf("wan wildcard bind should verify: %v", err)
+		t.Errorf("wan IPv4 wildcard bind should verify: %v", err)
+	}
+}
+
+// wan is IPv4: an IPv6 wildcard socket on a front-door port is wider than
+// the mode and fails verification.
+func TestVerifyBoundWANRefusesIPv6(t *testing.T) {
+	for _, bound := range [][]netip.AddrPort{
+		aps("0.0.0.0:80", "0.0.0.0:443", "[::]:443"),
+		aps("0.0.0.0:443", "[2601:680:8000:2330::906e]:443"),
+	} {
+		if err := VerifyBound(ScopeWAN, netip.Addr{}, bound); err == nil {
+			t.Errorf("an IPv6 listener in wan must fail verification: %v", bound)
+		}
 	}
 }
 

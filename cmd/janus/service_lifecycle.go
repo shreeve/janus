@@ -451,7 +451,7 @@ func autostartFirewall(cmd *cobra.Command, p servicePaths, st scopeState) (ready
 	}
 	fmt.Fprintf(out, "scope  %s%s\nbind   %s\n", st.Scope, ifaceSuffix(st), strings.Join(bind, " "))
 	if st.Scope == ScopeWAN {
-		fmt.Fprintln(out, "wildcard exposure active: the edge answers on every interface")
+		fmt.Fprintln(out, "wildcard exposure active: the edge answers on every interface's IPv4 address")
 	}
 	if !NeedsFirewall(st.Scope, runtime.GOOS) {
 		return true, nil
