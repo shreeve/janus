@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -158,6 +159,59 @@ type authStore struct {
 	logger atomic.Pointer[zap.Logger]
 
 	now func() time.Time
+}
+
+// --- audit trail -------------------------------------------------------------
+//
+// Every login outcome, throttle or ban, sign-out, and session revocation
+// is logged through zap: info for success and sign-out, warn for failure,
+// throttle, and ban. Each event carries host, gate, client_ip, and user
+// where the event has them. Passwords, tokens, CSRF values, and session
+// ids are never logged. A failed login logs one message whether the user
+// is unknown, the password wrong, or the user not on the gate's list.
+
+// authLogUserCap bounds an attempted username in the audit trail.
+const authLogUserCap = 64
+
+// authLogUser renders a submitted username for the audit trail: capped at
+// authLogUserCap bytes, every byte outside printable ASCII replaced by ?,
+// so a hostile name can neither flood nor forge log lines.
+func authLogUser(raw string) string {
+	if len(raw) > authLogUserCap {
+		raw = raw[:authLogUserCap]
+	}
+	b := []byte(raw)
+	for i, c := range b {
+		if c < 0x21 || c > 0x7e {
+			b[i] = '?'
+		}
+	}
+	return string(b)
+}
+
+// authAuditFields are the fields every door event carries.
+func authAuditFields(r *http.Request, g *authGate, user string) []zap.Field {
+	return []zap.Field{
+		zap.String("host", normalizeHostHeader(r.Host)),
+		zap.String("gate", g.prefix),
+		zap.String("client_ip", authClientIP(r)),
+		zap.String("user", authLogUser(user)),
+	}
+}
+
+func (h *Handler) authLog() *zap.Logger {
+	if h.logger == nil {
+		return zap.NewNop()
+	}
+	return h.logger
+}
+
+// authSetUserID records the authenticated user for Caddy's access log
+// (its user_id field reads the http.auth.user.id placeholder).
+func authSetUserID(r *http.Request, user string) {
+	if repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer); ok {
+		repl.Set("http.auth.user.id", user)
+	}
 }
 
 // auditRevoked records one session ended by an operator ("control") or a
@@ -883,6 +937,15 @@ func authWallActive(ctx context.Context) bool {
 	return active
 }
 
+// authGatedUserKey carries the user of a request that passed a gate.
+type authGatedUserKey struct{}
+
+// authGatedUser returns the user a gate admitted this request as, or "".
+func authGatedUser(ctx context.Context) string {
+	user, _ := ctx.Value(authGatedUserKey{}).(string)
+	return user
+}
+
 // serveAuthWall runs the wall for a site with effective auth on.
 // handled=true means the wall wrote the response (login door, 302/401,
 // or plain-HTTP 421); otherwise the returned request — cookies stripped,
@@ -928,6 +991,8 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	ctx := context.WithValue(r.Context(), authWallActiveKey{}, true)
 	if authorized {
 		r.Header.Set("Remote-User", user)
+		authSetUserID(r, user)
+		ctx = context.WithValue(ctx, authGatedUserKey{}, user)
 	}
 	r = r.WithContext(ctx)
 	return r, false, nil
@@ -1214,18 +1279,23 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 	if !blocked {
 		blocked, retryAfter = st.accountCheck(host, name)
 	}
+	log := h.authLog()
 	if blocked {
 		st.throttled.Add(1)
 		secs := int(retryAfter/time.Second) + 1
 		if secs < 1 {
 			secs = 1
 		}
+		log.Warn("janus auth: login throttled",
+			append(authAuditFields(r, g, name), zap.Int("retry_after_s", secs))...)
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return nil
 	}
 	if !st.acquireVerify() {
 		st.throttled.Add(1)
+		log.Warn("janus auth: login throttled (verification queue full)",
+			append(authAuditFields(r, g, name), zap.Int("retry_after_s", 1))...)
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "verification queue is full", http.StatusTooManyRequests)
 		return nil
@@ -1236,9 +1306,23 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 
 	// Password OK is not enough: the user must be on this gate's allow list.
 	if !ok || !g.allow[name] {
-		st.throttleFail(scope, clientKey, name)
-		st.accountFail(host, name)
+		client := st.throttleFail(scope, clientKey, name)
+		account := st.accountFail(host, name)
 		st.loginFailures.Add(1)
+		// One message for every failure cause: the log never tells an
+		// unknown user from a wrong password or a disallowed gate.
+		log.Warn("janus auth: login failed", authAuditFields(r, g, name)...)
+		if client.banned {
+			log.Warn("janus auth: client banned",
+				append(authAuditFields(r, g, name), zap.Duration("ban", authThrottleBan))...)
+		} else if client.wait > 0 {
+			log.Warn("janus auth: client throttle engaged",
+				append(authAuditFields(r, g, name), zap.Duration("wait", client.wait))...)
+		}
+		if account.wait > 0 {
+			log.Warn("janus auth: account throttle engaged",
+				append(authAuditFields(r, g, name), zap.Duration("wait", account.wait))...)
+		}
 		return h.renderAuthPage(w, http.StatusUnauthorized, authPageData{
 			Host:  host,
 			CSRF:  r.PostForm.Get("csrf"),
@@ -1253,13 +1337,18 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 	// A login replaces the host session: the session the request arrived
 	// with, if any, ends here rather than living on beside the new one.
 	if c, err := r.Cookie(authCookieName); err == nil {
-		st.revokeToken(c.Value)
+		if ended, live := st.revokeToken(c.Value); live {
+			log.Info("janus auth: session revoked",
+				append(authAuditFields(r, g, ended.user), zap.String("via", "login"))...)
+		}
 	}
 	token, err := st.mint(name, host, blob)
 	if err != nil {
 		return caddyhttp.Error(http.StatusInternalServerError, err)
 	}
 	st.logins.Add(1)
+	log.Info("janus auth: login succeeded", authAuditFields(r, g, name)...)
+	authSetUserID(r, name)
 	authSetCookie(w, authCookieName, token, 0)
 	authClearCookie(w, authCSRFCookieName)
 	http.Redirect(w, r, to, http.StatusSeeOther)
@@ -1275,10 +1364,14 @@ func (h *Handler) serveAuthSignOut(w http.ResponseWriter, r *http.Request, g *au
 		http.Error(w, "csrf required", http.StatusForbidden)
 		return nil
 	}
+	user := ""
 	if c, err := r.Cookie(authCookieName); err == nil {
-		st.revokeToken(c.Value)
+		if ended, live := st.revokeToken(c.Value); live {
+			user = ended.user
+		}
 	}
 	st.signouts.Add(1)
+	h.authLog().Info("janus auth: signed out", authAuditFields(r, g, user)...)
 	authClearCookie(w, authCookieName)
 	authClearCookie(w, authCSRFCookieName)
 	http.Redirect(w, r, g.door, http.StatusSeeOther)

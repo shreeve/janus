@@ -8,13 +8,17 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // --- gate matching on the canonical path ---------------------------------------
@@ -573,6 +577,139 @@ func TestAuthRevokeIDRequiresMinimumPrefix(t *testing.T) {
 	}
 	if found, _ := st.revokeID(id[:authSessionIDMin]); !found {
 		t.Fatal("an 8-character prefix did not revoke")
+	}
+}
+
+// --- audit trail ----------------------------------------------------------------
+
+func auditEntries(logs *observer.ObservedLogs, msg string) []observer.LoggedEntry {
+	return logs.FilterMessage(msg).All()
+}
+
+func TestAuthAuditTrail(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	ah.h.logger = zap.New(core)
+	ah.st.logger.Store(zap.New(core))
+	now := time.Now()
+	ah.st.now = func() time.Time { return now }
+	secrets := []string{"hunter2-unknown", "hunter3-wrong", "open-sesame"}
+
+	// Unknown user and wrong password log the same message and field set.
+	ah.postLoginFrom(t, "app.test", "192.0.2.10:1", "", "Ghost", secrets[0])
+	ah.postLoginFrom(t, "app.test", "192.0.2.11:1", "", "alice", secrets[1])
+	failed := auditEntries(logs, "janus auth: login failed")
+	if len(failed) != 2 || failed[0].Level != zapcore.WarnLevel {
+		t.Fatalf("login failed events: %+v", failed)
+	}
+	keys := func(e observer.LoggedEntry) string {
+		var ks []string
+		for k := range e.ContextMap() {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		return strings.Join(ks, ",")
+	}
+	if keys(failed[0]) != "client_ip,gate,host,user" || keys(failed[0]) != keys(failed[1]) {
+		t.Fatalf("failure fields differ or are incomplete: %q vs %q", keys(failed[0]), keys(failed[1]))
+	}
+	if m := failed[0].ContextMap(); m["user"] != "ghost" || m["client_ip"] != "192.0.2.10" || m["host"] != "app.test" || m["gate"] != "/" {
+		t.Fatalf("failure fields: %v", m)
+	}
+
+	// Success, then a replacing login, then sign-out.
+	rr := ah.postLoginFrom(t, "app.test", "192.0.2.12:1", "", "alice", "open-sesame")
+	first := authCookieValue(rr, authCookieName)
+	rr = ah.postLoginFrom(t, "app.test", "192.0.2.12:1", "", "alice", "open-sesame",
+		&http.Cookie{Name: authCookieName, Value: first})
+	second := authCookieValue(rr, authCookieName)
+	if got := auditEntries(logs, "janus auth: login succeeded"); len(got) != 2 || got[0].Level != zapcore.InfoLevel || got[0].ContextMap()["user"] != "alice" {
+		t.Fatalf("login succeeded events: %+v", got)
+	}
+	if got := auditEntries(logs, "janus auth: session revoked"); len(got) != 1 || got[0].ContextMap()["via"] != "login" || got[0].ContextMap()["user"] != "alice" {
+		t.Fatalf("replaced-session revocation: %+v", got)
+	}
+	csrf := ah.getLoginForm(t, "app.test", "/auth")
+	out := authReq(http.MethodPost, "app.test", "/auth", strings.NewReader(url.Values{"csrf": {csrf}}.Encode()),
+		"Content-Type", "application/x-www-form-urlencoded")
+	out.AddCookie(&http.Cookie{Name: authCSRFCookieName, Value: csrf})
+	out.AddCookie(&http.Cookie{Name: authCookieName, Value: second})
+	ah.wall(t, out)
+	if got := auditEntries(logs, "janus auth: signed out"); len(got) != 1 || got[0].Level != zapcore.InfoLevel || got[0].ContextMap()["user"] != "alice" {
+		t.Fatalf("sign-out events: %+v", got)
+	}
+
+	// Throttle engagement, a 429, then a ban — from one client.
+	for i := 0; i < 4; i++ {
+		ah.postLoginFrom(t, "app.test", "198.51.100.20:1", "", "mallory", "x")
+	}
+	if got := auditEntries(logs, "janus auth: client throttle engaged"); len(got) != 1 {
+		t.Fatalf("throttle engaged events: %d", len(got))
+	}
+	ah.postLoginFrom(t, "app.test", "198.51.100.20:1", "", "mallory", "x")
+	if got := auditEntries(logs, "janus auth: login throttled"); len(got) != 1 || got[0].Level != zapcore.WarnLevel {
+		t.Fatalf("login throttled events: %+v", got)
+	}
+	for _, wait := range []time.Duration{authThrottleWait4, authThrottleWait5, authThrottleWait6} {
+		now = now.Add(wait + time.Second)
+		ah.postLoginFrom(t, "app.test", "198.51.100.20:1", "", "mallory", "x")
+	}
+	if got := auditEntries(logs, "janus auth: client banned"); len(got) != 1 || got[0].ContextMap()["client_ip"] != "198.51.100.20" {
+		t.Fatalf("ban events: %+v", got)
+	}
+
+	// Control revocations log host and user.
+	tok, _ := ah.st.mint("bob", "app.test", "")
+	ah.st.revokeID(ah.st.sessionListRaw()[0].ID)
+	_ = tok
+	ctl := logs.FilterField(zap.String("via", "control")).All()
+	if len(ctl) != 1 || ctl[0].ContextMap()["user"] != "bob" || ctl[0].ContextMap()["host"] != "app.test" {
+		t.Fatalf("control revocation events: %+v", ctl)
+	}
+
+	// Nothing secret ever reaches the log.
+	for _, e := range logs.All() {
+		for k, v := range e.ContextMap() {
+			s, _ := v.(string)
+			for _, secret := range append(secrets, first, second, tok) {
+				if s != "" && strings.Contains(s, secret) {
+					t.Fatalf("%q logged secret material in %s=%q", e.Message, k, s)
+				}
+			}
+			if k == "password" || k == "token" || k == "session" || k == "csrf" {
+				t.Fatalf("%q carries field %s", e.Message, k)
+			}
+		}
+	}
+}
+
+func TestAuthLogUserSanitizes(t *testing.T) {
+	got := authLogUser("evil\nname\x1b[31m " + strings.Repeat("a", 100))
+	if len(got) != authLogUserCap || strings.ContainsAny(got, "\n\x1b ") {
+		t.Fatalf("authLogUser = %q", got)
+	}
+}
+
+func TestAuthSetsCaddyUserID(t *testing.T) {
+	ah := newAuthHarnessGates(t, aliceUsers(t), 0, map[string][]string{"/private/": {"alice"}})
+	session := ah.loginDoor(t, "app.test", "/private/auth", "alice", "open-sesame")
+	withRepl := func(target string) (*http.Request, *caddy.Replacer) {
+		repl := caddy.NewReplacer()
+		r := authReq(http.MethodGet, "app.test", target, nil)
+		r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+		return r.WithContext(context.WithValue(r.Context(), caddy.ReplacerCtxKey, repl)), repl
+	}
+	r, repl := withRepl("/private/x")
+	if _, out := ah.wall(t, r); out == nil {
+		t.Fatal("gated request refused")
+	}
+	if got, _ := repl.GetString("http.auth.user.id"); got != "alice" {
+		t.Fatalf("http.auth.user.id = %q, want alice", got)
+	}
+	r, repl = withRepl("/public")
+	ah.wall(t, r)
+	if got, ok := repl.GetString("http.auth.user.id"); ok && got != "" {
+		t.Fatalf("open path set http.auth.user.id = %q", got)
 	}
 }
 
