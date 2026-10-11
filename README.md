@@ -134,12 +134,13 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 8 | **browse** | Navigable hot and cold roots, content-addressed themes, bounded extension renderers, and process leases | [`capability-browse`](docs/20260801-042700-capability-browse.md) |
 | 9 | **access log** | JSON-compatible durable access log plus bounded app-scoped NDJSON streams on `/1.0` | [`capability-access-log`](docs/20260801-081600-capability-access-log.md) |
 | 10 | **webtransport** | WebTransport (HTTP/3 over QUIC) on the edge's own UDP 443, relaying datagrams byte-exact to a config-fixed UDP target; auth-gate tickets | [`capability-webtransport`](docs/20260928-200621-capability-webtransport.md) |
+| 11 | **vista** | VistA's RPC Broker over HTTPS: one em process per session behind `POST /rpc`, its stream held by Janus; sign-on-aware caps and token rotation | [`capability-vista`](docs/20261010-232539-capability-vista.md) |
 
 ```bash
 make janus   # go build ./cmd/janus -> bin/janus
 
 go test ./...
-./test.sh    # capability-ordered acceptance groups, ending with webtransport
+./test.sh    # capability-ordered acceptance groups, ending with vista
 ```
 
 `cmd/janus` is the binary's main package: stock Caddy, the Janus module,
@@ -272,6 +273,22 @@ lyte.trusthealth.com {
 
 ```bash
 curl -s http://127.0.0.1:7600/1.0/webtransport
+```
+
+### 11. vista
+
+OpenVista's clients (CPRS through its workstation relay, and a browser through Rip's `rip/vista` package) reach VistA's RPC Broker over HTTPS. Each `POST /rpc` carries one broker message, byte for byte, to the session's own em process, and returns its reply as it is read. A `TCPConnect` starts a session: Janus dials the route's Unix socket (a service manager starts one em per connection), writes the PROXY line with the client's true address, and answers with a `__Host-ov` cookie. Requests run one at a time in order; the session's token rotates when the user signs on; caps on sessions not yet signed on keep unauthenticated clients from piling up em processes. The route is exempt from a covering auth gate only when it says `auth exempt`: VistA's sign-on is the authentication. The contract is [`capability-vista`](docs/20261010-232539-capability-vista.md); OpenVista's side is its RPC-HTTPS contract.
+
+```caddyfile
+vista.example.org {
+	janus {
+		vista /rpc unix//run/openvista/rpc.sock
+	}
+}
+```
+
+```bash
+curl -s http://127.0.0.1:7600/1.0/vista
 ```
 
 ## Build and run
