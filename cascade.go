@@ -3,9 +3,7 @@ package janus
 import (
 	"errors"
 	"fmt"
-	"time"
 
-	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 )
 
@@ -14,26 +12,6 @@ import (
 // shape; one rule everywhere.
 
 func cascadeBool(site, global *bool, builtin bool) bool {
-	if site != nil {
-		return *site
-	}
-	if global != nil {
-		return *global
-	}
-	return builtin
-}
-
-func cascadeDuration(site, global *caddy.Duration, builtin time.Duration) time.Duration {
-	if site != nil {
-		return time.Duration(*site)
-	}
-	if global != nil {
-		return time.Duration(*global)
-	}
-	return builtin
-}
-
-func cascadeInt64(site, global *int64, builtin int64) int64 {
 	if site != nil {
 		return *site
 	}
