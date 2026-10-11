@@ -30,7 +30,7 @@ func testCred(t *testing.T, password string) string {
 	t.Helper()
 	authTestCredsOnce.Do(func() {
 		authTestCreds = map[string]string{}
-		for _, pw := range []string{"open-sesame", "carol-pass", "larry-pass"} {
+		for _, pw := range []string{"open-sesame", "carol-pass", "larry-pass", "alice-pass", "bob-pass"} {
 			blob, err := passMint(pw)
 			if err != nil {
 				panic(err)
@@ -901,7 +901,7 @@ func TestAuthClientKeyIPv6Prefix(t *testing.T) {
 
 func TestAuthThrottleBeforeKDF(t *testing.T) {
 	ah := newAuthHarness(t, aliceUsers(t), 0)
-	gate, client := authThrottleScope("app.test", "/"), "192.0.2.1"
+	gate, client := authThrottleScope(ah.h.authCfg.realm), "192.0.2.1"
 	for i := 0; i < 4; i++ {
 		ah.st.throttleFail(gate, client, "alice")
 	}
