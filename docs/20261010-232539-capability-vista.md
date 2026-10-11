@@ -580,6 +580,8 @@ signs on through Janus to VistA, as `test/relay`'s mini-Janus does today.
 
 ## Measurement
 
+Measured 2026-10-11 in the performance ledger ("vista: VistA RPC sessions"),
+raw legs in [20261011-015419-bench-raw-vista.txt](20261011-015419-bench-raw-vista.txt).
 Per AGENTS.md rule 8, with raw provenance as `docs/*-bench-raw-vista.txt`:
 `XWB IM HERE` round trips per second and their latency on one session and
 on 64 concurrent sessions against the fake em; the admission path's cost;

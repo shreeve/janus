@@ -40,6 +40,7 @@ are immutable.
 | [`20260801-102358-bench-raw-access-log.txt`](20260801-102358-bench-raw-access-log.txt) | Five-run Capability 9 encoder, subscriber, and honest file/sendfile/gzip/zstd/WebSocket path matrix |
 | [`20260805-022544-files-precompressed-measurement.md`](20260805-022544-files-precompressed-measurement.md) | Capability 6 precompressed-sidecar hit and fallback cost, with five-run raw provenance |
 | [`20260826-184613-bench-raw-v1.7-access.txt`](20260826-184613-bench-raw-v1.7-access.txt) | v1.7 access no-subscriber fast-path benchmark provenance |
+| [`20261011-015419-bench-raw-vista.txt`](20261011-015419-bench-raw-vista.txt) | Five-run Capability 11 round trips (one session and 64), admission, idle-session memory, and a 64 MiB streamed reply |
 
 ## Tutorials (runnable, living)
 

@@ -1,0 +1,40 @@
+# vista (capability 11) benchmarks — raw provenance, never edited
+# date: 2026-10-11T07:54:19Z
+# commit: b2b5b6c (branch capability/vista)
+# go: go version go1.27.2 darwin/arm64
+# machine: Apple M5, 10 cores, 32 GB, macOS 27.0.1
+# load at start: 10.39 11.47 9.67
+# rig: go test -bench Vista, fake em (vista_fakeem_test.go) on a Unix socket, httptest TLS server with HTTP/2, Go client; one process
+# command: cpuq run --cores 2-6 -- go test -run '^$' -bench Vista -benchtime 2s -count 5 .
+
+goos: darwin
+goarch: arm64
+pkg: github.com/shreeve/janus
+cpu: Apple M5
+BenchmarkVistaRoundTrip-10            	   14296	    154588 ns/op	   15034 B/op	     144 allocs/op
+BenchmarkVistaRoundTrip-10            	   16906	    145946 ns/op	   14760 B/op	     144 allocs/op
+BenchmarkVistaRoundTrip-10            	   16125	    158684 ns/op	   14787 B/op	     144 allocs/op
+BenchmarkVistaRoundTrip-10            	   14190	    158685 ns/op	   14729 B/op	     144 allocs/op
+BenchmarkVistaRoundTrip-10            	   16502	    149467 ns/op	   14749 B/op	     144 allocs/op
+BenchmarkVistaRoundTrip64-10          	   53959	     45336 ns/op	   14527 B/op	     143 allocs/op
+BenchmarkVistaRoundTrip64-10          	   57162	     44275 ns/op	   14349 B/op	     143 allocs/op
+BenchmarkVistaRoundTrip64-10          	   58129	     45807 ns/op	   14347 B/op	     143 allocs/op
+BenchmarkVistaRoundTrip64-10          	   57967	     41694 ns/op	   14326 B/op	     143 allocs/op
+BenchmarkVistaRoundTrip64-10          	   56649	     44362 ns/op	   14341 B/op	     143 allocs/op
+BenchmarkVistaAdmissionRefusal-10     	   21861	    113608 ns/op	   12394 B/op	     115 allocs/op
+BenchmarkVistaAdmissionRefusal-10     	   19352	    108920 ns/op	   12396 B/op	     115 allocs/op
+BenchmarkVistaAdmissionRefusal-10     	   22450	    108777 ns/op	   12376 B/op	     115 allocs/op
+BenchmarkVistaAdmissionRefusal-10     	   41090	     59448 ns/op	   12421 B/op	     115 allocs/op
+BenchmarkVistaAdmissionRefusal-10     	   40618	     82886 ns/op	   12427 B/op	     115 allocs/op
+BenchmarkVistaIdleSessionMemory-10    	      64	  62375618 ns/op	         2.000 goroutines/session	     41440 heap-B/session
+BenchmarkVistaIdleSessionMemory-10    	      48	  61077396 ns/op	         2.000 goroutines/session	     40449 heap-B/session
+BenchmarkVistaIdleSessionMemory-10    	      52	  59164470 ns/op	         2.000 goroutines/session	     39350 heap-B/session
+BenchmarkVistaIdleSessionMemory-10    	      60	  56362549 ns/op	         2.000 goroutines/session	     39543 heap-B/session
+BenchmarkVistaIdleSessionMemory-10    	      60	  66882397 ns/op	         2.000 goroutines/session	     39726 heap-B/session
+BenchmarkVistaBigReply-10             	      12	 188130750 ns/op	 356.71 MB/s	       283.1 peak-heap-MiB
+BenchmarkVistaBigReply-10             	      13	 185177061 ns/op	 362.40 MB/s	       282.1 peak-heap-MiB
+BenchmarkVistaBigReply-10             	      12	 190236694 ns/op	 352.77 MB/s	       346.1 peak-heap-MiB
+BenchmarkVistaBigReply-10             	      12	 188535594 ns/op	 355.95 MB/s	       345.8 peak-heap-MiB
+BenchmarkVistaBigReply-10             	      12	 185008663 ns/op	 362.73 MB/s	       217.6 peak-heap-MiB
+PASS
+ok  	github.com/shreeve/janus	87.772s
