@@ -640,9 +640,9 @@ func TestWebtransportSessionlessConnectionCloses(t *testing.T) {
 	if appErr.ErrorCode != quic.ApplicationErrorCode(http3.ErrCodeNoError) || appErr.ErrorMessage != wtConnClosedSessionless {
 		t.Fatalf("sessionless close = %#x %q", uint64(appErr.ErrorCode), appErr.ErrorMessage)
 	}
-	if n := f.relay.sessionlessCloses.Load(); n != 1 {
-		t.Fatalf("sessionless_closes = %d", n)
-	}
+	// The relay counts the close after making it, so the client can see it
+	// first.
+	wtWaitFor(t, "sessionless_closes = 1", func() bool { return f.relay.sessionlessCloses.Load() == 1 })
 	time.Sleep(300 * time.Millisecond) // past the wait for the live connection too
 	if live.Context().Err() != nil {
 		t.Fatal("a connection with a session was closed by the session wait")
