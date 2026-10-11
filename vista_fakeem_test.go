@@ -90,7 +90,7 @@ type fakeEmAction struct {
 	Stall bool
 }
 
-func newFakeEm(t *testing.T) *fakeEm {
+func newFakeEm(t testing.TB) *fakeEm {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "em")
 	if err != nil {
