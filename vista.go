@@ -172,7 +172,7 @@ type vistaRouteState struct {
 	mu                sync.Mutex
 	sessions          map[string]*vistaSession // token HMAC → session
 	all               map[*vistaSession]bool   // every live session, including one still starting
-	total             int // sessions, including those still starting
+	total             int                      // sessions, including those still starting
 	unsigned          int
 	perClient         map[netip.Prefix]int
 	perClientUnsigned map[netip.Prefix]int
@@ -186,13 +186,13 @@ type vistaRouteState struct {
 }
 
 type vistaCounters struct {
-	started, signedOn, rejected                     atomic.Int64
-	requests, bytesIn, bytesOut                     atomic.Int64
-	clientGone, aborted, queueTimeout, running      atomic.Int64
-	queued, draining                                atomic.Int64
-	ended                                           sync.Map // cause → *atomic.Int64
-	refused                                         sync.Map // row → *atomic.Int64
-	refusedLogAt                                    sync.Map // row → *vistaLogGate
+	started, signedOn, rejected                atomic.Int64
+	requests, bytesIn, bytesOut                atomic.Int64
+	clientGone, aborted, queueTimeout, running atomic.Int64
+	queued, draining                           atomic.Int64
+	ended                                      sync.Map // cause → *atomic.Int64
+	refused                                    sync.Map // row → *atomic.Int64
+	refusedLogAt                               sync.Map // row → *vistaLogGate
 }
 
 func newVistaRouteState(p *vistaPool, key, target string, gen any) *vistaRouteState {
