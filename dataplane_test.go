@@ -1534,7 +1534,8 @@ func silentUpstream(t *testing.T) string {
 // TestUpstreamResponseHeaderTimeout504 pins the bound on a worker that
 // accepts and never answers: 504 with no-store, the in-flight charge
 // released (a published concurrency of 1 would otherwise hold the socket at
-// its cap and 503 the whole app), and the socket marked unhealthy.
+// its cap and 503 the whole app), and the socket left healthy: one slow
+// request is not a broken worker.
 func TestUpstreamResponseHeaderTimeout504(t *testing.T) {
 	dp, reg := newTestDataPlane(t)
 	dp.transport.ResponseHeaderTimeout = 100 * time.Millisecond
@@ -1563,13 +1564,12 @@ func TestUpstreamResponseHeaderTimeout504(t *testing.T) {
 		dp.stateMu.RLock()
 		st := dp.state[sock]
 		dp.stateMu.RUnlock()
-		if st == nil || !st.unhealthyNow() {
-			t.Fatalf("%s: silent worker was not marked unhealthy", method)
+		if st == nil || st.unhealthyNow() {
+			t.Fatalf("%s: a header timeout marked the socket unhealthy", method)
 		}
 		if got := st.inflight.Load(); got != 0 {
 			t.Fatalf("%s: in-flight charge leaked: %d", method, got)
 		}
-		st.unhealthyUntil.Store(0) // let the next round select it again
 	}
 }
 

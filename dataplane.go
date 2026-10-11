@@ -1054,9 +1054,11 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 		// The worker accepted the request and never answered within
 		// upstreamResponseHeaderTimeout. It may have acted on the request,
 		// so nothing is retried: the client gets 504, the transport has
-		// closed the connection, the deferred release frees the in-flight
-		// charge, and the socket sits out the unhealthy window.
-		dp.markUnhealthy(st)
+		// closed the connection, and the deferred release frees the
+		// in-flight charge. The socket stays healthy: one slow request (a
+		// long poll that withholds its headers, a heavy report) is not
+		// evidence the worker is broken, and an unhealthy mark would turn
+		// it into a 503 for every client of a one-socket app.
 		dp.logger.Warn("janus upstream response header timeout",
 			zap.String("upstream", path),
 			zap.Error(at.err),
