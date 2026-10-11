@@ -38,6 +38,9 @@ A hardening round. What an upgrading operator notices first:
   upstream paths must be absolute and clean.
 - **The TCP control listeners refuse browsers** (any `Origin`, and on
   `local` any non-loopback `Host`).
+- **Under the service edge a dedicated mdns `listen` is refused:** it
+  would serve the status page on a port the exposure mode does not
+  govern. The front door shares the HTTP port, as the seed configures it.
 - **Caddy 2.11.7**, current quic-go, webtransport-go, and `x/` modules,
   built with Go 1.27.2; `govulncheck` gates every pull request.
 
