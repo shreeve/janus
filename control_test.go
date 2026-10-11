@@ -741,3 +741,50 @@ func TestControlServerClosesIdleKeepAlive(t *testing.T) {
 		t.Fatalf("idle keep-alive connection: want server close (EOF), got %v", err)
 	}
 }
+
+// TestControlHubSurfaces pins the control-side answers of the three hub
+// routes that need no live hub: stats always answer, an unknown app is 404
+// on snapshot and publish, a hubless app snapshots empty, and publishing
+// into an app no hub-enabled site serves is a loud 409.
+func TestControlHubSurfaces(t *testing.T) {
+	app := &App{Control: []Control{{Mode: "local", Listen: DefaultControlLocal}}}
+	if err := app.Control[0].normalize(); err != nil {
+		t.Fatal(err)
+	}
+	app.appsReg = newAppRegistry()
+	app.hubs = newHubSet()
+	mux := app.controlMux()
+
+	do := func(method, path, body string) (int, string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return rr.Code, rr.Body.String()
+	}
+	if code, body := do(http.MethodGet, "/1.0/hub", ""); code != http.StatusOK || !json.Valid([]byte(body)) {
+		t.Fatalf("GET /1.0/hub: %d %s", code, body)
+	}
+	if code, _ := do(http.MethodGet, "/1.0/apps/nope-000000/hub", ""); code != http.StatusNotFound {
+		t.Fatalf("snapshot of an unknown app: want 404, got %d", code)
+	}
+	if code, _ := do(http.MethodPost, "/1.0/apps/nope-000000/hub/publish", `{"@":"x"}`); code != http.StatusNotFound {
+		t.Fatalf("publish to an unknown app: want 404, got %d", code)
+	}
+
+	rec, err := app.appsReg.create("hubless", []string{"hubless.test"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := do(http.MethodGet, "/1.0/apps/"+rec.ID+"/hub", "")
+	var snap struct {
+		Channels    map[string]int      `json:"channels"`
+		Connections map[string][]string `json:"connections"`
+	}
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &snap) != nil ||
+		snap.Channels == nil || len(snap.Channels) != 0 || snap.Connections == nil || len(snap.Connections) != 0 {
+		t.Fatalf("snapshot of a hubless app: want 200 and empty maps, got %d %s", code, body)
+	}
+	if code, body := do(http.MethodPost, "/1.0/apps/"+rec.ID+"/hub/publish", `{"@":"x"}`); code != http.StatusConflict {
+		t.Fatalf("publish with no hub-enabled site: want 409, got %d %s", code, body)
+	}
+}
