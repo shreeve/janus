@@ -279,12 +279,14 @@ case_auth_fixation_dead() {
 case_auth_wrong_creds() {
 	local f0
 	f0="$(auth_stat login_failures)"
-	# Known user, wrong password.
-	auth_attempt "$AUTH_WALL" bob wrong-password
+	# Failures run on authcarol: throttle keys are per host and gate, so the
+	# throttle case below starts with a clean aggregate on authwall.
+	# A user unknown on this host, with a password…
+	auth_attempt "$AUTH_CAROL" bob wrong-password
 	eq "$REPLY_CODE" "401"
 	local body1="$REPLY_BODY"
-	# Unknown user.
-	auth_attempt "$AUTH_WALL" ghost whatever
+	# …and a user unknown everywhere.
+	auth_attempt "$AUTH_CAROL" ghost whatever
 	eq "$REPLY_CODE" "401"
 	local body2="$REPLY_BODY"
 	# One generic message; the bodies are identical once the per-render
@@ -299,9 +301,8 @@ case_auth_wrong_creds() {
 
 case_auth_throttle() {
 	local t0 i
-	# Clear the per-IP aggregate left by earlier failure cases (all curl
-	# traffic shares 127.0.0.1 as the client key).
-	auth_login "$AUTH_WALL" alice sesame-alice
+	# All curl traffic shares 127.0.0.1 as the client key; no earlier case
+	# fails a login on this host and gate, so the aggregate starts clean.
 	t0="$(auth_stat throttled)"
 	# Ladder: fails 1–3 immediate 401; 4th sets a 10s wait…
 	for i in 1 2 3 4; do
@@ -313,8 +314,11 @@ case_auth_throttle() {
 	eq "$REPLY_CODE" "429"
 	ok "-n \"$(auth_hdr retry-after)\"" "429 carries no Retry-After"
 	ok "$(auth_stat throttled) -gt $t0" "throttled counter unmoved"
-	# Aggregate wait blocks every username from this client key; wait it out,
-	# then a successful login clears the aggregate for later cases.
+	# The aggregate wait blocks every username from this client key, a
+	# correct password included; once it lapses, a login succeeds. A success
+	# never clears the client's aggregate, so a spray cannot reset itself.
+	auth_attempt "$AUTH_WALL" alice sesame-alice
+	eq "$REPLY_CODE" "429"
 	sleep 11
 	auth_login "$AUTH_WALL" alice sesame-alice
 }
