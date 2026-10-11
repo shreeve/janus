@@ -1,6 +1,6 @@
 # Capability 11: vista
 
-Status: **Draft — awaiting owner review.** Built to OpenVista's
+Status: **Contract**, rulings by the owner on 2026-10-11. Built to OpenVista's
 [RPC-HTTPS contract](../../openvista/docs/RPC-HTTPS.md) (§1 client and
 Janus, §2 Janus and em, §3 the reply rule), with the limits Em and the
 owner settled on 2026-10-10, Em's review against the M side, and an
@@ -453,9 +453,9 @@ Settled with Em on 2026-10-10, for the owner's review:
 | 6 | Idle | No Janus timer; a stream's close is noticed at once |
 | 7 | `TCPConnect` `reject` | 200 with the reply, no token, slot released |
 
-Open for the owner:
+Ruled by the owner on 2026-10-11, each as recommended:
 
-| # | Decision | Recommendation |
+| # | Decision | Ruling |
 | --- | --- | --- |
 | 8 | Token rotation at sign-on (closes session fixation; RPC-HTTPS §1 and the relay take a cookie from the signing-on reply) | Yes |
 | 9 | A covering gate requires `auth exempt` or an exact gate (Start error otherwise) | Yes: rule 1, never silent |
