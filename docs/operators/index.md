@@ -86,6 +86,30 @@ errors are written every time.
 such case but a clean stop, the supervisor log's last error line with its
 timestamp (`crash_loop`, `last_exit`, `last_error` in `--json`).
 
+## The Linux system unit
+
+`sudo janus autostart` writes `/etc/systemd/system/janus.service`. The edge
+runs as root (no `User=`), confined to what the documented layout needs:
+
+| Directive | Effect |
+| --- | --- |
+| `NoNewPrivileges=yes` | Nothing the edge runs (a browse renderer) gains privilege from a setuid bit or a file capability. |
+| `ProtectSystem=full` | `/usr`, `/boot`, and `/etc` are read-only. The edge reads `/etc/janus` and never writes it; `autostart`, `serve`, and `mode` write there from outside the unit. |
+| `ProtectHome=read-only` | `/home`, `/root`, and `/run/user` are readable: registered roots serve, and tenant sockets there accept connections. The edge writes nothing there. |
+| `ReadWritePaths=-/var/lib/janus -/var/log/janus` | The state (Caddy's storage and autosave, the sockets, `scope.json`) and the logs stay writable. |
+| `CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE` | Ports 80 and 443, and reaching a tenant's worker sockets in a directory only that tenant may enter (Rip's are 0700 under `/tmp`) or a root it registers. Every other root capability is gone. |
+
+`PrivateTmp` is off: tenants put worker and doorbell sockets under `/tmp`,
+and a private `/tmp` would hide them from the edge. Without `CAP_NET_ADMIN`
+the QUIC stack behind webtransport cannot force UDP buffers past the
+kernel's `net.core.rmem_max` and `wmem_max`, and logs that it could not;
+raise those sysctls when the relay carries heavy traffic. A Caddyfile that
+writes a log or storage under `/home`, `/etc`, or `/usr` needs a drop-in
+(`systemctl edit janus`) that adds the path to `ReadWritePaths=`. The user
+unit (`systemctl --user`) carries none of this: `NoNewPrivileges` would
+void the `cap_net_bind_service` that `setcap` gives a user's binary.
+`janus autostart` rewrites the unit; `janus restart` applies it.
+
 ## Reload survival
 
 | State | Successful compatible reload | Restart |

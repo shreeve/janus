@@ -48,11 +48,41 @@ func TestSystemdUnit(t *testing.T) {
 		}
 	}
 	// The system edge runs as root, as its paths (/etc, /var) require; no
-	// identity or sandboxing directive changes that under it.
-	for _, no := range []string{"DynamicUser", "User=", "StateDirectory", "AmbientCapabilities", "NoNewPrivileges"} {
+	// identity directive changes that under it.
+	for _, no := range []string{"DynamicUser", "User=", "StateDirectory", "AmbientCapabilities"} {
 		if strings.Contains(rootUnit, no) || strings.Contains(got, no) {
 			t.Errorf("unit carries %s:\n%s\n%s", no, rootUnit, got)
 		}
+	}
+	// Root's edge is confined to what the documented layout needs: its
+	// state and logs writable, /etc and /usr read-only, /home readable,
+	// and the capabilities for the low ports and for tenant sockets.
+	sandbox := "StandardError=append:/var/log/janus/supervisor.log\n" +
+		"NoNewPrivileges=yes\n" +
+		"ProtectSystem=full\n" +
+		"ProtectHome=read-only\n" +
+		"ReadWritePaths=-/var/lib/janus -/var/log/janus\n" +
+		"CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE\n" +
+		"\n[Install]\n"
+	if !strings.Contains(rootUnit, sandbox) {
+		t.Errorf("root unit lacks its sandbox %q:\n%s", sandbox, rootUnit)
+	}
+	// Tenants' worker sockets live under /tmp: a private /tmp would hide
+	// them from the edge. Nothing stricter than read-only /etc.
+	for _, no := range []string{"PrivateTmp", "ProtectSystem=strict", "ProtectHome=yes"} {
+		if strings.Contains(rootUnit, no) {
+			t.Errorf("root unit carries %s:\n%s", no, rootUnit)
+		}
+	}
+	// A user unit stays unconfined: NoNewPrivileges would void the
+	// setcap'd cap_net_bind_service its binary binds 80 and 443 with.
+	for _, no := range []string{"NoNewPrivileges", "ProtectSystem", "ProtectHome", "ReadWritePaths", "CapabilityBoundingSet", "PrivateTmp"} {
+		if strings.Contains(got, no) {
+			t.Errorf("user unit carries %s:\n%s", no, got)
+		}
+	}
+	if !strings.Contains(got, "StandardError=append:/home/ann/.local/state/janus/log/supervisor.log\n\n[Install]\n") {
+		t.Errorf("user unit layout:\n%s", got)
 	}
 	root := newServiceItem(rp).(*systemdItem)
 	if root.unit != "/etc/systemd/system/janus.service" || root.user {

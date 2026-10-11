@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -207,10 +208,11 @@ func systemdUnitFile(p servicePaths, exe string) string {
 	// cannot bind and exits; it must keep retrying every ten seconds until
 	// the address is back or 'janus mode lan' stores the new one. systemd's
 	// default burst limit would give up after five tries and leave it down.
-	unit, wanted := "", "default.target"
+	unit, wanted, sandbox := "", "default.target", ""
 	if p.root {
 		unit = "After=network-online.target\nWants=network-online.target\n"
 		wanted = "multi-user.target"
+		sandbox = rootSandbox(p)
 	}
 	env := serviceEnv(p, exe)
 	var envLines strings.Builder
@@ -233,10 +235,48 @@ RestartSec=10
 TimeoutStopSec=15
 StandardOutput=append:%s
 StandardError=append:%s
-
+%s
 [Install]
 WantedBy=%s
-`, unit, exe, p.config, exe, p.config, p.state, envLines.String(), p.sup, p.sup, wanted)
+`, unit, exe, p.config, exe, p.config, p.state, envLines.String(), p.sup, p.sup, sandbox, wanted)
+}
+
+// rootSandbox is the system unit's confinement. The edge stays root (its
+// paths are root's, and no User= changes that); what it may do as root
+// narrows to what the documented layout and its tenants need:
+//
+//   - NoNewPrivileges: nothing it runs (a browse renderer) gains
+//     privilege through a setuid bit or a file capability.
+//   - ProtectSystem=full: /usr, /boot, and /etc are read-only. The edge
+//     reads /etc/janus and never writes it; the verbs that write there
+//     (autostart, serve, mode) run outside the unit.
+//   - ProtectHome=read-only: the edge reads registered roots under /home
+//     and connects to tenant sockets there (a socket on a read-only mount
+//     still accepts connections); it writes nothing there.
+//   - ReadWritePaths: its state (Caddy's storage and autosave, sockets,
+//     scope) and its logs, writable whatever else is confined; "-" lets a
+//     directory not created yet be absent.
+//   - CapabilityBoundingSet: CAP_NET_BIND_SERVICE for ports 80 and 443,
+//     and CAP_DAC_OVERRIDE, without which root could not reach a
+//     tenant's worker sockets in a directory only that tenant may enter
+//     (Rip's are 0700 under /tmp) or read a root a tenant registers.
+//
+// PrivateTmp is left off on purpose: tenants put their worker and
+// doorbell sockets under /tmp, and a private /tmp would hide them. A
+// user unit carries none of this: NoNewPrivileges would void the
+// cap_net_bind_service a user's binary is given with setcap.
+func rootSandbox(p servicePaths) string {
+	rw := []string{"-" + p.state}
+	for _, dir := range []string{filepath.Dir(p.log), filepath.Dir(p.sup)} {
+		if d := "-" + dir; !slices.Contains(rw, d) {
+			rw = append(rw, d)
+		}
+	}
+	return "NoNewPrivileges=yes\n" +
+		"ProtectSystem=full\n" +
+		"ProtectHome=read-only\n" +
+		"ReadWritePaths=" + strings.Join(rw, " ") + "\n" +
+		"CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE\n"
 }
 
 // platformNotes: a user's edge cannot bind 80 or 443 unless the binary
