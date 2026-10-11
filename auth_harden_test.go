@@ -486,6 +486,96 @@ func TestAuthThrottleKeysOnClientBehindTrustedProxy(t *testing.T) {
 	}
 }
 
+// --- sessions -------------------------------------------------------------------
+
+func TestAuthCredentialChangeRevokesSessionsAtReload(t *testing.T) {
+	st, err := newAuthStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCred, newCred := testCred(t, "open-sesame"), testCred(t, "carol-pass")
+	app := &App{
+		logger: zap.NewNop(),
+		state:  &janusState{auth: st},
+		authSites: []authSiteEntry{{
+			patterns: []string{"app.test"},
+			cfg:      &authSite{users: map[string]string{"alice": newCred, "bob": oldCred}, ttl: time.Hour},
+		}},
+	}
+	alice, _ := st.mint("alice", "app.test", oldCred) // passhash since rotated
+	bob, _ := st.mint("bob", "app.test", oldCred)     // passhash unchanged
+	app.reconcileAuth()
+	if _, _, ok := st.lookup(alice, "app.test", time.Hour, false); ok {
+		t.Fatal("a changed passhash kept its old session at reload")
+	}
+	if _, _, ok := st.lookup(bob, "app.test", time.Hour, false); !ok {
+		t.Fatal("an unchanged passhash lost its session at reload")
+	}
+	if st.reloadRevoked.Load() != 1 {
+		t.Fatalf("reload_revoked = %d, want 1", st.reloadRevoked.Load())
+	}
+}
+
+func TestAuthCredentialChangeEndsSessionPerRequest(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	session := ah.login(t, "app.test", "alice", "open-sesame")
+	r := authReq(http.MethodGet, "app.test", "/x", nil)
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	if _, out := ah.wall(t, r); out == nil {
+		t.Fatal("fresh session refused")
+	}
+	// A reload commits a new passhash for alice; the old session must not
+	// pass even before the store sweep runs.
+	ah.h.authCfg.users["alice"] = testCred(t, "carol-pass")
+	r = authReq(http.MethodGet, "app.test", "/x", nil)
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	if rr, out := ah.wall(t, r); out != nil || rr.Code != http.StatusUnauthorized {
+		t.Fatalf("session minted under the old passhash passed: code=%d", rr.Code)
+	}
+	r = authReq(http.MethodGet, "app.test", "/auth", nil)
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	if rr, _ := ah.wall(t, r); strings.Contains(rr.Body.String(), "Sign out") {
+		t.Fatal("status page honored a session minted under the old passhash")
+	}
+}
+
+func TestAuthLoginRevokesThePriorSession(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	first := ah.login(t, "app.test", "alice", "open-sesame")
+	rr := ah.postLoginFrom(t, "app.test", "192.0.2.1:1", "", "alice", "open-sesame",
+		&http.Cookie{Name: authCookieName, Value: first})
+	second := authCookieValue(rr, authCookieName)
+	if rr.Code != http.StatusSeeOther || second == "" || second == first {
+		t.Fatalf("second login: %d session=%q", rr.Code, second)
+	}
+	if _, _, ok := ah.st.lookup(first, "app.test", time.Hour, false); ok {
+		t.Fatal("the session a login arrived with outlived the login")
+	}
+	if _, _, ok := ah.st.lookup(second, "app.test", time.Hour, false); !ok {
+		t.Fatal("the new session does not resolve")
+	}
+}
+
+func TestAuthRevokeIDRequiresMinimumPrefix(t *testing.T) {
+	st, err := newAuthStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := st.mint("alice", "app.test", "")
+	id := st.sessionListRaw()[0].ID
+	for _, prefix := range []string{id[:1], id[:7], strings.ToUpper(id[:8]), "", id[:7] + "z"} {
+		if found, ambiguous := st.revokeID(prefix); found || ambiguous {
+			t.Errorf("revokeID(%q) = %v/%v, want refused", prefix, found, ambiguous)
+		}
+	}
+	if _, _, ok := st.lookup(tok, "app.test", time.Hour, false); !ok {
+		t.Fatal("a refused prefix revoked the session")
+	}
+	if found, _ := st.revokeID(id[:authSessionIDMin]); !found {
+		t.Fatal("an 8-character prefix did not revoke")
+	}
+}
+
 // FuzzAuthGateCanonical pins the over-gate-only property: for any path p,
 // if the canonical form of p (or p itself) is under a gate prefix, the
 // wall treats p as gated — a request without a session never passes.

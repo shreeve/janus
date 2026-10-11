@@ -831,35 +831,43 @@ func (a *App) reconcileAuth() {
 		}
 	}
 	st := a.state.auth
+	if a.logger != nil {
+		st.logger.Store(a.logger)
+	}
 	st.reapTTL.Store(int64(maxTTL))
 	st.mu.Lock()
-	revoked := 0
+	var ended []authSession
 	for key, session := range st.sessions {
-		if !a.authSessionAllowed(session.user, session.host) {
+		if !a.authSessionAllowed(session.user, session.host, session.cred) {
 			delete(st.sessions, key)
-			revoked++
+			ended = append(ended, *session)
 		}
 	}
 	st.mu.Unlock()
-	st.reloadRevoked.Add(int64(revoked))
-	if revoked > 0 {
-		a.logger.Warn("janus auth: sessions revoked at reload (user absent from the minting host's enabled site)",
-			zap.Int("revoked", revoked),
+	st.reloadRevoked.Add(int64(len(ended)))
+	for _, s := range ended {
+		st.auditRevoked("reload", s)
+	}
+	if len(ended) > 0 && a.logger != nil {
+		a.logger.Warn("janus auth: sessions revoked at reload (user absent from the minting host's enabled site, or credential changed)",
+			zap.Int("revoked", len(ended)),
 			zap.Bool("auth_enabled_anywhere", enabled),
 		)
 	}
 }
 
-// authSessionAllowed retains a host-bound session only when its user remains
-// in at least one enabled auth site that matches the minting host. A same-name
-// user on another host must not keep an unreachable stale session alive.
-func (a *App) authSessionAllowed(user, host string) bool {
+// authSessionAllowed retains a host-bound session only when its user remains,
+// with the credential the session was minted against, in at least one
+// enabled auth site that matches the minting host. A same-name user on
+// another host must not keep an unreachable stale session alive, and a
+// changed passhash ends every session minted under the old one.
+func (a *App) authSessionAllowed(user, host, cred string) bool {
 	host = strings.ToLower(host)
 	for _, e := range a.authSites {
 		if e.cfg == nil {
 			continue
 		}
-		if _, ok := e.cfg.users[user]; !ok {
+		if have, ok := e.cfg.users[user]; !ok || have != cred {
 			continue
 		}
 		if len(e.patterns) == 0 {

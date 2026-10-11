@@ -31,15 +31,15 @@ func TestReconciliationWaitsForCommit(t *testing.T) {
 			},
 		}},
 	}
-	alice, err := auth.mint("alice", "app.test")
+	alice, err := auth.mint("alice", "app.test", "unused")
 	if err != nil {
 		t.Fatal(err)
 	}
-	bob, err := auth.mint("bob", "app.test")
+	bob, err := auth.mint("bob", "app.test", "unused")
 	if err != nil {
 		t.Fatal(err)
 	}
-	staleAlice, err := auth.mint("alice", "removed.test")
+	staleAlice, err := auth.mint("alice", "removed.test", "unused")
 	if err != nil {
 		t.Fatal(err)
 	}

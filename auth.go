@@ -98,6 +98,7 @@ func passVerify(password, blob string) bool {
 type authSession struct {
 	user     string
 	host     string
+	cred     string // the passhash the session was minted against
 	issuedAt time.Time
 	lastSeen time.Time
 }
@@ -151,7 +152,26 @@ type authStore struct {
 	reapStop chan struct{}
 	reapDone chan struct{}
 
+	// logger carries the audit events the store itself observes (control
+	// and reload revocations); the committed generation's App logger,
+	// refreshed at every reconcile. Nil logs nothing.
+	logger atomic.Pointer[zap.Logger]
+
 	now func() time.Time
+}
+
+// auditRevoked records one session ended by an operator ("control") or a
+// reload ("reload"): host and username, never a token or session id.
+func (st *authStore) auditRevoked(via string, s authSession) {
+	l := st.logger.Load()
+	if l == nil {
+		return
+	}
+	l.Info("janus auth: session revoked",
+		zap.String("via", via),
+		zap.String("host", s.host),
+		zap.String("user", s.user),
+	)
 }
 
 func newAuthStore() (*authStore, error) {
@@ -237,8 +257,9 @@ func (st *authStore) sessionKey(token string) string {
 
 // mint issues a fresh session: 128 bits from crypto/rand, minted only at
 // successful login — a client-proposed token is never accepted, so
-// session fixation is dead by construction.
-func (st *authStore) mint(user, host string) (string, error) {
+// session fixation is dead by construction. The session remembers the
+// credential it was minted against: a changed passhash ends it.
+func (st *authStore) mint(user, host, cred string) (string, error) {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("janus auth: minting session token: %w", err)
@@ -247,7 +268,7 @@ func (st *authStore) mint(user, host string) (string, error) {
 	now := st.now()
 	st.mu.Lock()
 	st.sessions[st.sessionKey(token)] = &authSession{
-		user: user, host: strings.ToLower(host),
+		user: user, host: strings.ToLower(host), cred: cred,
 		issuedAt: now, lastSeen: now,
 	}
 	st.mu.Unlock()
@@ -258,13 +279,17 @@ func (st *authStore) mint(user, host string) (string, error) {
 // requesting site's effective ttl. Expired entries are deleted lazily;
 // an authorized call may request a sliding lastSeen refresh.
 func (st *authStore) lookup(token, host string, ttl time.Duration, refresh bool) (user string, issuedAt time.Time, ok bool) {
-	return st.lookupAllowed(token, host, ttl, refresh, nil)
+	return st.lookupAllowed(token, host, ttl, refresh, nil, nil)
 }
 
 // lookupAllowed combines session validation, gate authorization, and the
 // optional sliding refresh under one HMAC and one store lock. A nil allow set
-// means the caller only needs a host-valid live session.
-func (st *authStore) lookupAllowed(token, host string, ttl time.Duration, refresh bool, allow map[string]bool) (user string, issuedAt time.Time, ok bool) {
+// means the caller only needs a host-valid live session. A non-nil users
+// table (name → passhash) additionally requires the session's user to be
+// present with the very credential the session was minted against, so a
+// changed passhash ends the session on its next request, before the
+// reload's store sweep runs.
+func (st *authStore) lookupAllowed(token, host string, ttl time.Duration, refresh bool, allow map[string]bool, users map[string]string) (user string, issuedAt time.Time, ok bool) {
 	if token == "" {
 		return "", time.Time{}, false
 	}
@@ -288,55 +313,88 @@ func (st *authStore) lookupAllowed(token, host string, ttl time.Duration, refres
 	if allow != nil && !allow[s.user] {
 		return "", time.Time{}, false
 	}
+	if users != nil {
+		if cred, present := users[s.user]; !present || cred != s.cred {
+			return "", time.Time{}, false
+		}
+	}
 	if refresh {
 		s.lastSeen = now
 	}
 	return s.user, s.issuedAt, true
 }
 
-// revokeToken revokes the session a cookie names. Revoking an
-// already-dead session is a success, not an error.
-func (st *authStore) revokeToken(token string) {
+// revokeToken revokes the session a cookie names and reports the session
+// it ended (ok=false when none was live). Revoking an already-dead
+// session is a success, not an error.
+func (st *authStore) revokeToken(token string) (ended authSession, ok bool) {
 	if token == "" {
-		return
+		return authSession{}, false
 	}
 	key := st.sessionKey(token)
 	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.sessions[key]
+	if s == nil {
+		return authSession{}, false
+	}
 	delete(st.sessions, key)
-	st.mu.Unlock()
+	return *s, true
 }
 
+// authSessionIDMin is the shortest id prefix revoke-by-id accepts. A
+// listed id is 12 hex characters; a prefix shorter than 8 could name a
+// session nobody listed.
+const authSessionIDMin = 8
+
 // revokeID revokes one session by id prefix (the /1.0/auth/sessions id:
-// a 12-hex prefix of the HMACed store key). The prefix must resolve a
-// unique key: none → found=false; several → ambiguous=true.
+// a 12-hex prefix of the HMACed store key). The prefix must be at least
+// authSessionIDMin lowercase hex characters and resolve a unique key:
+// too short, malformed, or no match → found=false; several →
+// ambiguous=true.
 func (st *authStore) revokeID(prefix string) (found, ambiguous bool) {
+	if len(prefix) < authSessionIDMin || len(prefix) > sha256.Size*2 {
+		return false, false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if c := prefix[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false, false
+		}
+	}
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	match := ""
 	for k := range st.sessions {
 		if strings.HasPrefix(k, prefix) {
 			if match != "" {
+				st.mu.Unlock()
 				return false, true
 			}
 			match = k
 		}
 	}
 	if match == "" {
+		st.mu.Unlock()
 		return false, false
 	}
+	ended := *st.sessions[match]
 	delete(st.sessions, match)
+	st.mu.Unlock()
 	st.revoked.Add(1)
+	st.auditRevoked("control", ended)
 	return true, false
 }
 
 // revokeAll wipes every session ("kick everyone").
 func (st *authStore) revokeAll() int {
 	st.mu.Lock()
-	n := len(st.sessions)
+	ended := st.sessions
 	st.sessions = map[string]*authSession{}
 	st.mu.Unlock()
-	st.revoked.Add(int64(n))
-	return n
+	st.revoked.Add(int64(len(ended)))
+	for _, s := range ended {
+		st.auditRevoked("control", *s)
+	}
+	return len(ended)
 }
 
 // revokeUsersNotIn revokes sessions whose user is absent from keep. The
@@ -898,7 +956,7 @@ func (h *Handler) authSessionAllowed(r *http.Request, allow map[string]bool) (st
 	if err != nil || c.Value == "" {
 		return "", false
 	}
-	user, _, ok := cfg.store.lookupAllowed(c.Value, normalizeHostHeader(r.Host), cfg.ttl, true, allow)
+	user, _, ok := cfg.store.lookupAllowed(c.Value, normalizeHostHeader(r.Host), cfg.ttl, true, allow, cfg.users)
 	return user, ok
 }
 
@@ -1082,21 +1140,15 @@ func (h *Handler) serveAuthPage(w http.ResponseWriter, r *http.Request, g *authG
 }
 
 // authPageSession resolves the session for page rendering (live session
-// whose user is in this site's users table).
+// whose user is in this site's users table with the credential the
+// session was minted against).
 func (h *Handler) authPageSession(r *http.Request) (string, time.Time, bool) {
 	cfg := h.authCfg
 	c, err := r.Cookie(authCookieName)
 	if err != nil || c.Value == "" {
 		return "", time.Time{}, false
 	}
-	user, issuedAt, ok := cfg.store.lookup(c.Value, normalizeHostHeader(r.Host), cfg.ttl, false)
-	if !ok {
-		return "", time.Time{}, false
-	}
-	if _, allowed := cfg.users[user]; !allowed {
-		return "", time.Time{}, false
-	}
-	return user, issuedAt, true
+	return cfg.store.lookupAllowed(c.Value, normalizeHostHeader(r.Host), cfg.ttl, false, nil, cfg.users)
 }
 
 func (h *Handler) renderAuthPage(w http.ResponseWriter, status int, data authPageData) error {
@@ -1198,7 +1250,12 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 
 	st.throttleClear(scope, clientKey, name)
 	st.accountClear(host, name)
-	token, err := st.mint(name, host)
+	// A login replaces the host session: the session the request arrived
+	// with, if any, ends here rather than living on beside the new one.
+	if c, err := r.Cookie(authCookieName); err == nil {
+		st.revokeToken(c.Value)
+	}
+	token, err := st.mint(name, host, blob)
 	if err != nil {
 		return caddyhttp.Error(http.StatusInternalServerError, err)
 	}

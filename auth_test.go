@@ -775,7 +775,7 @@ func TestAuthSessionStore(t *testing.T) {
 	now := time.Now()
 	st.now = func() time.Time { return now }
 
-	token, err := st.mint("alice", "app.test")
+	token, err := st.mint("alice", "app.test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -788,8 +788,8 @@ func TestAuthSessionStore(t *testing.T) {
 		t.Fatal("idle session survived past ttl")
 	}
 
-	tokA, _ := st.mint("alice", "a.test")
-	tokB, _ := st.mint("bob", "b.test")
+	tokA, _ := st.mint("alice", "a.test", "")
+	tokB, _ := st.mint("bob", "b.test", "")
 	if n := st.revokeUsersNotIn(map[string]bool{"alice": true}); n != 1 {
 		t.Fatalf("revokeUsersNotIn = %d, want 1", n)
 	}
@@ -814,7 +814,7 @@ func TestAuthSessionIDPrefixResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := st.mint("alice", "app.test")
+	tok, _ := st.mint("alice", "app.test", "")
 	list := st.sessionListRaw()
 	if len(list) != 1 || len(list[0].ID) != 12 {
 		t.Fatalf("session list: %+v", list)
