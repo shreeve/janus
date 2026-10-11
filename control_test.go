@@ -643,7 +643,7 @@ func TestControlBrowserGuard(t *testing.T) {
 	app := &App{Control: []Control{
 		{Mode: "internal", Listen: "/tmp/janus-guard.sock"},
 		{Mode: "local", Listen: DefaultControlLocal},
-		{Mode: "public", Listen: DefaultControlPublic, Token: "JANUS_GUARD_TOKEN", TokenKind: tokenEnv},
+		{Mode: "public", Listen: DefaultControlPublic, Token: "JANUS_GUARD_TOKEN", TokenKind: tokenEnv, CertFile: "/x.crt", KeyFile: "/x.key"},
 	}}
 	for i := range app.Control {
 		if err := app.Control[i].normalize(); err != nil {
