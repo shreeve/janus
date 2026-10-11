@@ -82,6 +82,34 @@ func parseSystemdShow(out []byte) (state string, pid int) {
 	return state, pid
 }
 
+// restartPending reports whether systemd will start the unit again: it
+// waits out RestartSec as ActiveState activating, SubState auto-restart.
+// A failed or inactive unit is not restarting.
+func (s *systemdItem) restartPending() (bool, bool) {
+	out, err := s.systemctl("show", "-p", "ActiveState", "-p", "SubState", s.service())
+	if err != nil {
+		return false, false
+	}
+	return parseSystemdRestartPending(out), true
+}
+
+func parseSystemdRestartPending(out []byte) bool {
+	var active, sub string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "ActiveState":
+			active = strings.TrimSpace(v)
+		case "SubState":
+			sub = strings.TrimSpace(v)
+		}
+	}
+	return active == "activating" && sub == "auto-restart"
+}
+
 // lastExit is the status the unit's main process last exited with, from
 // `systemctl show` (ExecMainStatus, with Result naming how it ended); not
 // known before the unit's first exit.

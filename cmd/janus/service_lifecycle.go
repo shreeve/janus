@@ -58,6 +58,16 @@ type exitReporter interface {
 	lastExit() (code int, known bool)
 }
 
+// restartReporter is a manager that can say whether it will start the
+// job again (systemd: a pending auto-restart). Where a manager reports
+// it, a failed last exit is a crash loop only while a restart is pending;
+// a unit that gave up, or was stopped, is stopped. A manager that does not
+// report it (launchd, whose KeepAlive restarts every failed exit) loops
+// on any failed exit.
+type restartReporter interface {
+	restartPending() (pending, known bool)
+}
+
 // serviceLabel is what the supervisor calls the edge: janus.edge under
 // launchd, janus (janus.service) under systemd. JANUS_SERVICE_LABEL
 // overrides it so a test host can run an edge beside the real one; pair it

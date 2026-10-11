@@ -234,4 +234,28 @@ func TestStatusCrashLoop(t *testing.T) {
 	if st := gatherStatus(p); st.CrashLoop || st.LastError != line {
 		t.Errorf("unknown exit: %+v", st)
 	}
+	// A manager that reports its restarts (systemd): a failed exit is a
+	// crash loop only while a restart is pending; a unit that gave up or
+	// was stopped is stopped, its last error still shown.
+	for _, pending := range []bool{true, false} {
+		ri := restartItem{exitItem: exitItem{fakeItem: &fakeItem{reg: true, isLoaded: true}, code: 1, known: true}, pending: pending}
+		itemFor = func(servicePaths) serviceItem { return ri }
+		st := gatherStatus(p)
+		if st.CrashLoop != pending || st.LastError != line {
+			t.Errorf("restart pending %v: crash loop %v, error %q", pending, st.CrashLoop, st.LastError)
+		}
+		var out bytes.Buffer
+		printStatus(&out, p, st)
+		if !pending && !strings.Contains(out.String(), "edge     stopped") {
+			t.Errorf("a failed, stopped unit is not shown stopped:\n%s", out.String())
+		}
+	}
 }
+
+// restartItem is a fake item whose manager reports a pending restart.
+type restartItem struct {
+	exitItem
+	pending bool
+}
+
+func (r restartItem) restartPending() (bool, bool) { return r.pending, true }
