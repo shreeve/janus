@@ -1,4 +1,4 @@
-# Janus — capability order: (1) ping, (2) control, (3) hub, (4) mdns, (5) auth, (6) files, (7) sendfile, (8) browse, (9) access log, (10) webtransport
+# Janus — capability order: (1) ping, (2) control, (3) hub, (4) mdns, (5) auth, (6) files, (7) sendfile, (8) browse, (9) access log, (10) webtransport, (11) vista
 #
 # *.janus.localhost resolves to the loopback with no DNS; Caddy's internal CA
 # issues every site certificate (skip_install_trust: run `./bin/janus trust`
@@ -348,5 +348,19 @@ wtgate.janus.localhost {
 	import janus_access
 	janus {
 		webtransport /relay udp/127.0.0.1:7690
+	}
+}
+
+# 11) vista: VistA's RPC Broker behind POST /rpc; the suite's fake em stands
+# in for em. The route lies under the global gate /, so it states its
+# stance: VistA's sign-on authenticates its sessions.
+vista.janus.localhost {
+	import janus_access
+	janus {
+		vista /rpc unix/{$JANUS_TEST_VISTA_SOCK:/tmp/janus-vista.sock} {
+			max_unsigned 4
+			signon_timeout 10s
+			auth exempt
+		}
 	}
 }

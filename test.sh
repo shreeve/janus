@@ -4,7 +4,7 @@
 # For operators/users: prove cold capabilities behave end-to-end.
 # Developers still use idiomatic `go test ./...` while building.
 #
-# Groups run in capability order: ping (1), control (2), …, webtransport (10) last.
+# Groups run in capability order: ping (1), control (2), …, vista (11) last.
 #
 # HTTPS uses Caddy's internal CA for *.janus.localhost names (which resolve
 # to the loopback without DNS); every curl trusts exactly that root.
@@ -24,6 +24,7 @@ export XDG_CONFIG_HOME="$TEST_RUN_DIR/config"
 export XDG_STATE_HOME="$TEST_RUN_DIR/state"
 export JANUS_TEST_CONTROL="$TEST_RUN_DIR/run/janus.sock"
 export JANUS_TEST_ACCESS_LOG="$TEST_RUN_DIR/access.log"
+export JANUS_TEST_VISTA_SOCK="$TEST_RUN_DIR/run/vista.sock"
 # Caddy storage is pinned under the run directory, so the internal CA root
 # that signs every site certificate lands here (see start_caddy).
 export XDG_DATA_HOME="$TEST_RUN_DIR/caddy-data"
@@ -351,6 +352,7 @@ source "$ROOT/tests/acceptance/sendfile.sh"
 source "$ROOT/tests/acceptance/browse.sh"
 source "$ROOT/tests/acceptance/access.sh"
 source "$ROOT/tests/acceptance/webtransport.sh"
+source "$ROOT/tests/acceptance/vista.sh"
 
 # --- main -----------------------------------------------------------------
 
@@ -574,6 +576,16 @@ test "descriptor JSON at the route path, no-store, GET and HEAD only" case_webtr
 test "1152- and 1200-byte datagrams relay byte-exact both ways" case_webtransport_echo
 test "missing or foreign Origin and unknown path are refused" case_webtransport_refusals
 test "gated site: descriptor needs a session, ticket admits once" case_webtransport_ticket
+
+group "vista"
+test "route in place; fake em on its Unix socket" case_vista_setup
+test "TCPConnect: accept, a __Host-ov cookie only; Bearer, cookie + X-OV, origin rule" case_vista_session_round_trip
+test "sign-on rotates the token; the old one is 401 rotated" case_vista_signon_rotates
+test "an M error arrives whole and the session goes on" case_vista_m_error_whole
+test "refusals: not a message, no reply wanted, no token, method, type, path spellings" case_vista_refusals
+test "#BYE# ends the session; em closing an idle stream is seen at once" case_vista_bye_and_idle_close
+test "the unsigned cap refuses, and the sign-on deadline frees it" case_vista_unsigned_cap_and_deadline
+test "no session token in the access log" case_vista_no_token_in_access_log
 
 report
 exit $?
