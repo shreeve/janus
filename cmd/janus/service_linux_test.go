@@ -77,6 +77,24 @@ func TestParseSystemdShow(t *testing.T) {
 	}
 }
 
+// status tells a crash loop from a clean stop by the unit's last exit.
+func TestParseSystemdLastExit(t *testing.T) {
+	for out, want := range map[string]struct {
+		code  int
+		known bool
+	}{
+		"Result=exit-code\nExecMainStatus=1\nExecMainExitTimestampMonotonic=123\n": {1, true},
+		"Result=success\nExecMainStatus=0\nExecMainExitTimestampMonotonic=123\n":   {0, true},
+		"Result=signal\nExecMainStatus=0\nExecMainExitTimestampMonotonic=123\n":    {-1, true},
+		"Result=success\nExecMainStatus=0\nExecMainExitTimestampMonotonic=0\n":     {0, false},
+	} {
+		code, known := parseSystemdLastExit([]byte(out))
+		if code != want.code || known != want.known {
+			t.Errorf("%q: %d %v, want %d %v", out, code, known, want.code, want.known)
+		}
+	}
+}
+
 // The unit reports the executable its ExecStart names, however the unit
 // writer had to quote it, and restart compares that with the installed one.
 func TestParseSystemdExe(t *testing.T) {

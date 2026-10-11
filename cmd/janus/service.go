@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"os"
 	"strings"
+	"time"
 )
 
 func serviceCommands(caddyRun, caddyStart, caddyStop, caddyReload, caddyValidate, caddyAdapt, caddyTrust, caddyUntrust *cobra.Command) []*cobra.Command {
@@ -25,6 +26,21 @@ With no Caddyfile in the current directory, the service Caddyfile is the
 default when it exists, and the service env file is loaded beside it.
 `
 	wrap(caddyRun, func(orig runFunc, cmd *cobra.Command, args []string) error {
+		// Started by the item: its supervisor log is this process's
+		// stderr. Keep that file bounded, and write each error with the
+		// time it happened (supervisor.go).
+		toStdout, supervised := supervisedOutput(p)
+		if supervised {
+			if _, err := rotateSupervisorLog(p.sup, supervisorLogMax, toStdout, true, reopenSupervisorLog); err != nil {
+				fmt.Fprint(os.Stderr, stampLines(time.Now(), "warning: rolling "+p.sup+": "+err.Error()))
+			}
+		}
+		refuse := func(err error) error {
+			if supervised {
+				return supervisedError(cmd, p, err, true, time.Now())
+			}
+			return err
+		}
 		if !cmd.Flags().Changed("config") {
 			if _, err := os.Stat("Caddyfile"); err != nil && fileExists(p.config) {
 				setConfig(cmd, p.config)
@@ -32,7 +48,7 @@ default when it exists, and the service env file is loaded beside it.
 		}
 		st, err := prepareConfigEnvironment(cmd, p)
 		if err != nil {
-			return err
+			return refuse(err)
 		}
 		if usesServiceConfig(cmd, p) {
 			// The service edge: the mode must be enforceable here, the
@@ -41,17 +57,24 @@ default when it exists, and the service env file is loaded beside it.
 			// ports, and what it binds is watched against the mode for
 			// as long as it runs.
 			if err := serviceEdgeReady(st); err != nil {
-				return err
+				return refuse(err)
 			}
 			if err := webtransportAnchorReady(hostFwOps(), p, st, adaptServiceConfig); err != nil {
-				return err
+				return refuse(err)
 			}
 			janus.SetExposure(string(st.Scope), st.Interface, st.lan())
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			go exposureWatch(ctx, p)
 		}
-		return orig(cmd, args)
+		if !supervised {
+			return orig(cmd, args)
+		}
+		clearRefusal(p)
+		if err := orig(cmd, args); err != nil {
+			return supervisedError(cmd, p, err, false, time.Now())
+		}
+		return nil
 	})
 	// adapt reads the Caddyfile too: the bind must be in its environment,
 	// or {$JANUS_BIND} adapts to Caddy's own default, the wildcard.
@@ -233,10 +256,16 @@ JANUS_BIND, whether the host firewall rule the mode needs is in force
 address with how its reach is enforced — by the host (loopback, a private
 address, a verified firewall) or only by the network.
 
+When the item is loaded and no edge runs, the manager is starting it
+again and again: status says so (a crash loop, when the last one exited
+with a failure) and shows the supervisor log's last error line with its
+timestamp, the reason at a glance.
+
 Exits 3 when the edge is not running. --json prints the same as one
 object, plus the service's paths for tools that write site files or
 register with the edge: running, pid, uptime, supervisor, autostart,
-loaded, binary, version, janus, caddy, binary_newer, config, sites, env,
+loaded, crash_loop, last_exit, last_error, binary, version, janus, caddy,
+binary_newer, config, sites, env,
 state, socket (the control socket), admin (Caddy's admin socket), log,
 scope, interface, bind, firewall, listeners, and control with apps
 (present only when control answered).

@@ -51,6 +51,13 @@ type serviceItem interface {
 	unregister() (bool, error)
 }
 
+// exitReporter is an item whose manager tells how the job's last process
+// ended: the status it exited with, when it has exited at all. status
+// reads it to tell a crash loop from a clean stop.
+type exitReporter interface {
+	lastExit() (code int, known bool)
+}
+
 // serviceLabel is what the supervisor calls the edge: janus.edge under
 // launchd, janus (janus.service) under systemd. JANUS_SERVICE_LABEL
 // overrides it so a test host can run an edge beside the real one; pair it

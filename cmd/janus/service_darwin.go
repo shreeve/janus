@@ -65,6 +65,28 @@ func parseLaunchdPID(out []byte) int {
 	return 0
 }
 
+// lastExit is the status the job's last process exited with, from
+// `launchctl print` ("last exit code = 1"); not known before the first
+// exit ("(never exited)") or when launchd does not hold the job.
+func (l *launchdItem) lastExit() (int, bool) {
+	out, err := runOut("launchctl", "print", l.target())
+	if err != nil {
+		return 0, false
+	}
+	return parseLaunchdLastExit(out)
+}
+
+var launchdLastExit = regexp.MustCompile(`(?m)^\s*last exit code = (-?\d+)`)
+
+func parseLaunchdLastExit(out []byte) (int, bool) {
+	m := launchdLastExit.FindSubmatch(out)
+	if m == nil {
+		return 0, false
+	}
+	code, err := strconv.Atoi(string(m[1]))
+	return code, err == nil
+}
+
 func (l *launchdItem) register(p servicePaths, exe string) (bool, error) {
 	changed, err := writeItemFile(l.plist, []byte(launchdPlist(l.label, p, exe)))
 	if err != nil {

@@ -75,20 +75,28 @@ type edgeStatus struct {
 	Supervisor   string `json:"supervisor,omitempty"` // item name, or "pidfile"
 	Autostart    bool   `json:"autostart"`            // the item file exists
 	Loaded       bool   `json:"loaded"`               // the manager holds the job
-	Binary       string `json:"binary"`
-	Version      string `json:"version"`
-	Janus        string `json:"janus"`
-	Caddy        string `json:"caddy"`
-	BinaryNewer  bool   `json:"binary_newer"`
-	Config       string `json:"config"`
-	Sites        string `json:"sites"`
-	Env          string `json:"env"`
-	State        string `json:"state"`
-	Socket       string `json:"socket"` // control internal socket
-	Admin        string `json:"admin"`  // Caddy admin socket
-	Log          string `json:"log"`
-	Control      string `json:"control,omitempty"`
-	Apps         *int   `json:"apps,omitempty"` // only when control answered
+	// CrashLoop: the manager holds the job, no edge runs, and the last
+	// one exited with a failure, so the manager keeps starting it again.
+	// LastError is the supervisor log's last error line, with its
+	// timestamp, whenever the job is held, no edge runs, and the last
+	// exit was not a clean one.
+	CrashLoop   bool   `json:"crash_loop,omitempty"`
+	LastExit    *int   `json:"last_exit,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
+	Binary      string `json:"binary"`
+	Version     string `json:"version"`
+	Janus       string `json:"janus"`
+	Caddy       string `json:"caddy"`
+	BinaryNewer bool   `json:"binary_newer"`
+	Config      string `json:"config"`
+	Sites       string `json:"sites"`
+	Env         string `json:"env"`
+	State       string `json:"state"`
+	Socket      string `json:"socket"` // control internal socket
+	Admin       string `json:"admin"`  // Caddy admin socket
+	Log         string `json:"log"`
+	Control     string `json:"control,omitempty"`
+	Apps        *int   `json:"apps,omitempty"` // only when control answered
 	// The local CA that signs .local and .localhost names: its root
 	// certificate on disk, whether this machine's trust store accepts it,
 	// and the front door a phone trusts it from (when mdns answered).
@@ -155,6 +163,19 @@ func gatherStatus(p servicePaths) edgeStatus {
 	}
 	st.Running = st.PID > 0 || st.Control != ""
 	st.Unresponsive = st.PID > 0 && st.Control == ""
+	// Held but not running: a clean stop (the last exit was 0) needs no
+	// explanation; anything else shows why, from the supervisor log.
+	if st.Loaded && !st.Running {
+		if item, ok := itemFor(p).(exitReporter); ok {
+			if code, known := item.lastExit(); known {
+				st.LastExit = &code
+				st.CrashLoop = code != 0
+			}
+		}
+		if st.LastExit == nil || *st.LastExit != 0 {
+			st.LastError = lastSupervisorError(p.sup)
+		}
+	}
 	gatherCA(&st, p)
 	if st.PID > 0 {
 		st.Uptime = elapsed(st.PID)
@@ -408,8 +429,13 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 		fmt.Fprintf(out, "edge     running (pid %d)\n", st.PID)
 	case st.Running:
 		fmt.Fprintln(out, "edge     running (pid unknown: answered on control)")
+	case st.CrashLoop:
+		fmt.Fprintf(out, "edge     CRASH LOOP: %s keeps starting it and it exits (status %d); 'janus logs --supervisor' has the history\n", st.Supervisor, *st.LastExit)
 	default:
 		fmt.Fprintln(out, "edge     stopped")
+	}
+	if st.LastError != "" {
+		fmt.Fprintf(out, "error    %s\n", st.LastError)
 	}
 	switch {
 	case st.Supervisor == "pidfile" && st.Autostart:

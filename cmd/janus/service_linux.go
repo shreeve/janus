@@ -81,6 +81,44 @@ func parseSystemdShow(out []byte) (state string, pid int) {
 	return state, pid
 }
 
+// lastExit is the status the unit's main process last exited with, from
+// `systemctl show` (ExecMainStatus, with Result naming how it ended); not
+// known before the unit's first exit.
+func (s *systemdItem) lastExit() (int, bool) {
+	out, err := s.systemctl("show", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainExitTimestampMonotonic", s.service())
+	if err != nil {
+		return 0, false
+	}
+	return parseSystemdLastExit(out)
+}
+
+func parseSystemdLastExit(out []byte) (int, bool) {
+	var result string
+	var status, exited int
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch k {
+		case "Result":
+			result = v
+		case "ExecMainStatus":
+			status, _ = strconv.Atoi(v)
+		case "ExecMainExitTimestampMonotonic":
+			exited, _ = strconv.Atoi(v)
+		}
+	}
+	if exited == 0 {
+		return 0, false // never exited
+	}
+	if status == 0 && result != "" && result != "success" {
+		return -1, true // ended by a signal, a timeout, or a watchdog
+	}
+	return status, true
+}
+
 func (s *systemdItem) register(p servicePaths, exe string) (bool, error) {
 	changed, err := writeItemFile(s.unit, []byte(systemdUnitFile(p, exe)))
 	if err != nil {

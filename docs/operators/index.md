@@ -51,6 +51,33 @@ HTTPS handoff; peer CA onboarding uses the local HTTP name. A loopback-only
 front door does not produce a peer trust link. CA status reads the service's
 storage environment and prefers the running admin API's certificate.
 
+## The supervisor log
+
+The service item hands the edge one file as stdout and stderr:
+`~/.local/state/janus/log/supervisor.log` for a user,
+`/var/log/janus/supervisor.log` for root. launchd (`StandardOutPath`,
+`StandardErrorPath`) and systemd (`StandardOutput=append:`) open it in
+append mode at every start and never rotate it. The edge keeps it bounded:
+a start under the item finds the file past 1 MiB, renames it to
+`supervisor.log.1` (replacing the previous one), and writes to a fresh
+file, which the manager's next start opens too. `janus logs --supervisor
+-f` follows across the roll.
+
+A start the edge refuses is retried by the manager every ten seconds for
+as long as the cause lasts. Each error line the edge writes there begins
+with an RFC 3339 timestamp. A refusal the edge makes before Caddy starts
+(the mode, the firewall, a foreign listener on its ports, an unusable env
+file) that repeats word for word is written at most once every ten
+minutes; the next write after that begins with a line counting the
+repeats in between. `refusal.json` in the state directory carries that
+count; the first start that passes its checks removes it. Caddy's own
+errors are written every time.
+
+`janus status` reports a job the manager holds with no edge running: a
+`CRASH LOOP` when the last process exited with a failure, and in every
+such case but a clean stop, the supervisor log's last error line with its
+timestamp (`crash_loop`, `last_exit`, `last_error` in `--json`).
+
 ## Reload survival
 
 | State | Successful compatible reload | Restart |
