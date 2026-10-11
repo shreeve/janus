@@ -53,6 +53,33 @@ Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` +
 - TLS listeners (public, or an `https://` local) require `cert:…`/`key:…`
   and serve that pair.
 
+## Browser guard (TCP listeners)
+
+No legitimate control client is a browser, and a browser sends
+cross-site requests to a loopback port whenever any page asks — including
+a no-cors `POST` with a `text/plain` body, which needs no preflight. The
+`local` and `public` listeners therefore refuse browser traffic before the
+token check and before the API:
+
+| Request | Listener | Response |
+| --- | --- | --- |
+| Carries an `Origin` header (any value, `null` included) | `local`, `public` | **403** |
+| `Host` is not a loopback IP literal or `localhost`, with an optional numeric port | `local` | **403** |
+
+Browsers attach `Origin` to every cross-origin request and to every
+`POST`, `PUT`, `PATCH`, and `DELETE`; the tenant, the `janus` command,
+and Caddy's TLS ask never send it. The `Host` rule defeats DNS
+rebinding: a rebinding page reaches the listener under its own name, so
+its `Host` never passes. `public` accepts any `Host` (it answers for real
+names) and relies on its required token. `internal` (unix socket)
+listeners are unaffected — a browser cannot reach them.
+
+## Connection timeouts
+
+Every control listener bounds request headers (10 s) and closes
+keep-alive connections idle for 120 s between requests. There is no
+write timeout: the NDJSON access stream is long-lived.
+
 ## Syntax
 
 ```caddyfile
@@ -151,7 +178,7 @@ Port **7601** for public avoids clashing with local **7600**.
 | `POST` | `{base}/1.0/apps/{id}/heartbeat` | stamp the heartbeat clock → `204` |
 | `GET` | `{base}/1.0/tls/ask?domain=…` | on-demand TLS allowance: 200 allow / 404 deny |
 
-`{base}` is the path from the listen URL (empty for defaults and for `internal`). Unknown paths under `{base}/1.0` are `404`; a known path with the wrong method is `405`.
+`{base}` is the path from the listen URL (empty for defaults and for `internal`). Unknown paths under `{base}/1.0` are `404`; a known path with the wrong method is `405`. On `local` and `public`, the browser guard's `403` comes before either.
 
 ## Examples
 

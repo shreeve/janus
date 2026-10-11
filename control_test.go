@@ -1,8 +1,10 @@
 package janus
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -601,5 +603,141 @@ func TestControlAPIHandlers(t *testing.T) {
 		if err := json.Unmarshal(rr.Body.Bytes(), &health); err != nil || health["status"] != "ok" {
 			t.Fatalf("health: %s", rr.Body.String())
 		}
+	}
+}
+
+func TestLoopbackControlHost(t *testing.T) {
+	for host, want := range map[string]bool{
+		"127.0.0.1":          true,
+		"127.0.0.1:7600":     true,
+		"127.9.9.9:7600":     true,
+		"[::1]:7600":         true,
+		"[::1]":              true,
+		"localhost":          true,
+		"localhost:7600":     true,
+		"LOCALHOST:7600":     true,
+		"":                   false,
+		"::1":                false,
+		"localhost.":         false,
+		"localhost:":         false,
+		"localhost:76x0":     false,
+		"evil.example":       false,
+		"evil.example:7600":  false,
+		"127.0.0.1.nip.io":   false,
+		"app.localhost:7600": false,
+		"10.0.0.5:7600":      false,
+		"[fe80::1%lo0]:7600": false,
+		"0.0.0.0:7600":       false,
+	} {
+		if got := loopbackControlHost(host); got != want {
+			t.Errorf("loopbackControlHost(%q) = %v, want %v", host, got, want)
+		}
+	}
+}
+
+// TestControlBrowserGuard pins the CSRF and DNS-rebinding guard on TCP
+// control listeners: any Origin is refused, and on local a Host that is not
+// loopback is refused; unix-socket listeners are unaffected.
+func TestControlBrowserGuard(t *testing.T) {
+	t.Setenv("JANUS_GUARD_TOKEN", "sekrit")
+	app := &App{Control: []Control{
+		{Mode: "internal", Listen: "/tmp/janus-guard.sock"},
+		{Mode: "local", Listen: DefaultControlLocal},
+		{Mode: "public", Listen: DefaultControlPublic, Token: "JANUS_GUARD_TOKEN", TokenKind: tokenEnv},
+	}}
+	for i := range app.Control {
+		if err := app.Control[i].normalize(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	internal := app.controlHandler(&app.Control[0])
+	local := app.controlHandler(&app.Control[1])
+	public := app.controlHandler(&app.Control[2])
+
+	do := func(h http.Handler, method, host string, header http.Header) int {
+		t.Helper()
+		r := httptest.NewRequest(method, "http://"+host+"/1.0/health", nil)
+		r.Host = host
+		for k, vs := range header {
+			r.Header[k] = vs
+		}
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, r)
+		return rr.Code
+	}
+	origin := http.Header{"Origin": {"https://evil.example"}}
+	nullOrigin := http.Header{"Origin": {"null"}}
+	bearer := http.Header{"Authorization": {"Bearer sekrit"}}
+	bearerOrigin := http.Header{"Authorization": {"Bearer sekrit"}, "Origin": {"https://evil.example"}}
+
+	cases := []struct {
+		name   string
+		h      http.Handler
+		method string
+		host   string
+		header http.Header
+		want   int
+	}{
+		{"local plain", local, "GET", "127.0.0.1:7600", nil, http.StatusOK},
+		{"local localhost", local, "GET", "localhost:7600", nil, http.StatusOK},
+		{"local origin", local, "GET", "127.0.0.1:7600", origin, http.StatusForbidden},
+		{"local null origin", local, "GET", "127.0.0.1:7600", nullOrigin, http.StatusForbidden},
+		{"local cross-site POST", local, "POST", "127.0.0.1:7600", origin, http.StatusForbidden},
+		{"local rebinding host", local, "GET", "evil.example:7600", nil, http.StatusForbidden},
+		{"public origin with token", public, "GET", "edge.example:7601", bearerOrigin, http.StatusForbidden},
+		{"public any host with token", public, "GET", "edge.example:7601", bearer, http.StatusOK},
+		{"internal origin", internal, "GET", "janus", origin, http.StatusOK},
+		{"internal any host", internal, "GET", "evil.example", nil, http.StatusOK},
+	}
+	for _, tc := range cases {
+		if got := do(tc.h, tc.method, tc.host, tc.header); got != tc.want {
+			t.Errorf("%s: status %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestControlServerClosesIdleKeepAlive pins the control servers' idle bound:
+// a keep-alive connection that sends nothing after its response is closed by
+// the server, while no write deadline caps long-lived streams.
+func TestControlServerClosesIdleKeepAlive(t *testing.T) {
+	saved := controlIdleTimeout
+	controlIdleTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { controlIdleTimeout = saved })
+
+	srv := newControlHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	if srv.WriteTimeout != 0 || srv.ReadHeaderTimeout != controlReadHeaderTimeout || srv.IdleTimeout != 100*time.Millisecond {
+		t.Fatalf("control server timeouts: write=%v readHeader=%v idle=%v",
+			srv.WriteTimeout, srv.ReadHeaderTimeout, srv.IdleTimeout)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET /1.0/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.Close {
+		t.Fatal("server closed after the response; want keep-alive")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := br.ReadByte(); err != io.EOF {
+		t.Fatalf("idle keep-alive connection: want server close (EOF), got %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,18 +42,96 @@ func (ln *idempotentListener) Close() error {
 	return ln.err
 }
 
+// Control HTTP server timeouts. There is deliberately no WriteTimeout: the
+// NDJSON access stream (GET /1.0/apps/{id}/access) is long-lived.
+const controlReadHeaderTimeout = 10 * time.Second
+
+// controlIdleTimeout closes keep-alive connections that sit idle between
+// requests, so an abandoned client cannot hold a control connection open
+// for the life of the generation. A variable only so tests can shorten it.
+var controlIdleTimeout = 120 * time.Second
+
+func newControlHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: controlReadHeaderTimeout,
+		IdleTimeout:       controlIdleTimeout,
+	}
+}
+
+// controlHandler is one listener's full request path: the browser guard on
+// TCP listeners, then the Bearer token when one is configured, then the mux.
+func (a *App) controlHandler(c *Control) http.Handler {
+	handler := http.Handler(a.controlMuxAt(c.basePath))
+	if c.secret != "" {
+		handler = bearerAuth(c.secret, handler)
+	}
+	if c.network != "unix" {
+		handler = controlBrowserGuard(c.Mode == "local", handler)
+	}
+	return handler
+}
+
+// controlBrowserGuard keeps web pages out of a TCP control listener. No
+// legitimate control client is a browser, while a browser will send a
+// cross-site request to a loopback port on any page's say-so — including a
+// "simple" no-cors POST with a text/plain body that needs no preflight.
+//
+//   - Any request carrying Origin is refused 403. Browsers attach Origin to
+//     every cross-origin request and to every POST, PUT, PATCH, and DELETE;
+//     the tenant, the janus command, and Caddy's ask never send it.
+//   - On local, a Host that is not a loopback IP literal or localhost (with
+//     an optional port) is refused 403. A DNS-rebinding page reaches the
+//     listener under its own name, so its Host never passes.
+//
+// Unix-socket listeners never pass through here: a browser cannot reach them.
+func controlBrowserGuard(loopbackHostOnly bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.Header["Origin"]; ok {
+			writeAPIError(w, &apiError{
+				Status: http.StatusForbidden,
+				Msg:    "control API refuses browser requests (Origin header present)",
+			})
+			return
+		}
+		if loopbackHostOnly && !loopbackControlHost(r.Host) {
+			writeAPIError(w, &apiError{
+				Status: http.StatusForbidden,
+				Msg:    fmt.Sprintf("control API on local accepts only a loopback IP or localhost Host, got %q", r.Host),
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loopbackControlHost reports whether a Host header names this machine's
+// loopback directly: localhost or a loopback IP literal, with an optional
+// numeric port. Anything else — another name, a trailing dot, an empty
+// Host — is refused.
+func loopbackControlHost(hostport string) bool {
+	host := hostport
+	if h, port, err := net.SplitHostPort(hostport); err == nil {
+		if port == "" || strings.Trim(port, "0123456789") != "" {
+			return false
+		}
+		host = h
+	} else if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
+		host = hostport[1 : len(hostport)-1] // "[::1]"
+	} else if strings.Contains(hostport, ":") {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Zone() == "" && ip.IsLoopback()
+}
+
 func (a *App) startControlListeners() error {
 	for i := range a.Control {
 		c := &a.Control[i]
-		mux := a.controlMuxAt(c.basePath)
-		handler := http.Handler(mux)
-		if c.secret != "" {
-			handler = bearerAuth(c.secret, mux)
-		}
-		srv := &http.Server{
-			Handler:           handler,
-			ReadHeaderTimeout: 10 * time.Second,
-		}
+		srv := newControlHTTPServer(a.controlHandler(c))
 		cs := &controlServer{mode: c.Mode, server: srv, conns: make(map[net.Conn]struct{})}
 		srv.ConnState = func(conn net.Conn, state http.ConnState) {
 			cs.mu.Lock()
