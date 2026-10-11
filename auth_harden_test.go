@@ -964,3 +964,81 @@ func FuzzAuthGateCanonical(f *testing.F) {
 		}
 	})
 }
+
+// Trailing dots and spaces fold out of a segment, as Windows and IIS fold
+// them, so /admin./secret and /admin%20/secret stay under gate /admin/; a
+// gate prefix whose segment ends in a dot is refused, since it could never
+// match.
+func TestAuthGateFoldsTrailingDotsAndSpaces(t *testing.T) {
+	users := map[string]string{"alice": testCred(t, "alice-pass"), "bob": testCred(t, "bob-pass")}
+	ah := newAuthHarnessGates(t, users, 0, map[string][]string{"/admin/": {"alice"}, "/": {"alice", "bob"}})
+	bob := ah.login(t, "app.test", "bob", "bob-pass")
+	for _, p := range []string{"/admin./secret", "/admin%20/secret", "/ADMIN.%20/x", "/admin.../x", "/admin%2e/x"} {
+		r := authReq(http.MethodGet, "app.test", p, nil)
+		r.AddCookie(&http.Cookie{Name: authCookieName, Value: bob})
+		if rr, passed := ah.wall(t, r); passed != nil {
+			t.Errorf("bob %s passed gate /admin/ (status %d)", p, rr.Code)
+		}
+	}
+	r := authReq(http.MethodGet, "app.test", "/public./page", nil)
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: bob})
+	if _, passed := ah.wall(t, r); passed == nil {
+		t.Error("bob was refused a path outside /admin/")
+	}
+	if _, err := normalizeGatePrefix("/admin./"); err == nil {
+		t.Error("a gate prefix segment ending in a dot was accepted")
+	}
+	if got := authCanonicalPath("/a/../b/./c./"); got != "/a/../b/./c/" {
+		t.Errorf("dot segments must survive the fold: %q", got)
+	}
+}
+
+// The account ladder is keyed on the credential, not the whole users
+// table: two sites whose tables differ but hold the same alice share one
+// budget for her.
+func TestAuthAccountLadderFollowsTheCredential(t *testing.T) {
+	alice := testCred(t, "alice-pass")
+	a := newAuthHarnessGates(t, map[string]string{"alice": alice}, 0, map[string][]string{"/": {"alice"}})
+	b, err := compileAuthSite(usersToSlice(map[string]string{"alice": alice, "bob": testCred(t, "bob-pass")}),
+		[]AuthGate{{Prefix: "/", Allow: []string{"alice", "bob"}}}, 0, a.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.realm == a.h.authCfg.realm {
+		t.Fatal("different tables share a realm")
+	}
+	for i := 0; i <= authAccountFreeFails; i++ {
+		a.postLoginFrom(t, "a.test", "198.51.100."+strconv.Itoa(i+1)+":1", "", "alice", "wrong")
+	}
+	if blocked, _ := a.st.accountCheck(authAccountScope(b.users["alice"]), "alice"); !blocked {
+		t.Fatal("guesses against alice on one site left her other site's ladder open")
+	}
+	if blocked, _ := a.st.accountCheck(authAccountScope(b.users["bob"]), "bob"); blocked {
+		t.Fatal("another account was held")
+	}
+}
+
+// A signed-in user refused at nested gates is sent to the door of the gate
+// that refuses them, not bounced to a door they already pass.
+func TestAuthRefusalDoorIsTheRefusingGate(t *testing.T) {
+	users := map[string]string{"alice": testCred(t, "alice-pass"), "bob": testCred(t, "bob-pass")}
+	ah := newAuthHarnessGates(t, users, 0, map[string][]string{
+		"/admin/":     {"alice"},
+		"/admin/pub/": {"alice", "bob"},
+	})
+	bob := ah.loginDoor(t, "app.test", "/admin/pub/auth", "bob", "bob-pass")
+	r := authReq(http.MethodGet, "app.test", "/admin/pub/../secret", nil, "Accept", "text/html")
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: bob})
+	rr, passed := ah.wall(t, r)
+	if passed != nil || rr.Code != http.StatusFound {
+		t.Fatalf("bob: passed=%v status %d", passed != nil, rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); !strings.HasPrefix(loc, "/admin/auth?") {
+		t.Fatalf("refused at /admin/, sent to %q", loc)
+	}
+	// With no session, the first winner's door.
+	r = authReq(http.MethodGet, "app.test", "/admin/pub/page", nil, "Accept", "text/html")
+	if rr, _ := ah.wall(t, r); !strings.HasPrefix(rr.Header().Get("Location"), "/admin/pub/auth?") {
+		t.Fatalf("anonymous: sent to %q", rr.Header().Get("Location"))
+	}
+}
