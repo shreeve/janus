@@ -157,8 +157,9 @@ func checkFirewall(ops fwOps, st scopeState) firewallVerdict {
 
 func pfctl(ops fwOps, args ...string) ([]byte, error) { return ops.run(pfctlBin, args...) }
 
-// applyPf installs the anchor for a scope. A first install (or a pf.conf
-// that lost its janus lines) reloads the main ruleset; otherwise only the
+// applyPf installs the anchor for a scope. A first install, a pf.conf
+// that lost its janus lines, or a main ruleset that lost its reference to
+// the anchor (pfReferenced) reloads the main ruleset; otherwise only the
 // janus anchor is reloaded, leaving the anchors system services insert at
 // runtime alone. A load that fails puts the previous files and the
 // previous rules back.
@@ -189,10 +190,12 @@ func applyPf(ops fwOps, st scopeState) error {
 	if err := ops.write(pfAnchorPath, []byte(anchor), 0o644); err != nil {
 		return err
 	}
-	if changed {
-		if err := ops.write(pfConfPath, []byte(conf), 0o644); err != nil {
-			restore()
-			return err
+	if changed || !pfReferenced(ops) {
+		if changed {
+			if err := ops.write(pfConfPath, []byte(conf), 0o644); err != nil {
+				restore()
+				return err
+			}
 		}
 		if _, err := pfctl(ops, "-nf", pfConfPath); err != nil {
 			restore()
@@ -295,8 +298,9 @@ func pfInstalled(ops fwOps, st scopeState) string {
 	return ""
 }
 
-// checkPf returns "" when the files are in place, pf is enabled, and the
-// rules pf holds in the janus anchor are exactly the anchor file's, else
+// checkPf returns "" when the files are in place, pf is enabled, its main
+// ruleset evaluates the janus anchor (pfReferenced), and the rules pf
+// holds in the janus anchor are exactly the anchor file's, else
 // what is wrong. pfctl normalizes both sides, so the comparison is exact.
 func checkPf(ops fwOps, st scopeState) string {
 	if detail := pfInstalled(ops, st); detail != "" {
@@ -304,6 +308,9 @@ func checkPf(ops fwOps, st scopeState) string {
 	}
 	if !pfEnabled(ops) {
 		return "pf is disabled"
+	}
+	if !pfReferenced(ops) {
+		return "pf's main ruleset does not evaluate the janus anchor ahead of Apple's"
 	}
 	want, err := pfctl(ops, "-a", pfAnchorName, "-nvf", pfAnchorPath)
 	if err != nil {
@@ -317,6 +324,29 @@ func checkPf(ops fwOps, st scopeState) string {
 		return "the rules loaded in the janus anchor are not the anchor file's"
 	}
 	return ""
+}
+
+// pfReferenced reports whether pf's main ruleset evaluates the janus
+// anchor ahead of Apple's. `pfctl -F all`, or a `pfctl -f` of a file
+// without the reference, drops it and leaves the anchor's rules loaded
+// but never evaluated; anything but a clear listing is no.
+func pfReferenced(ops fwOps) bool {
+	rules, err := pfctl(ops, "-sr")
+	return err == nil && pfMainReferences(string(rules))
+}
+
+// pfMainReferences reports whether a main-ruleset listing reaches
+// `anchor "janus"` before `anchor "com.apple/*"`.
+func pfMainReferences(rules string) bool {
+	for _, line := range ruleLines(rules) {
+		switch {
+		case line == pfConfAnchor || strings.HasPrefix(line, pfConfAnchor+" "):
+			return true
+		case line == pfAppleAnchor || strings.HasPrefix(line, pfAppleAnchor+" "):
+			return false
+		}
+	}
+	return false
 }
 
 // pfEnabled asks pf; anything but a clear yes is no.
