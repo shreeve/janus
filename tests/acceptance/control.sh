@@ -76,3 +76,20 @@ case_control_unknown_paths_404() {
 		http://127.0.0.1:7600/1.0/apps/nope-zzzzzz/heartbeat)"
 	eq "$code" "405"
 }
+
+case_control_refuses_browsers() {
+	# TCP control listeners refuse anything a browser sends (an Origin) and,
+	# on local, any Host that is not the loopback: no cross-site request or
+	# DNS rebinding reaches the registry. The unix socket is unaffected.
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H 'Origin: https://evil.example' http://127.0.0.1:7600/1.0/health)" "403"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H 'Host: rebind.example' http://127.0.0.1:7600/1.0/health)" "403"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'Origin: https://evil.example' -H 'Content-Type: text/plain' \
+		--data '{"name":"csrf","hosts":["csrf.janus.localhost"]}' http://127.0.0.1:7600/1.0/apps)" "403"
+	capi GET /1.0/apps
+	if printf '%s' "$REPLY_BODY" | grep -qF 'csrf.janus.localhost'; then
+		echo "a cross-site POST registered an app: $REPLY_BODY" >&2
+		return 1
+	fi
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H 'Origin: https://evil.example' --unix-socket "$JANUS_TEST_CONTROL" http://janus/1.0/health)" "200"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:7600/1.0/health)" "200"
+}

@@ -14,6 +14,7 @@
 AUTH_WALL="https://authwall.janus.localhost"
 AUTH_CAROL="https://authcarol.janus.localhost"
 AUTH_SOCK="$TEST_RUN_DIR/run/auth-up.sock"
+AUTH_OFF_SOCK="$TEST_RUN_DIR/run/auth-off.sock"
 AUTH_HITS="$TEST_RUN_DIR/auth-hits"
 AUTH_PIDS_FILE="$TEST_RUN_DIR/auth-pids"
 AUTH_APP_FILE="$TEST_RUN_DIR/auth-app-id"
@@ -29,7 +30,7 @@ stop_auth_fixtures() {
 			fi
 		done <"$AUTH_PIDS_FILE"
 	fi
-	rm -f "$AUTH_PIDS_FILE" "$AUTH_SOCK"
+	rm -f "$AUTH_PIDS_FILE" "$AUTH_SOCK" "$AUTH_OFF_SOCK"
 }
 
 # auth_stat KEY — one top-level value from GET /1.0/auth
@@ -845,4 +846,52 @@ EOF_CONFIG
 	auth_req GET "$door/status.json" -H "Cookie: __Host-janus=$session"
 	eq "$REPLY_CODE" "401"
 	stop_owned_pid "$dashboard_pid" "$CADDY_BIN"
+}
+
+case_auth_noncanonical_paths_gated() {
+	# bob passes gate / but not /one/. Every spelling of a path under /one/
+	# (doubled slashes, ;parameters, case) stays behind /one/: a gate can
+	# only ever cover more spellings, never fewer.
+	auth_login "$AUTH_WALL" bob sesame-bob
+	local p before
+	before="$(grep -c '^GET /[oO/]' "$AUTH_HITS" || true)"
+	for p in '/one//x' '//one/x' '/one;v=1/x' '/ONE/x' '/One;v=1//x'; do
+		auth_req GET "$AUTH_WALL$p" -H "Cookie: __Host-janus=$AUTH_SESSION" -H 'Accept: text/html'
+		eq "$REPLY_CODE" "302"
+		case "$(auth_hdr location)" in
+		/one/auth\?to=*) ;;
+		*)
+			echo "$p: redirected to $(auth_hdr location), want the /one/ login door" >&2
+			return 1
+			;;
+		esac
+	done
+	eq "$(grep -c '^GET /[oO/]' "$AUTH_HITS" || true)" "$before"
+}
+
+case_auth_off_site_strips_identity() {
+	# A site with auth off strips every client identity spelling too, so an
+	# app that trusts Remote-User behind a gate elsewhere is never
+	# impersonated through a host that has no gate.
+	capi POST /1.0/apps '{"name":"authoff","hosts":["authoff.janus.localhost"]}'
+	eq "$REPLY_CODE" "201"
+	local id rec
+	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+	rm -f "$AUTH_OFF_SOCK"
+	"$TESTKIT" authup --sock "$AUTH_OFF_SOCK" --hits "$AUTH_HITS" "$id" \
+		>>"$TEST_RUN_DIR/fixtures.log" 2>&1 &
+	printf '%s\n' "$!" >>"$AUTH_PIDS_FILE"
+	wait_file "$AUTH_OFF_SOCK"
+	capi PUT "/1.0/apps/$id/upstreams" "{\"upstreams\":[{\"path\":\"$AUTH_OFF_SOCK\"}]}"
+	eq "$REPLY_CODE" "200"
+	auth_req GET "https://authoff.janus.localhost/offspoof" \
+		-H 'Remote-User: root' -H 'Remote_User: root' -H 'remote_user: root' \
+		-H 'Rip-Site: evil' -H 'Rip_Site: evil'
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" 'remote-user:-'
+	rec="$(grep '^GET /offspoof ' "$AUTH_HITS" | tail -1)"
+	json_has "$rec" 'remote-user=- '
+	json_has "$rec" 'ids=-'
+	capi DELETE "/1.0/apps/$id"
+	eq "$REPLY_CODE" "204"
 }

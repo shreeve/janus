@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -200,7 +201,17 @@ func cmdAuthUpstream(args []string) {
 			w.WriteHeader(204)
 			return
 		}
-		appendLine(hits, fmt.Sprintf("%s %s remote-user=%s cookie=%s", r.Method, r.URL.RequestURI(), ru, ck))
+		// ids= records every identity header in any spelling (Remote_User,
+		// rip_site, …): whatever reaches an app, however it is spelled.
+		var ids []string
+		for name, vals := range r.Header {
+			canon := strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+			if canon == "remote-user" || canon == "rip-site" {
+				ids = append(ids, name+":"+strings.Join(vals, ","))
+			}
+		}
+		sort.Strings(ids)
+		appendLine(hits, fmt.Sprintf("%s %s remote-user=%s cookie=%s ids=%s", r.Method, r.URL.RequestURI(), ru, ck, dash(strings.Join(ids, ";"))))
 		io.Copy(io.Discard, r.Body)
 		sendText(w, 200, "remote-user:"+ru+"\n")
 	}))

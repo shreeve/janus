@@ -192,3 +192,23 @@ case_files_cascade_off() {
 	printf '%s' "$id" >"$FILES_OFF_APP_FILE"
 	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://filesoff.janus.localhost/ordered.txt)" "503"
 }
+
+case_files_dotfiles_refused() {
+	# Dot segments answer as missing files (no shell, nothing disclosed);
+	# /.well-known/ is the one served exception.
+	local r="$TEST_RUN_DIR/files/root1"
+	mkdir -p "$r/.git" "$r/.well-known"
+	printf 'SECRET=1' >"$r/.env"
+	printf '[core]' >"$r/.git/config"
+	printf 'Contact: mailto:security@example.com' >"$r/.well-known/security.txt"
+	local p headers
+	for p in /.env /.git/config /%2Eenv /.ENV; do
+		eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "https://files.janus.localhost$p")" "404"
+	done
+	# A navigation to a dot path is a 404, never the SPA shell.
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H 'Accept: text/html' https://files.janus.localhost/.secret)" "404"
+	eq "$(curl -sS --max-time 5 https://files.janus.localhost/.well-known/security.txt)" 'Contact: mailto:security@example.com'
+	headers="$(curl -sS -D - -o /dev/null --max-time 5 https://files.janus.localhost/.well-known/security.txt | tr -d '\r')"
+	json_has "$headers" 'x-content-type-options: nosniff'
+	rm -rf "$r/.git" "$r/.well-known" "$r/.env"
+}

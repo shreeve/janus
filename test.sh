@@ -384,6 +384,7 @@ test "unix GET /1.0 → janus meta" case_control_unix_root
 test "unix GET /1.0/health → ok" case_control_unix_health
 test "unknown /1.0 paths → 404, wrong method → 405" case_control_unknown_paths_404
 test "control JSON rejects repeated fields at every depth" case_control_duplicate_json
+test "TCP control refuses browser Origin and non-loopback Host" case_control_refuses_browsers
 test "reload → both listeners serve one live registry" case_reload_no_split_brain
 test "changed TTL reload is rejected and reports the running value" case_reload_ttl_rejected
 test "aborted reload → later reloads still work" case_reload_abort_recovery
@@ -513,6 +514,8 @@ test "to survives login; hostile targets collapse to /" case_auth_to
 test "status page + sign-out: re-minted CSRF, revoked server-side" case_auth_status_signout
 test "CSRF enforced on both POST arms" case_auth_csrf_enforced
 test "spoofed Remote-User dies at the edge" case_auth_spoof_dies
+test "every spelling of a gated path stays gated" case_auth_noncanonical_paths_gated
+test "auth-off site strips every identity spelling" case_auth_off_site_strips_identity
 test "fixation dead: pre-set cookie never honored, never re-minted" case_auth_fixation_dead
 test "wrong password and unknown user → one generic 401" case_auth_wrong_creds
 test "throttle ladder: 5th try during wait → 429; pairs isolated" case_auth_throttle
@@ -543,6 +546,7 @@ test "precompressed representation-specific conditionals" case_files_precompress
 test "precompressed HEAD, encoded range, and no double encode" case_files_precompressed_head_range_and_encode
 test "precompressed SPA shell and directory index" case_files_precompressed_shell_and_index
 test "FIFO canonical files and sidecars never block" case_files_special_files
+test "dotfiles answer 404; /.well-known/ is served with nosniff" case_files_dotfiles_refused
 test "strict site/files JSON fields reject" case_files_strict_hot_fields
 test "cascade: site files off beats global on" case_files_cascade_off
 
