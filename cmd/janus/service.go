@@ -153,8 +153,11 @@ The running service edge's admin socket is the default --address.
 	}
 	caddyTrust.Long += `
 --export writes the CA's root certificate to a file (PEM) instead of
-trusting it here: for another machine's trust store. A phone takes it
-from the edge itself, at http://<mdns name>/trust.
+trusting it here: for another machine's trust store. It prints the
+certificate's SHA-256 fingerprint as openssl does, to compare on that
+machine. A phone takes it from the edge itself, at
+http://<mdns name>/trust, which shows the same fingerprint; 'janus status'
+prints it too.
 `
 	caddyTrust.Flags().String("export", "", "write the root certificate (PEM) to this file instead of trusting it")
 	wrap(caddyTrust, func(orig runFunc, cmd *cobra.Command, args []string) error {

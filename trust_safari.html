@@ -18,6 +18,7 @@
   p { margin: 8px 0; }
   .dim { color: var(--dim); font-size: 13px; }
   .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .fp { color: var(--text); word-break: break-all; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   ol { margin: 14px 0 0; padding: 0; list-style: none; }
@@ -46,6 +47,10 @@
       <li><span class="n done">✓</span>
         <div>Go back to your browser — it notices within seconds and takes you to the status page, lock and all.</div></li>
     </ol>
+    <p class="dim">Before installing, compare the certificate's SHA-256 fingerprint (the profile's
+      <strong>More Details</strong>) with what <span class="mono">janus status</span> prints on the
+      machine running this edge:
+      <span class="mono fp">{{CA_FINGERPRINT}}</span></p>
   </div>
   <footer>iOS discards a downloaded profile after 8 minutes — if you wandered off, download again.</footer>
 </div>

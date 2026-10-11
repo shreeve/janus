@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/shreeve/janus"
 )
 
 func TestStatusUsesServiceStorageEnvironment(t *testing.T) {
@@ -33,6 +36,17 @@ func TestStatusUsesServiceStorageEnvironment(t *testing.T) {
 	st := gatherStatus(p)
 	if st.CA != path || st.CATrusted == nil {
 		t.Fatalf("wrong service CA: %+v", st)
+	}
+	// Its fingerprint, as openssl prints it, beside the ca line.
+	disk, _ := os.ReadFile(path)
+	fp := janus.CertFingerprint(parseRootCA(disk).Raw)
+	if st.CAFingerprint != fp {
+		t.Errorf("ca_fingerprint %q, want %q", st.CAFingerprint, fp)
+	}
+	var out bytes.Buffer
+	printStatus(&out, p, st)
+	if !strings.Contains(out.String(), "\n         sha256 "+fp+"\n") {
+		t.Errorf("status lacks the fingerprint:\n%s", out.String())
 	}
 	if os.Getenv("XDG_DATA_HOME") != caller {
 		t.Fatal("status changed caller environment")
@@ -84,5 +98,8 @@ func TestStatusVerifiesLiveCAInsteadOfStaleDiskCertificate(t *testing.T) {
 	st := gatherStatus(p)
 	if st.CATrusted == nil || !*st.CATrusted || st.CA != "" {
 		t.Fatalf("stale CA selected: %+v", st)
+	}
+	if st.CAFingerprint != janus.CertFingerprint(expected.Raw) {
+		t.Errorf("fingerprint of the stale CA: %s", st.CAFingerprint)
 	}
 }

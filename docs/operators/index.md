@@ -51,6 +51,14 @@ HTTPS handoff; peer CA onboarding uses the local HTTP name. A loopback-only
 front door does not produce a peer trust link. CA status reads the service's
 storage environment and prefers the running admin API's certificate.
 
+`/trust` and the CA it hands out arrive over plain HTTP, so a device cannot
+authenticate them. The trust pages show the root certificate's SHA-256
+fingerprint in the form `openssl x509 -noout -fingerprint -sha256` prints;
+`janus status` prints the same value under its `ca` line (`ca_fingerprint`
+in `--json`), and `janus trust --export <file>` prints it beside the file it
+writes. Compare the two out of band before trusting the CA on a device; iOS
+shows the fingerprint under the downloaded profile's More Details.
+
 ## The supervisor log
 
 The service item hands the edge one file as stdout and stderr:

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/caddyserver/caddy/v2"
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
+	"github.com/shreeve/janus"
 	"github.com/spf13/cobra"
 	"io"
 	"net"
@@ -43,10 +44,16 @@ func exportRootCA(cmd *cobra.Command, address, path string) error {
 	if err := json.NewDecoder(resp.Body).Decode(&ca); err != nil || ca.Root == "" {
 		return errors.New("admin API: /pki/ca/local carried no root certificate")
 	}
+	root := parseRootCA([]byte(ca.Root))
+	if root == nil {
+		return errors.New("admin API: /pki/ca/local carried no parseable root certificate")
+	}
 	if err := os.WriteFile(path, []byte(ca.Root), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
+	// The fingerprint, to compare on the machine that imports the file
+	// (`openssl x509 -noout -fingerprint -sha256 -in <file>`).
+	fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\nsha256 %s\n", path, janus.CertFingerprint(root.Raw))
 	return nil
 }
 
@@ -98,12 +105,15 @@ type edgeStatus struct {
 	Control     string `json:"control,omitempty"`
 	Apps        *int   `json:"apps,omitempty"` // only when control answered
 	// The local CA that signs .local and .localhost names: its root
-	// certificate on disk, whether this machine's trust store accepts it,
-	// and the front door a phone trusts it from (when mdns answered).
-	CA           string `json:"ca,omitempty"`
-	CATrusted    *bool  `json:"ca_trusted,omitempty"`
-	TrustURL     string `json:"trust_url,omitempty"`
-	DashboardURL string `json:"dashboard_url,omitempty"`
+	// certificate on disk, its SHA-256 fingerprint (as openssl prints it,
+	// to compare with what a device is offered over plain HTTP), whether
+	// this machine's trust store accepts it, and the front door a phone
+	// trusts it from (when mdns answered).
+	CA            string `json:"ca,omitempty"`
+	CAFingerprint string `json:"ca_fingerprint,omitempty"`
+	CATrusted     *bool  `json:"ca_trusted,omitempty"`
+	TrustURL      string `json:"trust_url,omitempty"`
+	DashboardURL  string `json:"dashboard_url,omitempty"`
 	// The exposure mode. Bind is what JANUS_BIND carries; Firewall is
 	// verified / missing / unverified / none; Listeners are the front-door
 	// addresses the mode admits, each with how its reach is enforced.
@@ -387,6 +397,7 @@ func gatherCA(st *edgeStatus, p servicePaths) {
 	}
 	trusted := verifyCA(root) == nil
 	st.CATrusted = &trusted
+	st.CAFingerprint = janus.CertFingerprint(root.Raw)
 }
 
 func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool, note string) error {
@@ -471,6 +482,9 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 		fmt.Fprintln(out, "ca       trusted on this machine")
 	case st.CATrusted != nil:
 		fmt.Fprintln(out, "ca       not trusted on this machine: browsers warn on its https names ('janus trust')")
+	}
+	if st.CAFingerprint != "" {
+		fmt.Fprintf(out, "         sha256 %s\n", st.CAFingerprint)
 	}
 	if st.TrustURL != "" {
 		fmt.Fprintf(out, "         phones and other devices trust it at %s\n", st.TrustURL)
