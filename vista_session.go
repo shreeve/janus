@@ -407,8 +407,10 @@ func (s *vistaSession) finish(sc xwbReplyScanner, judge string, judged, leftover
 			s.route.bind(s, token, vistaEndRotated)
 			o.setCookie = vistaSetCookie(token)
 		}
+		// A sign-on reply held its headers for the judgement; any other
+		// hold (TCPConnect's) is the caller's to release.
+		o.release()
 	}
-	o.release()
 	s.mu.Lock()
 	select {
 	case <-s.chunks:
