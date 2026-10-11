@@ -572,11 +572,21 @@ func authThrottleAggKey(gatePrefix, clientKey string) string {
 	return gatePrefix + "\x00" + clientKey + "\x00"
 }
 
-// authThrottleAccountKey keys the per-account ladder: one row per realm
-// and username, independent of client address, host, and login door. The
+// authThrottleAccountKey keys the per-account ladder: one row per account
+// scope (authAccountScope: the credential) and username, independent of
+// client address, host, login door, and the rest of the users table. The
 // \x01 lead byte keeps it disjoint from the client rows.
-func authThrottleAccountKey(realm, user string) string {
-	return "\x01" + realm + "\x00" + user
+func authThrottleAccountKey(acctScope, user string) string {
+	return "\x01" + acctScope + "\x00" + user
+}
+
+// authAccountScope names an account's ladder by its credential: every
+// users table that holds the same name and passhash (a site table copying
+// a user, the global table) shares one budget, since a password guessed
+// against one opens all. A name no table holds has the empty credential.
+func authAccountScope(credential string) string {
+	sum := sha256.Sum256([]byte(credential))
+	return "cred:" + hex.EncodeToString(sum[:12])
 }
 
 func authThrottleAccountRow(key string) bool {
@@ -751,11 +761,11 @@ func (st *authStore) throttleClear(gatePrefix, clientKey, user string) {
 
 // accountCheck reports whether the per-account ladder currently holds
 // logins to user on host, and for how long. Checked before argon2 work.
-func (st *authStore) accountCheck(realm, user string) (blocked bool, retryAfter time.Duration) {
+func (st *authStore) accountCheck(acctScope, user string) (blocked bool, retryAfter time.Duration) {
 	now := st.now()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	t := st.throttle[authThrottleAccountKey(realm, user)]
+	t := st.throttle[authThrottleAccountKey(acctScope, user)]
 	if t != nil && !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
 		return true, t.blockedUntil.Sub(now)
 	}
@@ -768,9 +778,9 @@ func (st *authStore) accountCheck(realm, user string) (blocked bool, retryAfter 
 // capped at authAccountWaitMax. The ladder never bans: a person waits at
 // most authAccountWaitMax, while a distributed guesser is held to about one
 // guess per authAccountWaitMax against that account.
-func (st *authStore) accountFail(realm, user string) authThrottleOutcome {
+func (st *authStore) accountFail(acctScope, user string) authThrottleOutcome {
 	now := st.now()
-	key := authThrottleAccountKey(realm, user)
+	key := authThrottleAccountKey(acctScope, user)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	t := st.throttle[key]
@@ -800,9 +810,9 @@ func (st *authStore) accountFail(realm, user string) authThrottleOutcome {
 
 // accountClear forgets the account ladder after a successful login: only
 // someone holding the account's password can reset it.
-func (st *authStore) accountClear(realm, user string) {
+func (st *authStore) accountClear(acctScope, user string) {
 	st.mu.Lock()
-	delete(st.throttle, authThrottleAccountKey(realm, user))
+	delete(st.throttle, authThrottleAccountKey(acctScope, user))
 	st.mu.Unlock()
 }
 
@@ -810,11 +820,11 @@ func (st *authStore) accountClear(realm, user string) {
 // through three wait nothing; the fourth starts the ladder.
 const authThrottleFreeFails = 3
 
-func authLoginKeys(scope, clientKey, user, realm string) [3]string {
+func authLoginKeys(scope, clientKey, user, acctScope string) [3]string {
 	return [3]string{
 		authThrottlePairKey(scope, clientKey, user),
 		authThrottleAggKey(scope, clientKey),
-		authThrottleAccountKey(realm, user),
+		authThrottleAccountKey(acctScope, user),
 	}
 }
 
@@ -825,9 +835,9 @@ func authLoginKeys(scope, clientKey, user, realm string) [3]string {
 // check together and all land in one wait, so the ladders hold under the
 // verification queue's concurrency (a busy row answers Retry-After 1). An
 // admitted attempt holds its rows until loginRelease.
-func (st *authStore) loginClaim(scope, clientKey, user, realm string) (blocked bool, retryAfter time.Duration) {
+func (st *authStore) loginClaim(scope, clientKey, user, acctScope string) (blocked bool, retryAfter time.Duration) {
 	now := st.now()
-	keys := authLoginKeys(scope, clientKey, user, realm)
+	keys := authLoginKeys(scope, clientKey, user, acctScope)
 	free := [3]int{authThrottleFreeFails, authThrottleFreeFails, authAccountFreeFails}
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -865,10 +875,10 @@ func (st *authStore) loginClaim(scope, clientKey, user, realm string) (blocked b
 // loginRelease ends an admitted attempt's hold on its rows once its outcome
 // is recorded (or it was refused after the claim). A row left with no
 // failure, no wait, and nothing in flight is forgotten.
-func (st *authStore) loginRelease(scope, clientKey, user, realm string) {
+func (st *authStore) loginRelease(scope, clientKey, user, acctScope string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	for _, key := range authLoginKeys(scope, clientKey, user, realm) {
+	for _, key := range authLoginKeys(scope, clientKey, user, acctScope) {
 		t := st.throttle[key]
 		if t == nil {
 			continue
@@ -1065,6 +1075,7 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	}
 
 	if gate != nil && !authorized {
+		gate = h.authRefusalGate(r, gates)
 		w.Header().Set("Cache-Control", "no-store")
 		if authBrowserShaped(r) {
 			to := safeTo(r.URL.RequestURI(), gate.prefix)
@@ -1104,6 +1115,26 @@ func stripClientIdentityHeaders(h http.Header) {
 			delete(h, name)
 		}
 	}
+}
+
+// authRefusalGate picks the door a refused request is sent to: for a
+// signed-in user, the first winning gate that does not allow them (the
+// door that explains the refusal, so the user never bounces between
+// doors); with no session, the first winner.
+func (h *Handler) authRefusalGate(r *http.Request, gates []*authGate) *authGate {
+	if len(gates) > 1 {
+		cfg := h.authCfg
+		if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" {
+			if user, _, ok := cfg.store.lookupAllowed(c.Value, normalizeHostHeader(r.Host), cfg.ttl, false, nil, cfg.users); ok {
+				for _, g := range gates {
+					if !g.allow[user] {
+						return g
+					}
+				}
+			}
+		}
+	}
+	return gates[0]
 }
 
 // authSessionAllowed resolves and refreshes a session only when its user is
@@ -1442,12 +1473,13 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 	host := normalizeHostHeader(r.Host)
 	clientKey := authClientKey(authClientIP(r))
 	scope := authThrottleScope(cfg.realm)
+	acct := authAccountScope(cfg.users[name])
 
 	// Check and claim the ladders in one step (loginClaim); an admitted
 	// attempt holds them until its outcome is recorded, below.
-	blocked, retryAfter := st.loginClaim(scope, clientKey, name, cfg.realm)
+	blocked, retryAfter := st.loginClaim(scope, clientKey, name, acct)
 	if !blocked {
-		defer st.loginRelease(scope, clientKey, name, cfg.realm)
+		defer st.loginRelease(scope, clientKey, name, acct)
 	}
 	log := h.authLog()
 	if blocked {
@@ -1477,7 +1509,7 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 	// Password OK is not enough: the user must be on this gate's allow list.
 	if !ok || !g.allow[name] {
 		client := st.throttleFail(scope, clientKey, name)
-		account := st.accountFail(cfg.realm, name)
+		account := st.accountFail(acct, name)
 		st.loginFailures.Add(1)
 		// One message for every failure cause: the log never tells an
 		// unknown user from a wrong password or a disallowed gate.
@@ -1503,7 +1535,7 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 	}
 
 	st.throttleClear(scope, clientKey, name)
-	st.accountClear(cfg.realm, name)
+	st.accountClear(acct, name)
 	// A login replaces the host session: the session the request arrived
 	// with, if any, ends here rather than living on beside the new one.
 	if c, err := r.Cookie(authCookieName); err == nil {

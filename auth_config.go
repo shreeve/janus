@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/url"
 	pathpkg "path"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -350,6 +351,13 @@ func normalizeGatePrefix(raw string) (string, error) {
 	if strings.ContainsAny(raw, `;\`) {
 		return "", fmt.Errorf("path %q must not contain ; or \\", raw)
 	}
+	// The match form folds a segment's trailing dots away, so a prefix
+	// segment ending in one could never match either.
+	for _, seg := range strings.Split(raw, "/") {
+		if strings.HasSuffix(seg, ".") {
+			return "", fmt.Errorf("path %q has a segment ending in a dot, which no request path matches", raw)
+		}
+	}
 	if !strings.HasSuffix(raw, "/") {
 		raw += "/"
 	}
@@ -461,7 +469,9 @@ func gatePrefixMatch(prefix, form string) bool {
 // match against: lowercased (a case-insensitive backend must not let
 // /ONE/secret slip a gate written /one/), backslashes read as slashes,
 // every ;parameter suffix cut from its segment (matrix parameters that
-// servlet-style upstreams strip), and runs of slashes collapsed (os.Root
+// servlet-style upstreams strip), trailing dots and spaces trimmed from
+// each segment but . and .. (Windows and IIS fold them), and runs of
+// slashes collapsed (os.Root
 // and many upstreams merge them). A trailing slash survives. The
 // canonical form exists for matching only; the path handed upstream is
 // never rewritten.
@@ -479,6 +489,12 @@ func authCanonicalPath(p string) string {
 	for _, seg := range strings.Split(p, "/") {
 		if i := strings.IndexByte(seg, ';'); i >= 0 {
 			seg = seg[:i]
+		}
+		// Trailing dots and spaces fold away (Windows and IIS read
+		// /admin./ and /admin%20/ as /admin/); the dot segments . and ..
+		// stay, for the resolved form.
+		if seg != "." && seg != ".." {
+			seg = strings.TrimRight(seg, ". ")
 		}
 		if seg == "" {
 			trailing = true
@@ -787,9 +803,15 @@ func authRealm(users map[string]string) string {
 // gate than the canonical path, and the most restrictive winner decides,
 // never the most permissive.
 func (cfg *authSite) matchGates(paths ...string) []*authGate {
+	// The decoded and escaped paths mostly fold to the same forms: each
+	// distinct form is walked once.
 	var forms []string
 	for _, p := range paths {
-		forms = append(forms, authGatePaths(p)...)
+		for _, f := range authGatePaths(p) {
+			if !slices.Contains(forms, f) {
+				forms = append(forms, f)
+			}
+		}
 	}
 	var winners []*authGate
 	for _, form := range forms {
