@@ -180,6 +180,11 @@ func gatherStatus(p servicePaths) edgeStatus {
 			if code, known := item.lastExit(); known {
 				st.LastExit = &code
 				st.CrashLoop = code != 0
+				if rr, ok := item.(restartReporter); ok && st.CrashLoop {
+					if pending, known := rr.restartPending(); known {
+						st.CrashLoop = pending
+					}
+				}
 			}
 		}
 		if st.LastExit == nil || *st.LastExit != 0 {

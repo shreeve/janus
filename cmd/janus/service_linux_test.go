@@ -138,3 +138,19 @@ func TestParseSystemdExe(t *testing.T) {
 		t.Error("parseSystemdExe invented an executable")
 	}
 }
+
+func TestParseSystemdRestartPending(t *testing.T) {
+	for out, want := range map[string]bool{
+		"ActiveState=activating\nSubState=auto-restart\n": true,
+		"SubState=auto-restart\nActiveState=activating\n": true,
+		"ActiveState=activating\nSubState=start\n":        false,
+		"ActiveState=failed\nSubState=failed\n":           false,
+		"ActiveState=inactive\nSubState=dead\n":           false,
+		"ActiveState=active\nSubState=running\n":          false,
+		"":                                                false,
+	} {
+		if got := parseSystemdRestartPending([]byte(out)); got != want {
+			t.Errorf("parseSystemdRestartPending(%q) = %v, want %v", out, got, want)
+		}
+	}
+}

@@ -78,7 +78,9 @@ func (a *App) controlHandler(c *Control) http.Handler {
 // "simple" no-cors POST with a text/plain body that needs no preflight.
 //
 //   - Any request carrying Origin is refused 403. Browsers attach Origin to
-//     every cross-origin request and to every POST, PUT, PATCH, and DELETE;
+//     every cross-origin fetch and XHR and to every POST, PUT, PATCH, and
+//     DELETE (an <img>, <script>, or navigation GET carries none and reads
+//     no response);
 //     the tenant, the janus command, and Caddy's ask never send it.
 //   - On local, a Host that is not a loopback IP literal or localhost (with
 //     an optional port) is refused 403. A DNS-rebinding page reaches the

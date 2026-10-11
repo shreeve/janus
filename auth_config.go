@@ -1,6 +1,8 @@
 package janus
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"net/url"
@@ -128,6 +130,7 @@ type authSite struct {
 	gates []authGate        // longest-prefix-first for matching
 	ttl   time.Duration
 	store *authStore
+	realm string // the users table's identity (authRealm): the login ladders' scope
 
 	// plainHTTPLogged makes the dead-wall ERROR (plain-HTTP guarded
 	// site → 421) fire once per site, not once per request.
@@ -495,9 +498,9 @@ func authCanonicalPath(p string) string {
 // canonical path; the canonical path with dot segments resolved (an
 // upstream that resolves /x/../one/ must not reach /one/ unguarded); and
 // the canonical form of one further percent-decoding (an upstream that
-// decodes twice must not turn %2F or %6F into a gated path). A gate that
-// matches any form gates the request, so the extra forms can only add
-// gates, never remove one.
+// decodes twice must not turn %2F or %6F into a gated path). Each form's
+// winning gate must authorize the request (matchGates), so an extra form
+// can only add a gate to satisfy, never replace one.
 func authGatePaths(p string) []string {
 	forms := make([]string, 0, 4)
 	add := func(form string) {
@@ -752,23 +755,88 @@ func compileAuthSite(users []AuthUser, gates []AuthGate, ttl time.Duration, stor
 		gates: compiled,
 		ttl:   ttl,
 		store: store,
+		realm: authRealm(umap),
 	}, nil
 }
 
-// matchGate returns the winning (longest) gate for path, or nil. The
-// path is matched in every gate-match form (authGatePaths), never raw:
-// //one/x, /one;p/x, and /ONE/x all fall under gate /one/.
-func (cfg *authSite) matchGate(path string) *authGate {
-	forms := authGatePaths(path)
-	for i := range cfg.gates {
-		prefix := strings.ToLower(cfg.gates[i].prefix)
-		for _, form := range forms {
-			if gatePrefixMatch(prefix, form) {
-				return &cfg.gates[i]
+// authRealm names a users table: every site whose effective table is the
+// same (sites inheriting the global users, an app's several hosts) shares
+// one realm, so a password guessed on one is guessed on all and the login
+// ladders count it once. Disjoint tables never throttle each other.
+func authRealm(users map[string]string) string {
+	names := make([]string, 0, len(users))
+	for n := range users {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, n := range names {
+		h.Write([]byte(n))
+		h.Write([]byte{0})
+		h.Write([]byte(users[n]))
+		h.Write([]byte{'\n'})
+	}
+	return "realm:" + hex.EncodeToString(h.Sum(nil)[:12])
+}
+
+// matchGates returns the winning (longest) gate of each of path's
+// gate-match forms (authGatePaths), each distinct winner once, the
+// canonical form's first; nil when no form falls under a gate. A request
+// must be authorized at every winner: a form that an upstream may serve
+// (dot segments resolved, a second decoding) can land under a narrower
+// gate than the canonical path, and the most restrictive winner decides,
+// never the most permissive.
+func (cfg *authSite) matchGates(paths ...string) []*authGate {
+	var forms []string
+	for _, p := range paths {
+		forms = append(forms, authGatePaths(p)...)
+	}
+	var winners []*authGate
+	for _, form := range forms {
+		for i := range cfg.gates {
+			if !gatePrefixMatch(strings.ToLower(cfg.gates[i].prefix), form) {
+				continue
 			}
+			g := &cfg.gates[i]
+			seen := false
+			for _, w := range winners {
+				seen = seen || w == g
+			}
+			if !seen {
+				winners = append(winners, g)
+			}
+			break
 		}
 	}
+	return winners
+}
+
+// matchGate returns the first winner (the canonical form's when it lies
+// under a gate), or nil: the gate a canonical path such as a configured
+// route lies under.
+func (cfg *authSite) matchGate(path string) *authGate {
+	if winners := cfg.matchGates(path); len(winners) > 0 {
+		return winners[0]
+	}
 	return nil
+}
+
+// authAllowAll is the users every gate in gates allows.
+func authAllowAll(gates []*authGate) map[string]bool {
+	if len(gates) == 1 {
+		return gates[0].allow
+	}
+	out := map[string]bool{}
+	for user := range gates[0].allow {
+		all := true
+		for _, g := range gates[1:] {
+			all = all && g.allow[user]
+		}
+		if all {
+			out[user] = true
+		}
+	}
+	return out
 }
 
 // doorGate returns the gate whose exact login door is path, or nil.

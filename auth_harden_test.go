@@ -447,16 +447,123 @@ func TestAuthAccountLadderAtTheDoor(t *testing.T) {
 	}
 }
 
-func TestAuthThrottleScopedPerHost(t *testing.T) {
+// The ladders are scoped to the realm (the users table), never the Host
+// header: one site answering several hosts gives a guesser one budget,
+// not one per Host; a site with a disjoint users table keeps its own.
+func TestAuthThrottleScopedPerRealm(t *testing.T) {
 	ah := newAuthHarness(t, aliceUsers(t), 0)
 	for i := 0; i < 4; i++ {
 		ah.postLoginFrom(t, "public.test", "192.0.2.8:1", "", "eve", "guess")
 	}
 	if rr := ah.postLoginFrom(t, "public.test", "192.0.2.8:1", "", "alice", "open-sesame"); rr.Code != http.StatusTooManyRequests {
-		t.Fatalf("throttled host: %d, want 429", rr.Code)
+		t.Fatalf("throttled client: %d, want 429", rr.Code)
 	}
-	if rr := ah.postLoginFrom(t, "app.test", "192.0.2.8:1", "", "alice", "open-sesame"); rr.Code != http.StatusSeeOther {
-		t.Fatalf("another host from the same address: %d, want 303", rr.Code)
+	if rr := ah.postLoginFrom(t, "app.test", "192.0.2.8:1", "", "alice", "open-sesame"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("another Host of the same site, same address: %d, want 429 (one budget per realm)", rr.Code)
+	}
+	// The account ladder spans hosts too: guesses spread over Host values
+	// from fresh addresses climb one ladder.
+	for i := 0; i <= authAccountFreeFails; i++ {
+		ah.postLoginFrom(t, "h"+strconv.Itoa(i)+".test", "198.51.100."+strconv.Itoa(i+1)+":1", "", "alice", "wrong")
+	}
+	if rr := ah.postLoginFrom(t, "fresh.test", "203.0.113.50:1", "", "alice", "open-sesame"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("account ladder across hosts: %d, want 429", rr.Code)
+	}
+	// A disjoint users table is another realm: its ladders are untouched.
+	other, err := compileAuthSite(usersToSlice(map[string]string{"bob": testCred(t, "bob-pass")}),
+		[]AuthGate{{Prefix: "/", Allow: []string{"bob"}}}, 0, ah.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.realm == ah.h.authCfg.realm {
+		t.Fatal("disjoint users tables share a realm")
+	}
+	if blocked, _ := ah.st.throttleCheck(authThrottleScope(other.realm), authClientKey("192.0.2.8"), "bob"); blocked {
+		t.Fatal("another realm's client ladder is engaged")
+	}
+}
+
+// Nested gates with different allow lists: a request is authorized at the
+// winning gate of every form an upstream may serve, so neither a dot
+// segment nor a second decoding moves it under a more permissive gate.
+func TestAuthNestedGatesTheMostRestrictiveWins(t *testing.T) {
+	users := map[string]string{"alice": testCred(t, "alice-pass"), "bob": testCred(t, "bob-pass")}
+	ah := newAuthHarnessGates(t, users, 0, map[string][]string{
+		"/admin/":     {"alice"},
+		"/admin/pub/": {"alice", "bob"},
+	})
+	bob := ah.loginDoor(t, "app.test", "/admin/pub/auth", "bob", "bob-pass")
+	alice := ah.loginDoor(t, "app.test", "/admin/auth", "alice", "alice-pass")
+	cases := []struct {
+		path       string
+		bob, alice bool
+	}{
+		{"/admin/pub/page", true, true},
+		{"/admin/secret", false, true},
+		{"/admin/pub/../secret", false, true},
+		{"/admin/pub/%2e%2e/secret", false, true},
+		{"/admin/pub%252fsecret", false, true},
+		{"/admin/pub%2fsecret", false, true},
+	}
+	for _, tc := range cases {
+		for _, who := range []struct {
+			name, session string
+			want          bool
+		}{{"bob", bob, tc.bob}, {"alice", alice, tc.alice}} {
+			r := authReq(http.MethodGet, "app.test", tc.path, nil)
+			r.AddCookie(&http.Cookie{Name: authCookieName, Value: who.session})
+			rr, passed := ah.wall(t, r)
+			if got := passed != nil; got != who.want {
+				t.Errorf("%s %s: passed=%v (status %d), want %v", who.name, tc.path, got, rr.Code, who.want)
+			}
+		}
+	}
+}
+
+// Concurrent attempts claim the ladders in the same step as the check:
+// past the free attempts only one guess per account is in flight, and a
+// failure that lands inside a wait still counts.
+func TestAuthLoginClaimHoldsUnderConcurrency(t *testing.T) {
+	st, err := newAuthStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const realm, user = "realm:test", "alice"
+	scope := authThrottleScope(realm)
+	client := func(i int) string { return authClientKey("192.0.2." + strconv.Itoa(i)) }
+	for i := 1; i <= authAccountFreeFails; i++ {
+		if blocked, _ := st.loginClaim(scope, client(i), user, realm); blocked {
+			t.Fatalf("free attempt %d refused", i)
+		}
+		st.accountFail(realm, user)
+		st.loginRelease(scope, client(i), user, realm)
+	}
+	// Eighteen guesses arrive together from eighteen addresses.
+	admitted := 0
+	var held []int
+	for i := 100; i < 118; i++ {
+		if blocked, _ := st.loginClaim(scope, client(i), user, realm); !blocked {
+			admitted++
+			held = append(held, i)
+		}
+	}
+	if admitted != 1 {
+		t.Fatalf("%d concurrent guesses admitted past the free attempts, want 1", admitted)
+	}
+	out := st.accountFail(realm, user)
+	st.loginRelease(scope, client(held[0]), user, realm)
+	if out.wait == 0 {
+		t.Fatal("the admitted guess's failure set no wait")
+	}
+	if blocked, _ := st.loginClaim(scope, client(200), user, realm); !blocked {
+		t.Fatal("a guess during the wait was admitted")
+	}
+	// A failure inside a wait (an attempt admitted in the free region
+	// before the wait began) still counts and climbs the ladder.
+	before := st.throttle[authThrottleAccountKey(realm, user)].fails
+	st.accountFail(realm, user)
+	if after := st.throttle[authThrottleAccountKey(realm, user)].fails; after != before+1 {
+		t.Fatalf("a failure inside the wait was dropped: %d → %d", before, after)
 	}
 }
 
