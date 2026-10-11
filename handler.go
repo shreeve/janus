@@ -173,7 +173,9 @@ func (h *Handler) provisionBrowse() error {
 // enabled and everything else routes through the data plane (registry
 // hosts → upstreams; unknown hosts → 404).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	r.Header.Del(ripSiteHeader)
+	// Identity headers are Janus's to assert, on every site, auth on or off,
+	// before any branch can reach an upstream, the hub, or files.
+	stripClientIdentityHeaders(r.Header)
 	// A local name in wan mode: not served here, front door included.
 	if wanExposure() && localFamilyHost(normalizeHostHeader(r.Host)) {
 		return caddyhttp.Error(http.StatusMisdirectedRequest, fmt.Errorf("janus: %s is a local name; the edge is in wan mode", r.Host))

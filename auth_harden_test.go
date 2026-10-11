@@ -193,6 +193,82 @@ func TestSafeToCanonicalForms(t *testing.T) {
 	}
 }
 
+// --- identity headers -----------------------------------------------------------
+
+// identityUpstream registers app.test with one upstream that reports every
+// identity-shaped header it receives (name folded _→- and lowercased).
+func identityUpstream(t *testing.T) (*dataPlane, chan []string) {
+	t.Helper()
+	dp, reg := newTestDataPlane(t)
+	seen := make(chan []string, 8)
+	sock := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got []string
+		for name, values := range r.Header {
+			folded := strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+			if folded == "remote-user" || folded == "rip-site" {
+				for _, v := range values {
+					got = append(got, folded+"="+v)
+				}
+			}
+		}
+		seen <- got
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	rec, err := reg.create("app", []string{"app.test"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.setUpstreams(rec.ID, []Upstream{{Path: sock}}); err != nil {
+		t.Fatal(err)
+	}
+	return dp, seen
+}
+
+func forgedIdentityRequest(target string) *http.Request {
+	r := authReq(http.MethodGet, "app.test", target, nil)
+	for _, name := range []string{"Remote-User", "Remote_User", "remote_user", "REMOTE-USER", "Rip-Site", "Rip_Site", "rip_site"} {
+		r.Header[name] = append(r.Header[name], "root")
+	}
+	return r
+}
+
+func TestIdentityHeadersStrippedOnAuthOffSite(t *testing.T) {
+	dp, seen := identityUpstream(t)
+	h := &Handler{dp: dp, logger: zap.NewNop()}
+	serveSite(t, h, forgedIdentityRequest("/anything"))
+	if got := <-seen; len(got) != 0 {
+		t.Fatalf("auth-off site forwarded client identity headers: %v", got)
+	}
+}
+
+func TestIdentityHeadersStrippedOnAuthOnSite(t *testing.T) {
+	ah := newAuthHarnessGates(t, aliceUsers(t), 0, map[string][]string{"/private/": {"alice"}})
+	dp, seen := identityUpstream(t)
+	ah.h.dp = dp
+	serveSite(t, ah.h, forgedIdentityRequest("/public"))
+	if got := <-seen; len(got) != 0 {
+		t.Fatalf("auth-on open path forwarded client identity headers: %v", got)
+	}
+	session := ah.loginDoor(t, "app.test", "/private/auth", "alice", "open-sesame")
+	r := forgedIdentityRequest("/private/x")
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	serveSite(t, ah.h, r)
+	if got := <-seen; len(got) != 1 || got[0] != "remote-user=alice" {
+		t.Fatalf("auth-on gated path: upstream saw %v, want only the injected remote-user=alice", got)
+	}
+}
+
+func TestStripClientIdentityHeaders(t *testing.T) {
+	h := http.Header{
+		"Remote-User": {"a"}, "Remote_user": {"b"}, "remote_user": {"c"}, "REMOTE_USER": {"d"},
+		"Rip-Site": {"e"}, "Rip_site": {"f"}, "X-Remote-User": {"keep"}, "Remote-Users": {"keep"},
+	}
+	stripClientIdentityHeaders(h)
+	if len(h) != 2 || h.Get("X-Remote-User") != "keep" || h.Get("Remote-Users") != "keep" {
+		t.Fatalf("after strip: %v", h)
+	}
+}
+
 // FuzzAuthGateCanonical pins the over-gate-only property: for any path p,
 // if the canonical form of p (or p itself) is under a gate prefix, the
 // wall treats p as gated — a request without a session never passes.

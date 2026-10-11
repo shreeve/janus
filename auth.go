@@ -744,8 +744,10 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	}
 
 	// Fall-through (gated+authorized or outside every gate): strip on
-	// every proxied request when auth is on.
-	r.Header.Del("Remote-User")
+	// every proxied request when auth is on. The site handler already
+	// stripped client identity headers; the wall repeats it so its own
+	// injection is the only Remote-User whatever the caller.
+	stripClientIdentityHeaders(r.Header)
 	stripAuthCookies(r)
 	ctx := context.WithValue(r.Context(), authWallActiveKey{}, true)
 	if authorized {
@@ -753,6 +755,21 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	}
 	r = r.WithContext(ctx)
 	return r, false, nil
+}
+
+// stripClientIdentityHeaders deletes every client-sent header that names
+// an identity Janus asserts: Remote-User (set only by a passed gate) and
+// Rip-Site (set only from a site registration). A name matches when it
+// equals one of those case-insensitively after mapping _ to -, because
+// CGI-style upstreams (Rack, PHP, WSGI) fold Remote_User and Remote-User
+// into the same HTTP_REMOTE_USER variable.
+func stripClientIdentityHeaders(h http.Header) {
+	for name := range h {
+		switch strings.ToLower(strings.ReplaceAll(name, "_", "-")) {
+		case "remote-user", "rip-site":
+			delete(h, name)
+		}
+	}
 }
 
 // authSessionAllowed resolves and refreshes a session only when its user is
