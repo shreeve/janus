@@ -128,7 +128,8 @@ Sites use `*.janus.localhost` names, which resolve to the loopback with
 no DNS; SNI picks the site (`off.janus.localhost`, `on.janus.localhost`,
 …). Caddy's internal CA issues every certificate, and `test.sh` pins
 Caddy storage under its run directory and passes that root to every
-client (`curl --cacert`, `testkit --ca`). No `curl -k`.
+client: curl through `--cacert`, testkit through `SSL_CERT_FILE` (or its
+`ws -cacert` and `wt -ca` flags). No `curl -k`.
 
 ## Commands
 

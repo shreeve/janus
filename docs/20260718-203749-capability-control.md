@@ -66,8 +66,10 @@ token check and before the API:
 | Carries an `Origin` header (any value, `null` included) | `local`, `public` | **403** |
 | `Host` is not a loopback IP literal or `localhost`, with an optional numeric port | `local` | **403** |
 
-Browsers attach `Origin` to every cross-origin request and to every
-`POST`, `PUT`, `PATCH`, and `DELETE`; the tenant, the `janus` command,
+Browsers attach `Origin` to every `fetch` and XHR across origins and to
+every `POST`, `PUT`, `PATCH`, and `DELETE` (a plain cross-site `GET` from
+an `<img>`, a `<script>`, or a navigation carries none, and reads no
+response; the `Host` rule below still holds for it); the tenant, the `janus` command,
 and Caddy's TLS ask never send it. The `Host` rule defeats DNS
 rebinding: a rebinding page reaches the listener under its own name, so
 its `Host` never passes. `public` accepts any `Host` (it answers for real
