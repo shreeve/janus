@@ -583,10 +583,23 @@ func authThrottleAccountKey(acctScope, user string) string {
 // authAccountScope names an account's ladder by its credential: every
 // users table that holds the same name and passhash (a site table copying
 // a user, the global table) shares one budget, since a password guessed
-// against one opens all. A name no table holds has the empty credential.
+// against one opens all.
 func authAccountScope(credential string) string {
 	sum := sha256.Sum256([]byte(credential))
 	return "cred:" + hex.EncodeToString(sum[:12])
+}
+
+// accountScope is the ladder scope of a submitted name on this site: its
+// credential's (authAccountScope) when the table holds it, else the
+// table's own realm. A name no table holds would otherwise share one row
+// across every table, and burning it on one site would answer 429 on
+// another where a held name answers 401: an oracle for which names a
+// table holds.
+func (cfg *authSite) accountScope(name string) string {
+	if cred, ok := cfg.users[name]; ok {
+		return authAccountScope(cred)
+	}
+	return "none:" + cfg.realm
 }
 
 func authThrottleAccountRow(key string) bool {
@@ -1059,6 +1072,15 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 		return r, true, h.serveAuthEndpoint(w, r, g)
 	}
 
+	// A segment of dots and whitespace alone (..%20, ..., %20..) has no
+	// one reading every backend shares: kept, dropped, or climbed as ..
+	// No gate can be matched for all three, so the path is refused.
+	if authAmbiguousPath(path) {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "ambiguous path segment", http.StatusBadRequest)
+		return r, true, nil
+	}
+
 	// Every form's winning gate must allow the user (matchGates): the most
 	// restrictive winner decides. The escaped path is judged too: an
 	// upstream that keeps %2F encoded reads /a/b%2Fc as one segment under
@@ -1473,7 +1495,7 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 	host := normalizeHostHeader(r.Host)
 	clientKey := authClientKey(authClientIP(r))
 	scope := authThrottleScope(cfg.realm)
-	acct := authAccountScope(cfg.users[name])
+	acct := cfg.accountScope(name)
 
 	// Check and claim the ladders in one step (loginClaim); an admitted
 	// attempt holds them until its outcome is recorded, below.

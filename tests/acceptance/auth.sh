@@ -869,6 +869,23 @@ case_auth_noncanonical_paths_gated() {
 	eq "$(grep -c '^GET /[oO/]' "$AUTH_HITS" || true)" "$before"
 }
 
+case_auth_ambiguous_segments_refused() {
+	# A segment of dots and whitespace alone reads differently on every
+	# backend (kept, dropped, or climbed as ..), so a gated site refuses
+	# it with 400 before any gate, signed in or not, and nothing reaches
+	# the app.
+	auth_login "$AUTH_WALL" bob sesame-bob
+	local p before
+	before="$(wc -l <"$AUTH_HITS")"
+	for p in '/x/..%20/one/x' '/x/.../one/x' '/x/%20../one/x' '/x/..%09/one/x' '/x/..%2520/one/x'; do
+		auth_req GET "$AUTH_WALL$p" -H "Cookie: __Host-janus=$AUTH_SESSION"
+		eq "$REPLY_CODE" "400"
+		auth_req GET "$AUTH_WALL$p"
+		eq "$REPLY_CODE" "400"
+	done
+	eq "$(wc -l <"$AUTH_HITS")" "$before"
+}
+
 case_auth_off_site_strips_identity() {
 	# A site with auth off strips every client identity spelling too, so an
 	# app that trusts Remote-User behind a gate elsewhere is never

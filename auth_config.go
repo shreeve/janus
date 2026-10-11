@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -342,7 +343,7 @@ func normalizeGatePrefix(raw string) (string, error) {
 	if strings.Contains(raw, "..") {
 		return "", fmt.Errorf("path %q must not contain dot-dot", raw)
 	}
-	if strings.ContainsAny(raw, " \t\r\n") {
+	if strings.ContainsFunc(raw, unicode.IsSpace) {
 		return "", fmt.Errorf("path %q must not contain whitespace", raw)
 	}
 	// Request paths are matched in canonical form (authCanonicalPath),
@@ -469,28 +470,19 @@ func gatePrefixMatch(prefix, form string) bool {
 // match against: lowercased (a case-insensitive backend must not let
 // /ONE/secret slip a gate written /one/), backslashes read as slashes,
 // every ;parameter suffix cut from its segment (matrix parameters that
-// servlet-style upstreams strip), trailing dots and spaces trimmed from
-// each segment but . and .. (Windows and IIS fold them), and runs of
-// slashes collapsed (os.Root
-// and many upstreams merge them). A trailing slash survives. The
+// servlet-style upstreams strip), trailing dots and whitespace trimmed
+// from each segment but . and .. (Windows and IIS fold dots and spaces,
+// a strip-style upstream any whitespace), and runs of slashes collapsed
+// (os.Root and many upstreams merge them). A trailing slash survives. The
 // canonical form exists for matching only; the path handed upstream is
 // never rewritten.
 //
-// A normalized gate prefix is already canonical (it carries no //, ;, \,
-// uppercase that matters, or segment ending in a dot), and no fold
-// changes a segment that equals or extends one of the prefix's: a raw
-// path under a prefix stays under it after folding, so canonical
-// matching can only gate more paths, never fewer.
+// Every fold only shortens a segment or removes an empty one, and a
+// normalized gate prefix is already canonical (it carries no //, ;, \,
+// or uppercase that matters), so a raw path under a prefix stays under
+// it after folding: canonical matching can only gate more paths, never
+// fewer.
 func authCanonicalPath(p string) string {
-	return authFoldPath(p, false)
-}
-
-// authFoldPath is authCanonicalPath, choosing how a segment of dots and
-// spaces holding .. (".. ", "...", " ..") reads once it folds away: dropped
-// as empty, or, with dotRuns, as .. itself (a backend that trims before
-// it resolves dot segments climbs a level there). authGatePaths matches
-// both readings.
-func authFoldPath(p string, dotRuns bool) string {
 	p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
 	var b strings.Builder
 	b.Grow(len(p) + 1)
@@ -499,15 +491,13 @@ func authFoldPath(p string, dotRuns bool) string {
 		if i := strings.IndexByte(seg, ';'); i >= 0 {
 			seg = seg[:i]
 		}
-		// Trailing dots and spaces fold away (Windows and IIS read
+		// Trailing dots and whitespace fold away (Windows and IIS read
 		// /admin./ and /admin%20/ as /admin/); the dot segments . and ..
-		// stay, for the resolved form.
+		// stay, for the resolved form. A segment that folds away
+		// entirely never reaches a gate: the wall refuses it
+		// (authAmbiguousPath).
 		if seg != "." && seg != ".." {
-			trimmed := strings.TrimRight(seg, ". ")
-			if trimmed == "" && dotRuns && strings.Contains(seg, "..") {
-				trimmed = ".."
-			}
-			seg = trimmed
+			seg = strings.TrimRightFunc(seg, authFoldRune)
 		}
 		if seg == "" {
 			trailing = true
@@ -523,12 +513,51 @@ func authFoldPath(p string, dotRuns bool) string {
 	return b.String()
 }
 
+// authFoldRune is a rune the fold trims from a segment's end: a dot or
+// any Unicode whitespace.
+func authFoldRune(r rune) bool {
+	return r == '.' || unicode.IsSpace(r)
+}
+
+// authAmbiguousPath reports whether a decoded request path, or its one
+// further percent-decoding, has a segment (\ read as /, its ;parameter
+// cut) of dots and whitespace alone other than . and ..: ..%20, ...,
+// %20.., ..%09. Backends read such a segment as itself, as empty, or as
+// .., and a path mixing them (/app/x/.../..%20/..%20/admin/) lands
+// wherever its backend's reading puts it; no set of forms covers every
+// mix, so the wall refuses the path instead (400).
+func authAmbiguousPath(p string) bool {
+	if authAmbiguousSegments(p) {
+		return true
+	}
+	if strings.IndexByte(p, '%') >= 0 {
+		if decoded, err := url.PathUnescape(p); err == nil {
+			return authAmbiguousSegments(decoded)
+		}
+	}
+	return false
+}
+
+func authAmbiguousSegments(p string) bool {
+	for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if i := strings.IndexByte(seg, ';'); i >= 0 {
+			seg = seg[:i]
+		}
+		if seg == "" || seg == "." || seg == ".." {
+			continue
+		}
+		if strings.TrimFunc(seg, authFoldRune) == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // authGatePaths returns every form a gate is matched against: the
 // canonical path; the canonical path with dot segments resolved (an
 // upstream that resolves /x/../one/ must not reach /one/ unguarded); and
 // the canonical form of one further percent-decoding (an upstream that
-// decodes twice must not turn %2F or %6F into a gated path); and each of
-// those with a folded-away dot run read as .. (authFoldPath). Each form's
+// decodes twice must not turn %2F or %6F into a gated path). Each form's
 // winning gate must authorize the request (matchGates), so an extra form
 // can only add a gate to satisfy, never replace one.
 func authGatePaths(p string) []string {
@@ -551,16 +580,10 @@ func authGatePaths(p string) []string {
 			add(cleaned)
 		}
 	}
-	addFolds := func(p string) {
-		addWithDots(authCanonicalPath(p))
-		if strings.Contains(p, "..") {
-			addWithDots(authFoldPath(p, true))
-		}
-	}
-	addFolds(p)
+	addWithDots(authCanonicalPath(p))
 	if strings.IndexByte(p, '%') >= 0 {
 		if decoded, err := url.PathUnescape(p); err == nil {
-			addFolds(decoded)
+			addWithDots(authCanonicalPath(decoded))
 		}
 	}
 	return forms
