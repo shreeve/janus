@@ -154,6 +154,35 @@ a device cannot necessarily validate the local CA before installing it.
 Future public redirect/HSTS changes must preserve that bootstrap and the
 exposure-mode contract.
 
+## macOS pf after an OS update or a Janus upgrade
+
+On macOS the `localhost` and `lan` modes are held by the pf anchor
+(`/etc/pf.anchors/janus`, loaded from `/etc/pf.conf`). A macOS update can
+restore the stock `/etc/pf.conf`, which drops the two lines that load the
+anchor. The edge then refuses to start in `localhost` or `lan` mode rather
+than open its wildcard socket unscoped; the item retries every ten
+seconds, and each refusal names the cause (written to the supervisor log
+once every ten minutes while it is unchanged). `janus status` shows
+`firewall missing: /etc/pf.conf does not load the janus anchor`, the
+`CRASH LOOP`, and the refusal line with its time.
+
+The fix is one command:
+
+```bash
+sudo janus firewall
+```
+
+It rewrites the anchor and the `pf.conf` lines, reloads pf, and enables it;
+the item's next start, within ten seconds, passes the check. `wan` mode has
+no anchor and is unaffected.
+
+An anchor written before 1.19.0 lacks the rule for UDP 443 (the
+webtransport relay's port). After an upgrade from such a release the edge
+refuses to start in `localhost` or `lan` mode, and `janus status` shows
+`firewall missing: /etc/pf.anchors/janus does not match the scope`, until
+`sudo janus firewall` (or `janus mode <scope>`, which runs it) rewrites the
+anchor.
+
 ## macOS Local Network privacy
 
 macOS 15 and later subject a user launchd agent to Local Network
