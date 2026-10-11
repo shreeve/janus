@@ -967,7 +967,7 @@ func FuzzAuthGateCanonical(f *testing.F) {
 
 // Trailing dots and spaces fold out of a segment, as Windows and IIS fold
 // them, so /admin./secret and /admin%20/secret stay under gate /admin/; a
-// segment that starts with .. and folds away entirely (/x/..%20/admin) is
+// segment of dots and spaces holding .. that folds away (/x/..%20/admin) is
 // also read as .., as a backend that trims before resolving reads it; a
 // gate prefix whose segment ends in a dot is refused, since it could never
 // match.
@@ -976,7 +976,7 @@ func TestAuthGateFoldsTrailingDotsAndSpaces(t *testing.T) {
 	ah := newAuthHarnessGates(t, users, 0, map[string][]string{"/admin/": {"alice"}, "/": {"alice", "bob"}})
 	bob := ah.login(t, "app.test", "bob", "bob-pass")
 	for _, p := range []string{"/admin./secret", "/admin%20/secret", "/ADMIN.%20/x", "/admin.../x", "/admin%2e/x",
-		"/x/..%20/admin/s", "/x/..%2e/admin", "/x/.../admin/s", "/x/..%20.%20/admin/s", "/x/..%2520/admin/s"} {
+		"/x/..%20/admin/s", "/x/..%2e/admin", "/x/.../admin/s", "/x/..%20.%20/admin/s", "/x/..%2520/admin/s", "/x/%20../admin/s"} {
 		r := authReq(http.MethodGet, "app.test", p, nil)
 		r.AddCookie(&http.Cookie{Name: authCookieName, Value: bob})
 		if rr, passed := ah.wall(t, r); passed != nil {

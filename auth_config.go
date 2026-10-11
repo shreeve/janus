@@ -485,8 +485,8 @@ func authCanonicalPath(p string) string {
 	return authFoldPath(p, false)
 }
 
-// authFoldPath is authCanonicalPath, choosing how a segment that starts
-// with .. and folds away entirely (".. ", "...", ".. .") reads: dropped
+// authFoldPath is authCanonicalPath, choosing how a segment of dots and
+// spaces holding .. (".. ", "...", " ..") reads once it folds away: dropped
 // as empty, or, with dotRuns, as .. itself (a backend that trims before
 // it resolves dot segments climbs a level there). authGatePaths matches
 // both readings.
@@ -504,7 +504,7 @@ func authFoldPath(p string, dotRuns bool) string {
 		// stay, for the resolved form.
 		if seg != "." && seg != ".." {
 			trimmed := strings.TrimRight(seg, ". ")
-			if trimmed == "" && dotRuns && strings.HasPrefix(seg, "..") {
+			if trimmed == "" && dotRuns && strings.Contains(seg, "..") {
 				trimmed = ".."
 			}
 			seg = trimmed
@@ -527,7 +527,8 @@ func authFoldPath(p string, dotRuns bool) string {
 // canonical path; the canonical path with dot segments resolved (an
 // upstream that resolves /x/../one/ must not reach /one/ unguarded); and
 // the canonical form of one further percent-decoding (an upstream that
-// decodes twice must not turn %2F or %6F into a gated path). Each form's
+// decodes twice must not turn %2F or %6F into a gated path); and each of
+// those with a folded-away dot run read as .. (authFoldPath). Each form's
 // winning gate must authorize the request (matchGates), so an extra form
 // can only add a gate to satisfy, never replace one.
 func authGatePaths(p string) []string {
