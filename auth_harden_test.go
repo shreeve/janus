@@ -1,14 +1,17 @@
 package janus
 
 import (
+	"context"
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
@@ -266,6 +269,220 @@ func TestStripClientIdentityHeaders(t *testing.T) {
 	stripClientIdentityHeaders(h)
 	if len(h) != 2 || h.Get("X-Remote-User") != "keep" || h.Get("Remote-Users") != "keep" {
 		t.Fatalf("after strip: %v", h)
+	}
+}
+
+// --- login throttle -------------------------------------------------------------
+
+func clockedStore(t *testing.T) (*authStore, *time.Time) {
+	t.Helper()
+	st, err := newAuthStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	st.now = func() time.Time { return now }
+	return st, &now
+}
+
+func TestAuthThrottleTracksNewClientsAtCap(t *testing.T) {
+	st, now := clockedStore(t)
+	// Fill the table with hot, recent, non-ban rows: nothing is cold.
+	for i := 0; i < authThrottleMaxEntries; i++ {
+		st.throttle[authThrottleAggKey("/", "filler-"+strconv.Itoa(i))] = &authThrottleEntry{fails: 1, lastFail: *now}
+	}
+	*now = now.Add(time.Second)
+	gate, client := "/", "198.51.100.77"
+	for i := 0; i < 4; i++ {
+		st.throttleFail(gate, client, "alice")
+	}
+	if blocked, _ := st.throttleCheck(gate, client, "alice"); !blocked {
+		t.Fatal("a new client at the table cap was never throttled")
+	}
+	if blocked, _ := st.throttleCheck(gate, client, "fresh"); !blocked {
+		t.Fatal("a new client's aggregate at the table cap was never tracked")
+	}
+	if n := len(st.throttle); n > authThrottleMaxEntries {
+		t.Fatalf("table grew past its bound: %d", n)
+	}
+}
+
+func TestAuthThrottleEvictsBansOnlyWhenEveryRowIsBanned(t *testing.T) {
+	st, now := clockedStore(t)
+	for i := 0; i < authThrottleMaxEntries; i++ {
+		st.throttle[authThrottleAggKey("/", "ban-"+strconv.Itoa(i))] = &authThrottleEntry{
+			fails: authThrottleBanAt, lastFail: *now,
+			banUntil: now.Add(authThrottleBan + time.Duration(i)), blockedUntil: now.Add(authThrottleBan),
+		}
+	}
+	st.throttleFail("/", "203.0.113.200", "alice")
+	if _, kept := st.throttle[authThrottleAggKey("/", "ban-0")]; kept {
+		t.Fatal("the soonest-expiring ban should give way when the table is all bans")
+	}
+	if _, kept := st.throttle[authThrottleAggKey("/", "ban-9")]; !kept {
+		t.Fatal("a later ban was evicted")
+	}
+	if st.throttle[authThrottleAggKey("/", "203.0.113.200")] == nil {
+		t.Fatal("the new client was not tracked")
+	}
+}
+
+func TestAuthSuccessDoesNotResetSprayBudget(t *testing.T) {
+	st, _ := clockedStore(t)
+	gate, client := "/", "192.0.2.50"
+	// One sprayed username, plus two typos by bob himself.
+	for _, u := range []string{"x", "bob", "bob"} {
+		st.throttleFail(gate, client, u)
+	}
+	// bob signs in: his own two failures are refunded, the spray stays.
+	st.throttleClear(gate, client, "bob")
+	st.mu.Lock()
+	agg := st.throttle[authThrottleAggKey(gate, client)].fails
+	st.mu.Unlock()
+	if agg != 1 {
+		t.Fatalf("aggregate after success = %d, want 1 (spray kept, own typos refunded)", agg)
+	}
+	// Three more sprayed names reach the 4th aggregate failure: the
+	// client is held. Had the success cleared the aggregate it would not be.
+	for _, u := range []string{"y", "z", "w"} {
+		st.throttleFail(gate, client, u)
+	}
+	if blocked, _ := st.throttleCheck(gate, client, "fresh"); !blocked {
+		t.Fatal("a success reset the client's spray budget")
+	}
+}
+
+func TestAuthAccountLadderSlowsDistributedGuessing(t *testing.T) {
+	st, now := clockedStore(t)
+	host, user := "app.test", "alice"
+	for i := 0; i < authAccountFreeFails; i++ {
+		client := "192.0.2." + strconv.Itoa(i+1)
+		if blocked, _ := st.throttleCheck("/", client, user); blocked {
+			t.Fatalf("client %s blocked by its own ladder", client)
+		}
+		if blocked, _ := st.accountCheck(host, user); blocked {
+			t.Fatalf("account held after %d failures", i)
+		}
+		st.throttleFail("/", client, user)
+		st.accountFail(host, user)
+	}
+	// The next failure, from yet another address, starts the account wait.
+	if out := st.accountFail(host, user); out.wait != authAccountWaitFirst || out.banned {
+		t.Fatalf("first account wait: %+v", out)
+	}
+	blocked, retry := st.accountCheck(host, user)
+	if !blocked || retry < authAccountWaitFirst-time.Second {
+		t.Fatalf("account not held: blocked=%v retry=%v", blocked, retry)
+	}
+	// Another host's same-named user is unaffected.
+	if blocked, _ := st.accountCheck("other.test", user); blocked {
+		t.Fatal("account ladder crossed hosts")
+	}
+	// The wait doubles to a cap and never becomes a ban.
+	waits := []time.Duration{}
+	for i := 0; i < 8; i++ {
+		*now = now.Add(authAccountWaitMax + time.Second)
+		waits = append(waits, st.accountFail(host, user).wait)
+	}
+	want := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second}
+	for i := range want {
+		if waits[i] != want[i] {
+			t.Fatalf("account waits = %v, want %v", waits, want)
+		}
+	}
+	*now = now.Add(authAccountWaitMax + time.Second)
+	if blocked, _ := st.accountCheck(host, user); blocked {
+		t.Fatal("account wait outlived its cap")
+	}
+	// An hour without failures forgets the ladder.
+	*now = now.Add(authAccountForget + time.Second)
+	if out := st.accountFail(host, user); out.wait != 0 {
+		t.Fatalf("ladder not forgotten after the window: %+v", out)
+	}
+	// A successful login clears it.
+	st.accountClear(host, user)
+	if blocked, _ := st.accountCheck(host, user); blocked {
+		t.Fatal("success did not clear the account ladder")
+	}
+}
+
+// postLoginFrom posts one sign-in to /auth from remoteAddr, optionally with
+// Caddy's client_ip var set, and returns the recorder.
+func (ah *authHarness) postLoginFrom(t *testing.T, host, remoteAddr, clientIP, user, password string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	csrf := ah.getLoginForm(t, host, "/auth")
+	r := authReq(http.MethodPost, host, "/auth",
+		strings.NewReader(url.Values{"csrf": {csrf}, "user": {user}, "password": {password}}.Encode()),
+		"Content-Type", "application/x-www-form-urlencoded")
+	r.RemoteAddr = remoteAddr
+	r.AddCookie(&http.Cookie{Name: authCSRFCookieName, Value: csrf})
+	for _, c := range cookies {
+		r.AddCookie(c)
+	}
+	if clientIP != "" {
+		r = withClientIP(r, clientIP)
+	}
+	rr, _ := ah.wall(t, r)
+	return rr
+}
+
+func TestAuthAccountLadderAtTheDoor(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	// Every guess comes from a fresh address: no client ladder engages.
+	for i := 0; i <= authAccountFreeFails; i++ {
+		if rr := ah.postLoginFrom(t, "app.test", "192.0.2."+strconv.Itoa(i+1)+":1", "", "alice", "wrong"); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("guess %d: %d", i+1, rr.Code)
+		}
+	}
+	rr := ah.postLoginFrom(t, "app.test", "203.0.113.99:4444", "", "alice", "open-sesame")
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" {
+		t.Fatalf("account ladder at the door: %d Retry-After=%q", rr.Code, rr.Header().Get("Retry-After"))
+	}
+}
+
+func TestAuthThrottleScopedPerHost(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	for i := 0; i < 4; i++ {
+		ah.postLoginFrom(t, "public.test", "192.0.2.8:1", "", "eve", "guess")
+	}
+	if rr := ah.postLoginFrom(t, "public.test", "192.0.2.8:1", "", "alice", "open-sesame"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("throttled host: %d, want 429", rr.Code)
+	}
+	if rr := ah.postLoginFrom(t, "app.test", "192.0.2.8:1", "", "alice", "open-sesame"); rr.Code != http.StatusSeeOther {
+		t.Fatalf("another host from the same address: %d, want 303", rr.Code)
+	}
+}
+
+func withClientIP(r *http.Request, ip string) *http.Request {
+	vars := map[string]any{caddyhttp.ClientIPVarKey: ip}
+	return r.WithContext(context.WithValue(r.Context(), caddyhttp.VarsCtxKey, vars))
+}
+
+func TestAuthClientIPHonorsCaddyClientIP(t *testing.T) {
+	r := authReq(http.MethodGet, "app.test", "/", nil)
+	r.RemoteAddr = "10.0.0.1:5555"
+	if got := authClientIP(r); got != "10.0.0.1" {
+		t.Fatalf("fallback client ip = %q", got)
+	}
+	if got := authClientIP(withClientIP(r, "198.51.100.7")); got != "198.51.100.7" {
+		t.Fatalf("caddy client ip = %q", got)
+	}
+}
+
+func TestAuthThrottleKeysOnClientBehindTrustedProxy(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	post := func(ip, password string) int {
+		// RemoteAddr is the load balancer, for every client.
+		return ah.postLoginFrom(t, "app.test", "10.0.0.1:443", ip, "alice", password).Code
+	}
+	for i := 0; i < 4; i++ {
+		post("198.51.100.1", "wrong")
+	}
+	if code := post("198.51.100.1", "open-sesame"); code != http.StatusTooManyRequests {
+		t.Fatalf("throttled client: %d, want 429", code)
+	}
+	if code := post("198.51.100.2", "open-sesame"); code != http.StatusSeeOther {
+		t.Fatalf("another client behind the same balancer: %d, want 303", code)
 	}
 }
 

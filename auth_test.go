@@ -901,7 +901,7 @@ func TestAuthClientKeyIPv6Prefix(t *testing.T) {
 
 func TestAuthThrottleBeforeKDF(t *testing.T) {
 	ah := newAuthHarness(t, aliceUsers(t), 0)
-	gate, client := "/", "192.0.2.1"
+	gate, client := authThrottleScope("app.test", "/"), "192.0.2.1"
 	for i := 0; i < 4; i++ {
 		ah.st.throttleFail(gate, client, "alice")
 	}

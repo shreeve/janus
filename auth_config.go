@@ -44,6 +44,14 @@ const (
 	authThrottleBanAt      = 7 // fails >= 7 → 24h ban
 	authThrottleMaxEntries = 65536
 
+	// Per-account ladder (any client, one host + username): free
+	// failures within the forget window, then a doubling 429 wait capped
+	// at authAccountWaitMax. Never a ban.
+	authAccountFreeFails = 10
+	authAccountWaitFirst = 5 * time.Second
+	authAccountWaitMax   = 60 * time.Second
+	authAccountForget    = time.Hour
+
 	// Argon2 verification concurrency: at most authVerifyConcurrency
 	// KDF runs at once; at most authVerifyQueueMax more may wait behind
 	// them. Past the queue depth a login attempt fast-fails 429 —

@@ -212,19 +212,9 @@ func (st *authStore) reap() {
 		}
 	}
 	for k, t := range st.throttle {
-		if t == nil {
-			delete(st.throttle, k)
-			continue
-		}
-		if !t.banUntil.IsZero() && now.Before(t.banUntil) {
-			continue // active ban
-		}
-		if !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
-			continue // active ladder wait
-		}
-		// Keep ladder state until 24h after the last failure so counts
-		// survive across wait windows; drop cold rows.
-		if t.lastFail.IsZero() || now.Sub(t.lastFail) > authThrottleBan {
+		// Keep ladder state until its window passes after the last failure
+		// so counts survive across wait windows; drop cold rows.
+		if throttleRowCold(k, t, now) {
 			delete(st.throttle, k)
 		}
 	}
@@ -417,10 +407,26 @@ func (a *App) authSessionList() []authSessionInfo {
 
 // --- throttle ---------------------------------------------------------------------
 
-// authClientKey keys the throttle on the connection's RemoteAddr — Janus
-// is the TLS-terminating edge, so that is the true peer; X-Forwarded-For
-// is attacker-supplied ink. IPv6 clients key on the /64 prefix (one
-// subnet, not 2^64 fresh addresses); IPv4 keys on the address.
+// authClientIP is the client address the throttle and the audit trail
+// use: Caddy's client_ip, which honors the server's trusted_proxies (an
+// edge behind a trusted load balancer sees each client, not the
+// balancer), else the connection's RemoteAddr. With no trusted_proxies
+// configured Caddy's client_ip is the peer itself, so a client-supplied
+// X-Forwarded-For is never believed.
+func authClientIP(r *http.Request) string {
+	if ip, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && ip != "" {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// authClientKey maps a client address (bare or host:port) to its throttle
+// key. IPv6 clients key on the /64 prefix (one subnet, not 2^64 fresh
+// addresses); IPv4 keys on the address.
 func authClientKey(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
@@ -436,12 +442,37 @@ func authClientKey(remoteAddr string) string {
 	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
+// authThrottleScope names one login door's ladder scope: the host and the
+// gate. Failures on one host never spend another host's budget, so an
+// attacker on a public host cannot ban a shared address from another.
+func authThrottleScope(host, gatePrefix string) string {
+	return strings.ToLower(host) + "\x00" + gatePrefix
+}
+
 func authThrottlePairKey(gatePrefix, clientKey, user string) string {
 	return gatePrefix + "\x00" + clientKey + "\x00" + user
 }
 
 func authThrottleAggKey(gatePrefix, clientKey string) string {
 	return gatePrefix + "\x00" + clientKey + "\x00"
+}
+
+// authThrottleAccountKey keys the per-account ladder: one row per host
+// and username, independent of client address and login door. The \x01
+// lead byte keeps it disjoint from gate-keyed rows (a gate starts with /).
+func authThrottleAccountKey(host, user string) string {
+	return "\x01" + strings.ToLower(host) + "\x00" + user
+}
+
+func authThrottleAccountRow(key string) bool {
+	return strings.HasPrefix(key, "\x01")
+}
+
+// authThrottleOutcome reports what one recorded failure set in motion, for
+// the audit trail.
+type authThrottleOutcome struct {
+	wait   time.Duration // the longest ladder wait now running (0: none)
+	banned bool          // this failure started a 24h client ban
 }
 
 // throttleCheck reports whether the pair or the client aggregate is
@@ -471,28 +502,27 @@ func (st *authStore) throttleCheck(gatePrefix, clientKey, user string) (blocked 
 }
 
 // throttleFail records one failed attempt on the pair and the client
-// aggregate for the gate. Map bound: sweep expired first; never casually
-// evict active ban rows — refuse new non-ban entries at the cap instead.
-func (st *authStore) throttleFail(gatePrefix, clientKey, user string) {
+// aggregate for the gate. The map stays bounded without ever refusing a
+// row (throttleAdmitLocked), so a new client is always tracked.
+func (st *authStore) throttleFail(gatePrefix, clientKey, user string) authThrottleOutcome {
 	now := st.now()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.throttleFailLocked(authThrottlePairKey(gatePrefix, clientKey, user), now)
-	st.throttleFailLocked(authThrottleAggKey(gatePrefix, clientKey), now)
+	a := st.throttleFailLocked(authThrottlePairKey(gatePrefix, clientKey, user), now)
+	b := st.throttleFailLocked(authThrottleAggKey(gatePrefix, clientKey), now)
+	return authThrottleOutcome{wait: max(a.wait, b.wait), banned: a.banned || b.banned}
 }
 
-func (st *authStore) throttleFailLocked(key string, now time.Time) {
+func (st *authStore) throttleFailLocked(key string, now time.Time) authThrottleOutcome {
 	t := st.throttle[key]
 	if t != nil && !t.banUntil.IsZero() && now.Before(t.banUntil) {
-		return // already banned; further fails are no-ops while banned
+		return authThrottleOutcome{} // already banned; further fails are no-ops while banned
 	}
 	if t != nil && !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
-		return // still in a 429 wait — caller should not reach here
+		return authThrottleOutcome{} // still in a 429 wait — caller should not reach here
 	}
 	if t == nil {
-		if !st.throttleAdmitLocked(now) {
-			return
-		}
+		st.throttleAdmitLocked(now)
 		t = &authThrottleEntry{}
 		st.throttle[key] = t
 	}
@@ -506,6 +536,7 @@ func (st *authStore) throttleFailLocked(key string, now time.Time) {
 		if !wasBanned {
 			st.banned.Add(1)
 		}
+		return authThrottleOutcome{wait: authThrottleBan, banned: !wasBanned}
 	case t.fails == 6:
 		t.blockedUntil = now.Add(authThrottleWait6)
 	case t.fails == 5:
@@ -515,55 +546,142 @@ func (st *authStore) throttleFailLocked(key string, now time.Time) {
 	default:
 		// 1–3: immediate failure, no added wait
 		t.blockedUntil = time.Time{}
+		return authThrottleOutcome{}
 	}
+	return authThrottleOutcome{wait: t.blockedUntil.Sub(now)}
 }
 
-// throttleAdmitLocked frees cold non-ban rows and reports whether a new
-// non-ban entry may be inserted. Active bans are never evicted.
-func (st *authStore) throttleAdmitLocked(now time.Time) bool {
-	if len(st.throttle) < authThrottleMaxEntries {
+// throttleRowCold reports whether a row carries nothing worth keeping: no
+// active ban or wait, and its failures have aged out of their window (24h
+// for gate rows, authAccountForget for account rows).
+func throttleRowCold(key string, e *authThrottleEntry, now time.Time) bool {
+	if e == nil {
 		return true
+	}
+	if !e.banUntil.IsZero() && now.Before(e.banUntil) {
+		return false
+	}
+	if !e.blockedUntil.IsZero() && now.Before(e.blockedUntil) {
+		return false
+	}
+	window := authThrottleBan
+	if authThrottleAccountRow(key) {
+		window = authAccountForget
+	}
+	return e.lastFail.IsZero() || now.Sub(e.lastFail) > window
+}
+
+// throttleAdmitLocked makes room for one new row; tracking never stops at
+// the cap. Cold rows are swept first. If the table is still full, the
+// least-recently-failed row that is not an active ban is evicted; only a
+// table made entirely of active bans gives up its soonest-expiring ban.
+func (st *authStore) throttleAdmitLocked(now time.Time) {
+	if len(st.throttle) < authThrottleMaxEntries {
+		return
 	}
 	for k, e := range st.throttle {
-		if e == nil {
-			delete(st.throttle, k)
-			continue
-		}
-		if !e.banUntil.IsZero() && now.Before(e.banUntil) {
-			continue // never casually evict active bans
-		}
-		if !e.blockedUntil.IsZero() && now.Before(e.blockedUntil) {
-			continue
-		}
-		if e.lastFail.IsZero() || now.Sub(e.lastFail) > authThrottleBan {
+		if throttleRowCold(k, e, now) {
 			delete(st.throttle, k)
 		}
 	}
-	if len(st.throttle) < authThrottleMaxEntries {
-		return true
+	for len(st.throttle) >= authThrottleMaxEntries {
+		victim, banVictim := "", ""
+		var oldest, soonest time.Time
+		for k, e := range st.throttle {
+			if !e.banUntil.IsZero() && now.Before(e.banUntil) {
+				if banVictim == "" || e.banUntil.Before(soonest) {
+					banVictim, soonest = k, e.banUntil
+				}
+				continue
+			}
+			if victim == "" || e.lastFail.Before(oldest) {
+				victim, oldest = k, e.lastFail
+			}
+		}
+		if victim == "" {
+			victim = banVictim
+		}
+		delete(st.throttle, victim)
 	}
-	// Prefer refusing new non-ban entries at the cap over evicting bans.
-	return false
 }
 
-// throttleClear forgets the pair and clears the client aggregate ladder
-// for the gate. An active client ban is not cleared by success.
+// throttleClear runs on a successful login: it forgets the pair and
+// refunds the pair's own failures from the client aggregate, so a person's
+// typos before signing in do not count against everyone behind the same
+// address. Failures against other usernames stay in the aggregate — a
+// success never resets the client's spray budget — and an active
+// aggregate wait or ban is never lifted.
 func (st *authStore) throttleClear(gatePrefix, clientKey, user string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	delete(st.throttle, authThrottlePairKey(gatePrefix, clientKey, user))
-	aggKey := authThrottleAggKey(gatePrefix, clientKey)
-	if t := st.throttle[aggKey]; t != nil {
-		now := st.now()
-		if !t.banUntil.IsZero() && now.Before(t.banUntil) {
-			// Preserve the ban; drop ladder fails so a fresh spray
-			// budget starts after the ban expires.
-			t.fails = authThrottleBanAt
-			t.blockedUntil = t.banUntil
-			return
-		}
-		delete(st.throttle, aggKey)
+	pairKey := authThrottlePairKey(gatePrefix, clientKey, user)
+	own := 0
+	if t := st.throttle[pairKey]; t != nil {
+		own = t.fails
 	}
+	delete(st.throttle, pairKey)
+	if t := st.throttle[authThrottleAggKey(gatePrefix, clientKey)]; t != nil && own > 0 {
+		t.fails = max(t.fails-own, 0)
+	}
+}
+
+// accountCheck reports whether the per-account ladder currently holds
+// logins to user on host, and for how long. Checked before argon2 work.
+func (st *authStore) accountCheck(host, user string) (blocked bool, retryAfter time.Duration) {
+	now := st.now()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	t := st.throttle[authThrottleAccountKey(host, user)]
+	if t != nil && !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
+		return true, t.blockedUntil.Sub(now)
+	}
+	return false, 0
+}
+
+// accountFail records one failed login against user on host from any
+// client. The first authAccountFreeFails failures within the forget window
+// cost nothing; each further one holds the account for a doubling wait
+// capped at authAccountWaitMax. The ladder never bans: a person waits at
+// most authAccountWaitMax, while a distributed guesser is held to about one
+// guess per authAccountWaitMax against that account.
+func (st *authStore) accountFail(host, user string) authThrottleOutcome {
+	now := st.now()
+	key := authThrottleAccountKey(host, user)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	t := st.throttle[key]
+	if t != nil && !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
+		return authThrottleOutcome{} // in a 429 wait — the attempt never ran
+	}
+	if t != nil && now.Sub(t.lastFail) > authAccountForget {
+		t.fails = 0
+	}
+	if t == nil {
+		st.throttleAdmitLocked(now)
+		t = &authThrottleEntry{}
+		st.throttle[key] = t
+	}
+	t.fails++
+	t.lastFail = now
+	over := t.fails - authAccountFreeFails
+	if over <= 0 {
+		t.blockedUntil = time.Time{}
+		return authThrottleOutcome{}
+	}
+	wait := authAccountWaitMax
+	if over <= 4 {
+		wait = min(authAccountWaitFirst<<(over-1), authAccountWaitMax)
+	}
+	t.blockedUntil = now.Add(wait)
+	return authThrottleOutcome{wait: wait}
+}
+
+// accountClear forgets the account ladder after a successful login: only
+// someone holding the account's password can reset it.
+func (st *authStore) accountClear(host, user string) {
+	st.mu.Lock()
+	delete(st.throttle, authThrottleAccountKey(host, user))
+	st.mu.Unlock()
 }
 
 // --- verification ------------------------------------------------------------------
@@ -1036,9 +1154,15 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 	}
 	name := strings.ToLower(rawUser)
 	to := safeTo(r.PostForm.Get("to"), g.prefix)
-	clientKey := authClientKey(r.RemoteAddr)
+	host := normalizeHostHeader(r.Host)
+	clientKey := authClientKey(authClientIP(r))
+	scope := authThrottleScope(host, g.prefix)
 
-	if blocked, retryAfter := st.throttleCheck(g.prefix, clientKey, name); blocked {
+	blocked, retryAfter := st.throttleCheck(scope, clientKey, name)
+	if !blocked {
+		blocked, retryAfter = st.accountCheck(host, name)
+	}
+	if blocked {
 		st.throttled.Add(1)
 		secs := int(retryAfter/time.Second) + 1
 		if secs < 1 {
@@ -1060,10 +1184,11 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 
 	// Password OK is not enough: the user must be on this gate's allow list.
 	if !ok || !g.allow[name] {
-		st.throttleFail(g.prefix, clientKey, name)
+		st.throttleFail(scope, clientKey, name)
+		st.accountFail(host, name)
 		st.loginFailures.Add(1)
 		return h.renderAuthPage(w, http.StatusUnauthorized, authPageData{
-			Host:  normalizeHostHeader(r.Host),
+			Host:  host,
 			CSRF:  r.PostForm.Get("csrf"),
 			To:    to,
 			Door:  gateDoor(g.prefix),
@@ -1071,8 +1196,9 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 		})
 	}
 
-	st.throttleClear(g.prefix, clientKey, name)
-	token, err := st.mint(name, normalizeHostHeader(r.Host))
+	st.throttleClear(scope, clientKey, name)
+	st.accountClear(host, name)
+	token, err := st.mint(name, host)
 	if err != nil {
 		return caddyhttp.Error(http.StatusInternalServerError, err)
 	}
