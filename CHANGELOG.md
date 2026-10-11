@@ -4,6 +4,50 @@ Janus release tags use `vX.Y.Z`. Entries are ordered by tag date, newest
 first. Versions that were prepared but never tagged (1.6.5, 1.7.1) have no
 entry; their changes ship in the next tag.
 
+## Unreleased
+
+A hardening round. What an upgrading operator notices first:
+
+- **A TLS control listener needs its own `cert:` and `key:`.** `control
+  public`, or a `control local https://…`, without them is a parse error:
+  Janus no longer ships a certificate (the committed `ripdev.io` pair is
+  gone, its key having been public). Name your own pair.
+- **Dotfiles answer 404** from files and browse roots, except under
+  `/.well-known/`; listings omit them. A build whose shell or assets live
+  under a dot directory (Vite's `dist/.vite/manifest.json`) needs them
+  moved, or served by the app.
+- **Browse renderers** run with a fixed environment (PATH, HOME, TMPDIR,
+  LANG, LC_ALL, LC_CTYPE, TZ, USER, and the `JANUS_BROWSE_*` values), not
+  the edge's, and rendered output carries `Content-Security-Policy:
+  sandbox allow-same-origin` and `X-Frame-Options: SAMEORIGIN`.
+- **A worker that sends no response headers within 120 s** gets its client
+  a 504; nothing is retried and the socket stays healthy. A long poll or
+  SSE endpoint that withholds its headers longer than that answers 504.
+- **Auth:** `Remote-User` and `Rip-Site`, in every spelling, are stripped
+  on every site, auth on or off. Gates match every spelling of a path
+  (doubled slashes, `;parameters`, dot segments, a second decoding, the
+  escaped path) and require authorization at each spelling's gate. The
+  login ladders are scoped to the users table, not the Host, gain a
+  per-account ladder, and claim each attempt as they check it. A password
+  change or a new sign-in ends the old session; an audit log records
+  sign-ins, failures, throttles, and revocations.
+- **One socket belongs to one app:** a path another app publishes is 409;
+  upstream paths must be absolute and clean.
+- **The TCP control listeners refuse browsers** (any `Origin`, and on
+  `local` any non-loopback `Host`).
+- **Caddy 2.11.7**, current quic-go, webtransport-go, and `x/` modules,
+  built with Go 1.27.2; `govulncheck` gates every pull request.
+
+Also: `X-Forwarded-For` honors `trusted_proxies`; Janus refusals are
+`no-store`; strict JSON refuses keys repeated in any case; a live control
+socket is never taken over; hub connections that closed execute nothing;
+WebTransport caps QUIC connections and closes those without a session;
+sendfile caps a request at 16 ranges and sends `nosniff`; `janus status`
+shows the CA fingerprint and a crash loop with its last error; the
+supervisor log rolls over; release archives are built without cgo,
+attested, and verified by `install.sh` where `gh` is present; the root
+systemd unit is sandboxed.
+
 ## 1.19.0 — 2026-09-29
 
 - Capability 10, `webtransport`: a browser datagram relay. The edge
