@@ -149,9 +149,10 @@ site context. With effective `files on`, the data-plane order is:
 1. malformed request target → **400**; unknown or
    directory-gate-failed host → **404**;
 2. `proxy_first` prefix → existing doorbell/worker path;
-3. GET or HEAD regular-file hit in the first ordered root → serve it;
-4. GET or HEAD HTML navigation miss → serve `shell`;
-5. every other miss or method → **404**.
+3. a path with a dot segment (see Dotfiles) → **404**, never the shell;
+4. GET or HEAD regular-file hit in the first ordered root → serve it;
+5. GET or HEAD HTML navigation miss → serve `shell`;
+6. every other miss or method → **404**.
 
 The files decision is terminal outside `proxy_first`. Only configured API
 prefixes reach a doorbell or workers. A missing asset never rings
@@ -169,7 +170,10 @@ explicit `q=0`, does not qualify. A shell is never served for a
 
 Static responses set a weak ETag from the opened file's modification
 time and size, then use Go `http.ServeContent` conditional and
-single-range semantics. GET and HEAD carry the same headers; HEAD emits
+range semantics. A `Range` field with more than 16 nonempty range specs is
+ignored and the full representation answers 200, as RFC 9110 permits; ranges
+whose lengths sum past the file size are ignored as `ServeContent` ignores
+them. GET and HEAD carry the same headers; HEAD emits
 no body. The file descriptor supplies both metadata and bytes, so a
 path replacement cannot change the served object mid-response. Janus
 does not list directories.
@@ -183,7 +187,8 @@ Response policy is deliberately finite:
 | Shell | `no-cache` | `text/html; charset=utf-8` |
 | `versioned` root | `public, max-age=31536000, immutable` | Go's extension MIME result |
 
-Every file response carries exactly one class policy plus the weak ETag.
+Every file response carries exactly one class policy plus the weak ETag
+and `X-Content-Type-Options: nosniff`.
 The class is registration-time trusted policy, not inferred from a URL
 name. `.rip` is forced to plain UTF-8 text and never served as an
 executable JavaScript MIME type.
@@ -207,6 +212,26 @@ socket is a miss, never a worker-visible filesystem error.
 
 Registration paths are trusted control-plane input but still validate
 structurally. Janus never creates a tenant directory.
+
+## Dotfiles
+
+Files never serves a request path containing a segment that begins with
+`.`, with one exception: a first segment exactly `.well-known`, so RFC 8615
+URIs such as ACME challenges and `security.txt` resolve. Segments beneath
+`/.well-known/` still may not begin with `.`.
+
+The check runs on the validated, exactly-once decoded path, the same path
+the root lookup uses: `/%2Eenv` is `/.env`. Matching is byte-exact, so
+`/.ENV`, `/.Well-Known/`, and `//.well-known/` are refused, which keeps a
+case-insensitive filesystem from resolving a differently spelled hidden
+name. A refused path answers the same terminal **404** as a missing file,
+never discloses whether the object exists, never receives the shell, and
+never opens a precompressed sidecar. `proxy_first` prefixes are unaffected:
+the application answers its own paths.
+
+A shell whose file name begins with `.` rejects at registration. Dot
+directories above a root or the shell are the operator's filesystem layout
+and are not request paths.
 
 ## Trusted site context
 
@@ -244,6 +269,7 @@ same normalized policy and resumes heartbeats.
   `live | generated | mutable | versioned`;
 - `{site}` in a root without a site declaration;
 - missing shell or empty roots when `files` is present;
+- a shell whose file name begins with `.`;
 - malformed or overlapping `proxy_first` entries;
 - unknown JSON or Caddyfile fields.
 

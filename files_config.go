@@ -275,6 +275,9 @@ func normalizeFilesPolicy(in *FilesPolicy, hasSite bool) (*FilesPolicy, error) {
 		if err := validateConfiguredPath(in.Shell, "files.shell", false); err != nil {
 			return nil, err
 		}
+		if strings.HasPrefix(path.Base(in.Shell), ".") {
+			return nil, errBadRequest("files.shell %q names a dotfile; files and browse never serve dotfiles", in.Shell)
+		}
 	}
 	for _, prefix := range in.ProxyFirst {
 		if err := validateRequestPathString(prefix); err != nil {

@@ -771,3 +771,136 @@ func BenchmarkServeFiles(b *testing.B) {
 		})
 	}
 }
+
+func TestHiddenRequestPath(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/":                             false,
+		"/index.html":                   false,
+		"/a/b.c/d":                      false,
+		"/file.":                        false,
+		"/a..b":                         false,
+		"/.env":                         true,
+		"/.git/config":                  true,
+		"/a/.ssh/id_rsa":                true,
+		"/a/b/.":                        true,
+		"/.ENV":                         true,
+		"/.well-known":                  false,
+		"/.well-known/":                 false,
+		"/.well-known/security.txt":     false,
+		"/.well-known/acme-challenge/x": false,
+		"/.well-known/.hidden":          true,
+		"/.well-knownx/a":               true,
+		"/.well-know":                   true,
+		"/.Well-Known/security.txt":     true,
+		"//.well-known/security.txt":    true,
+		"/a/.well-known/security.txt":   true,
+		"/a//.env":                      true,
+	} {
+		if got := hiddenRequestPath(p); got != want {
+			t.Errorf("%q: got %v want %v", p, got, want)
+		}
+	}
+}
+
+func TestFilesShellRejectsDotfile(t *testing.T) {
+	roots := []FilesRoot{{Path: "/srv/app/public", Cache: filesCacheRevalidate}}
+	if _, err := normalizeFilesPolicy(&FilesPolicy{Roots: roots, Shell: "/srv/app/.index.html"}, false); err == nil ||
+		!strings.Contains(err.Error(), "dotfile") {
+		t.Fatalf("dotfile shell: %v", err)
+	}
+	// A dot directory above the shell is the operator's filesystem layout,
+	// not a request path; only the shell file itself is checked.
+	if _, err := normalizeFilesPolicy(&FilesPolicy{Roots: roots, Shell: "/home/app/.local/share/app/index.html"}, false); err != nil {
+		t.Fatalf("shell beneath a dot directory: %v", err)
+	}
+	mux := newTestControlMux(t)
+	code, body := doJSON(t, mux, http.MethodPost, "/1.0/apps",
+		`{"name":"x","hosts":["x.test"],"files":{"roots":[{"path":"/tmp"}],"shell":"/tmp/.shell.html"}}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("dotfile shell registration: %d %v", code, body)
+	}
+}
+
+// Registered files refuse dot segments on the validated, decoded path with
+// the same terminal 404 a missing file gets, never the SPA shell, and never
+// a precompressed sidecar.
+func TestServeFilesRefusesDotfiles(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		full := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".env", "SECRET=1")
+	write(".env.br", "SECRET-BR")
+	write(".git/config", "[core]")
+	write("a/.ssh/id_rsa", "KEY")
+	write(".well-known/security.txt", "Contact: mailto:security@example.com")
+	write(".well-known/acme-challenge/token", "token.thumbprint")
+	write("app.js", "export{}")
+	shell := filepath.Join(t.TempDir(), "index.html")
+	if err := os.WriteFile(shell, []byte("<main>shell</main>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	on := true
+	h := &Handler{app: &App{Files: &on, FilesPrecompressed: []string{"br", "zstd", "gzip"}}}
+	rec := AppRecord{Files: &FilesPolicy{
+		Roots:      []FilesRoot{{Path: root, Cache: filesCacheRevalidate}},
+		ProxyFirst: []string{"/api"},
+		Shell:      shell,
+	}}
+	serve := func(target string) (*httptest.ResponseRecorder, bool) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "http://app.test"+target, nil)
+		req.Header.Set("Accept", "text/html")
+		req.Header.Set("Accept-Encoding", "br")
+		out := httptest.NewRecorder()
+		handled, err := h.serveFiles(out, req, rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out, handled
+	}
+	missing := httptest.NewRecorder()
+	http.NotFound(missing, httptest.NewRequest(http.MethodGet, "http://app.test/", nil))
+	for _, target := range []string{
+		"/.env", "/.git/config", "/.git/", "/a/.ssh/id_rsa", "/%2Eenv", "/%2eenv", "/%2Egit/config",
+		"/a/%2essh/id_rsa", "/.ENV", "/.secret", "/a//.env", "/.Well-Known/security.txt",
+		"//.well-known/security.txt", "/.well-known/.env",
+	} {
+		out, handled := serve(target)
+		if !handled || out.Code != http.StatusNotFound || out.Body.String() != missing.Body.String() {
+			t.Errorf("%s: handled=%v code=%d body=%q", target, handled, out.Code, out.Body.String())
+		}
+	}
+	for target, want := range map[string]string{
+		"/.well-known/security.txt":         "Contact: mailto:security@example.com",
+		"/%2Ewell-known/security.txt":       "Contact: mailto:security@example.com",
+		"/.well-known/acme-challenge/token": "token.thumbprint",
+		"/app.js":                           "export{}",
+		"/missing/route":                    "<main>shell</main>",
+	} {
+		out, handled := serve(target)
+		if !handled || out.Code != http.StatusOK || out.Body.String() != want {
+			t.Errorf("%s: handled=%v code=%d body=%q", target, handled, out.Code, out.Body.String())
+		}
+		if got := out.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options=%q", target, got)
+		}
+	}
+	for _, target := range []string{"/.well-known/../.env", "/.well-known/%2E%2E/.env", "/.well-known/%2e/security.txt"} {
+		if out, handled := serve(target); !handled || out.Code != http.StatusBadRequest || strings.Contains(out.Body.String(), "SECRET") {
+			t.Errorf("%s: handled=%v code=%d body=%q", target, handled, out.Code, out.Body.String())
+		}
+	}
+	// proxy_first keeps its existing meaning: the application, not files,
+	// answers its own prefix.
+	if _, handled := serve("/api/.config"); handled {
+		t.Error("proxy_first dot path was answered by files")
+	}
+}

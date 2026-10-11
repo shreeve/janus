@@ -43,7 +43,7 @@ func (h *Handler) serveBrowseAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, segment := range strings.Split(name, "/") {
-		if segment == "" || segment == "." || segment == ".." {
+		if segment == "" || segment[0] == '.' {
 			http.NotFound(w, r)
 			return
 		}
@@ -144,7 +144,13 @@ func (h *Handler) serveBrowseRoots(w http.ResponseWriter, r *http.Request, reque
 	return h.serveBrowseRootsPrecompressed(w, r, requestPath, roots, shell, allowShell, nil)
 }
 
+// serveBrowseRootsPrecompressed reports false for a miss. A dot-segment path
+// is a miss before any root is opened, and is never answered with the shell,
+// so the caller's 404 is indistinguishable from an absent file.
 func (h *Handler) serveBrowseRootsPrecompressed(w http.ResponseWriter, r *http.Request, requestPath string, roots []activeBrowseRoot, shell string, allowShell bool, precompressed []string) bool {
+	if hiddenRequestPath(requestPath) {
+		return false
+	}
 	relative := strings.TrimPrefix(requestPath, "/")
 	if relative == "" {
 		relative = "."
@@ -251,9 +257,7 @@ func (h *Handler) serveBrowseFile(w http.ResponseWriter, r *http.Request, file *
 	}
 	if r.Method == http.MethodHead {
 		file.Close()
-		w.Header().Set("Content-Type", renderer.contentType)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
+		setRenderedHeaders(w.Header(), renderer.contentType)
 		w.WriteHeader(http.StatusOK)
 		return true
 	}
@@ -285,6 +289,9 @@ func (h *Handler) serveBrowseListing(w http.ResponseWriter, r *http.Request, roo
 		baseEscaped += "/"
 	}
 	for _, name := range names {
+		if strings.HasPrefix(name, ".") && (relative != "." || name != wellKnownSegment) {
+			continue
+		}
 		entryRelative := name
 		if relative != "." {
 			entryRelative = relative + "/" + name
@@ -350,6 +357,7 @@ func (h *Handler) serveBrowseListing(w http.ResponseWriter, r *http.Request, roo
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 	w.Header().Set("Content-Length", fmt.Sprint(body.Len()))
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodGet {
@@ -609,9 +617,7 @@ func (h *Handler) serveRenderedFile(w http.ResponseWriter, r *http.Request, rend
 		browseRenderError(w, http.StatusBadGateway)
 	default:
 		counters.renderSuccesses.Add(1)
-		w.Header().Set("Content-Type", renderer.contentType)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
+		setRenderedHeaders(w.Header(), renderer.contentType)
 		w.Header().Set("Content-Length", fmt.Sprint(output.buffer.Len()))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(output.buffer.Bytes())
@@ -632,11 +638,49 @@ func (h *Handler) renderContextFailure(w http.ResponseWriter, r *http.Request, c
 	}
 }
 
+// renderedContentSecurityPolicy sandboxes a rendered document without
+// allow-scripts: HTML a renderer passes through from browsed content cannot
+// run script on the (possibly gated) origin, submit forms, or open popups.
+// allow-same-origin keeps the document's own origin, so its relative images
+// and stylesheets load beneath the same auth gate as the page.
+const renderedContentSecurityPolicy = "sandbox allow-same-origin"
+
+// setRenderedHeaders writes the fixed response policy shared by rendered GET
+// and HEAD.
+func setRenderedHeaders(h http.Header, contentType string) {
+	h.Set("Content-Type", contentType)
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", renderedContentSecurityPolicy)
+	h.Set("X-Frame-Options", "SAMEORIGIN")
+}
+
+// browseRendererEnv names the only Janus process variables a renderer child
+// inherits, each only when set. Everything else Janus holds in its
+// environment (DNS-provider credentials, tokens) stays out of the child.
+var browseRendererEnv = []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "USER"}
+
+func browseRendererInherits(key string) bool {
+	for _, name := range browseRendererEnv {
+		if browseEnvKeyEqual(key, name) {
+			return true
+		}
+	}
+	for _, name := range browseRendererPlatformEnv {
+		if browseEnvKeyEqual(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// browseRendererEnvironment builds a renderer's complete environment: the
+// allowed inherited variables, then Janus's JANUS_BROWSE_* values.
 func browseRendererEnvironment(inherited []string, values map[string]string) []string {
-	out := make([]string, 0, len(inherited)+len(values))
+	out := make([]string, 0, len(browseRendererEnv)+len(browseRendererPlatformEnv)+len(values))
 	for _, item := range inherited {
-		key, _, _ := strings.Cut(item, "=")
-		if strings.HasPrefix(key, "JANUS_BROWSE_") {
+		key, _, ok := strings.Cut(item, "=")
+		if !ok || key == "" || !browseRendererInherits(key) {
 			continue
 		}
 		out = append(out, item)

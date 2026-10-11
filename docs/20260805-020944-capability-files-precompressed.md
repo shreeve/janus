@@ -79,8 +79,9 @@ For each file response Janus:
 6. serves the first regular sidecar that opens and stats successfully, or
    the already-open canonical descriptor when none does.
 
-A sidecar is never consulted until its canonical file exists as a regular
-file. A sidecar in a later root cannot supplement a canonical file from an
+A request path with a dot segment is refused under Capability 6's dotfile
+rule before any canonical or sidecar open. A sidecar is never consulted
+until its canonical file exists as a regular file. A sidecar in a later root cannot supplement a canonical file from an
 earlier root. Missing, non-regular, unreadable, or concurrently removed
 sidecars are representation misses and safely fall back to the canonical
 descriptor. Sidecar failure never causes a 403, 404, or 5xx response.
@@ -134,7 +135,8 @@ selected sidecar's `Content-Length` before non-range service because Go does
 not infer it when `Content-Encoding` is present. For `Range`, Janus follows
 Caddy's current precompressed file-server behavior: the range addresses the
 selected encoded representation bytes, `http.ServeContent` returns the
-corresponding `206`, and it computes the partial length.
+corresponding `206`, and it computes the partial length. Capability 6's
+16-spec range cap applies to every representation.
 
 ## Hard errors
 

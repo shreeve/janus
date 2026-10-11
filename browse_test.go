@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -370,7 +372,7 @@ func TestBrowseListingIndexRawAndCachePolicies(t *testing.T) {
 		t.Fatal("listing not handled")
 	}
 	body := response.Body.String()
-	wants := []string{".dot", "folder/", "a b.md", "a%20b.md?raw", "image.png", "#symlink",
+	wants := []string{"folder/", "a b.md", "a%20b.md?raw", "image.png", "#symlink",
 		"&lt;script&gt;.txt", "%3Cscript%3E.txt"}
 	if invalidUTF8Created {
 		wants = append(wants, "%FF.txt", "�.txt")
@@ -380,7 +382,10 @@ func TestBrowseListingIndexRawAndCachePolicies(t *testing.T) {
 			t.Errorf("listing missing %q:\n%s", want, body)
 		}
 	}
-	if strings.Index(body, "folder/") > strings.Index(body, ".dot") {
+	if strings.Contains(body, ".dot") {
+		t.Errorf("listing shows a dotfile:\n%s", body)
+	}
+	if strings.Index(body, "folder/") > strings.Index(body, "a b.md") {
 		t.Fatalf("directory did not sort before files:\n%s", body)
 	}
 	escaped := httptest.NewRecorder()
@@ -685,18 +690,23 @@ func TestBrowseRendererExecutionEnvironmentAndFailures(t *testing.T) {
 	}
 	renderer := &browseRenderer{
 		extension: ".md", executable: executable,
-		args:        []string{"-test.run=TestBrowseRendererHelper", "--", "{file}"},
+		args:        browseHelperArgs("env", ""),
 		contentType: "text/plain; charset=utf-8", timeout: 2 * time.Second,
 		maxOutput: 1 << 20, concurrency: 1, id: "helper",
 	}
 	h := newBrowseTestHandler(t, map[string]*browseRenderer{".md": renderer})
-	t.Setenv("GO_WANT_BROWSE_HELPER", "env")
+	// Janus's own environment can carry DNS-provider credentials and tokens;
+	// none of it may reach a renderer.
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "renderer-must-not-see-aws")
+	t.Setenv("JANUS_RENDERER_TEST_SECRET", "renderer-must-not-see-token")
+	t.Setenv("JANUS_BROWSE_FILE", "/operator/override")
 	head := httptest.NewRecorder()
 	h.serveBrowseRoots(head, httptest.NewRequest(http.MethodHead, "http://x/note.md", nil), "/note.md",
 		[]activeBrowseRoot{{path: root, cache: filesCacheRevalidate, browse: true}}, "", false)
 	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Length") != "" {
 		t.Fatalf("renderer HEAD: %d %v len=%d", head.Code, head.Header(), head.Body.Len())
 	}
+	assertRenderedPolicy(t, "renderer HEAD", head.Header())
 	if h.app.state.browse.counters.renderStarts.Load() != 0 {
 		t.Fatal("renderer HEAD spawned")
 	}
@@ -719,20 +729,42 @@ func TestBrowseRendererExecutionEnvironmentAndFailures(t *testing.T) {
 	if out.Code != http.StatusOK {
 		t.Fatalf("render: %d %s", out.Code, out.Body.String())
 	}
-	for _, want := range []string{file, "/note.md", "/note.md?q=1&raw", root, "hello", "env"} {
+	assertRenderedPolicy(t, "renderer GET", out.Header())
+	if saturated.Header().Get("Content-Security-Policy") != "" {
+		t.Fatalf("generic error carried the rendered policy: %v", saturated.Header())
+	}
+	inherited := map[string]bool{}
+	for _, line := range strings.Split(out.Body.String(), "\n") {
+		item, ok := strings.CutPrefix(line, "environ=")
+		if !ok {
+			continue
+		}
+		key, _, _ := strings.Cut(item, "=")
+		inherited[key] = true
+		if !browseRendererInherits(key) && !strings.HasPrefix(key, "JANUS_BROWSE_") {
+			t.Errorf("renderer inherited %q", item)
+		}
+	}
+	if os.Getenv("PATH") != "" && !inherited["PATH"] {
+		t.Errorf("renderer did not inherit PATH: %s", out.Body.String())
+	}
+	if strings.Contains(out.Body.String(), "renderer-must-not-see") || strings.Contains(out.Body.String(), "/operator/override") {
+		t.Errorf("renderer saw a secret or an operator JANUS_BROWSE_* value: %s", out.Body.String())
+	}
+	for _, want := range []string{file, "/note.md", "/note.md?q=1&raw", root, "hello", "mode=env"} {
 		if !strings.Contains(out.Body.String(), want) {
 			t.Errorf("renderer output missing %q: %s", want, out.Body.String())
 		}
 	}
 
-	t.Setenv("BROWSE_HELPER_MODE", "pipes")
+	renderer.args = browseHelperArgs("pipes", "")
 	pipes := httptest.NewRecorder()
 	h.serveBrowseRoots(pipes, httptest.NewRequest(http.MethodGet, "http://x/note.md", nil), "/note.md",
 		[]activeBrowseRoot{{path: root, browse: true}}, "", false)
 	if pipes.Code != http.StatusOK || pipes.Body.Len() != 256<<10 {
 		t.Fatalf("renderer pipe drain: %d bytes=%d body=%q", pipes.Code, pipes.Body.Len(), pipes.Body.String())
 	}
-	t.Setenv("BROWSE_HELPER_MODE", "")
+	renderer.args = browseHelperArgs("env", "")
 
 	raw := httptest.NewRecorder()
 	h.serveBrowseRoots(raw, httptest.NewRequest(http.MethodGet, "http://x/note.md?raw", nil), "/note.md",
@@ -775,7 +807,7 @@ func TestBrowseRendererExecutionEnvironmentAndFailures(t *testing.T) {
 	}
 
 	renderer.maxOutput = 1 << 20
-	t.Setenv("BROWSE_HELPER_MODE", "fail")
+	renderer.args = browseHelperArgs("fail", "")
 	failed := httptest.NewRecorder()
 	h.serveBrowseRoots(failed, httptest.NewRequest(http.MethodGet, "http://x/note.md", nil), "/note.md",
 		[]activeBrowseRoot{{path: root, browse: true}}, "", false)
@@ -783,7 +815,7 @@ func TestBrowseRendererExecutionEnvironmentAndFailures(t *testing.T) {
 		t.Fatalf("failure: %d %s", failed.Code, failed.Body.String())
 	}
 
-	t.Setenv("BROWSE_HELPER_MODE", "")
+	renderer.args = browseHelperArgs("env", "")
 	canceledContext, cancel := context.WithCancel(context.Background())
 	cancel()
 	canceledRequest := httptest.NewRequest(http.MethodGet, "http://x/note.md", nil).WithContext(canceledContext)
@@ -797,8 +829,7 @@ func TestBrowseRendererExecutionEnvironmentAndFailures(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		renderer.timeout = 300 * time.Millisecond
 		pidFile := filepath.Join(t.TempDir(), "descendant.pid")
-		t.Setenv("BROWSE_DESCENDANT_PID_FILE", pidFile)
-		t.Setenv("BROWSE_HELPER_MODE", "descendant")
+		renderer.args = browseHelperArgs("descendant", pidFile)
 		descendant := httptest.NewRecorder()
 		h.serveBrowseRoots(descendant, httptest.NewRequest(http.MethodGet, "http://x/note.md", nil), "/note.md",
 			[]activeBrowseRoot{{path: root, browse: true}}, "", false)
@@ -827,7 +858,7 @@ func TestBrowseRendererExecutionEnvironmentAndFailures(t *testing.T) {
 	}
 
 	renderer.timeout = 20 * time.Millisecond
-	t.Setenv("BROWSE_HELPER_MODE", "sleep")
+	renderer.args = browseHelperArgs("sleep", "")
 	timeout := httptest.NewRecorder()
 	h.serveBrowseRoots(timeout, httptest.NewRequest(http.MethodGet, "http://x/note.md", nil), "/note.md",
 		[]activeBrowseRoot{{path: root, browse: true}}, "", false)
@@ -836,28 +867,35 @@ func TestBrowseRendererExecutionEnvironmentAndFailures(t *testing.T) {
 	}
 }
 
+// browseHelperArgs is renderer argv that re-enters this test binary as
+// TestBrowseRendererHelper. The mode and its argument travel in argv because
+// a renderer child inherits none of the test's environment variables.
+func browseHelperArgs(mode, extra string) []string {
+	return []string{"-test.run=^TestBrowseRendererHelper$", "--", "browse-helper", mode, extra, "{file}"}
+}
+
 func TestBrowseRendererHelper(t *testing.T) {
-	if os.Getenv("GO_WANT_BROWSE_HELPER") == "" {
+	marker := slices.Index(os.Args, "browse-helper")
+	if marker < 1 || os.Args[marker-1] != "--" || len(os.Args) < marker+4 {
 		return
 	}
-	if os.Getenv("BROWSE_HELPER_MODE") == "sleep" {
+	mode, extra := os.Args[marker+1], os.Args[marker+2]
+	switch mode {
+	case "sleep":
 		time.Sleep(time.Second)
-	}
-	if os.Getenv("BROWSE_HELPER_MODE") == "fail" {
+	case "fail":
 		_, _ = fmt.Fprint(os.Stderr, "secret stderr")
 		os.Exit(7)
-	}
-	if os.Getenv("BROWSE_HELPER_MODE") == "pipes" {
+	case "pipes":
 		_, _ = os.Stdout.Write(bytes.Repeat([]byte("o"), 256<<10))
 		_, _ = os.Stderr.Write(bytes.Repeat([]byte("e"), 256<<10))
 		os.Exit(0)
-	}
-	if os.Getenv("BROWSE_HELPER_MODE") == "descendant" {
+	case "descendant":
 		child := exec.Command("sleep", "30")
 		if err := child.Start(); err != nil {
 			os.Exit(3)
 		}
-		if err := os.WriteFile(os.Getenv("BROWSE_DESCENDANT_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		if err := os.WriteFile(extra, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
 			os.Exit(4)
 		}
 		time.Sleep(30 * time.Second)
@@ -866,9 +904,14 @@ func TestBrowseRendererHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(2)
 	}
-	fmt.Printf("%s\n%s\n%s\n%s\n%s\n%s", os.Getenv("JANUS_BROWSE_FILE"),
+	environ := os.Environ()
+	sort.Strings(environ)
+	fmt.Printf("%s\n%s\n%s\n%s\n%s\nmode=%s\n", os.Getenv("JANUS_BROWSE_FILE"),
 		os.Getenv("JANUS_BROWSE_URL"), os.Getenv("JANUS_BROWSE_RAW_URL"),
-		os.Getenv("JANUS_BROWSE_ROOT"), data, os.Getenv("GO_WANT_BROWSE_HELPER"))
+		os.Getenv("JANUS_BROWSE_ROOT"), data, mode)
+	for _, item := range environ {
+		fmt.Printf("environ=%s\n", item)
+	}
 	os.Exit(0)
 }
 
@@ -905,12 +948,11 @@ func TestBrowseCountersExact(t *testing.T) {
 	}
 	renderer := &browseRenderer{
 		extension: ".md", executable: executable,
-		args:        []string{"-test.run=TestBrowseRendererHelper", "--", "{file}"},
+		args:        browseHelperArgs("env", ""),
 		contentType: "text/plain", timeout: 5 * time.Second,
 		maxOutput: 1 << 20, concurrency: 1, id: "counter",
 	}
 	h := newBrowseTestHandler(t, map[string]*browseRenderer{".md": renderer})
-	t.Setenv("GO_WANT_BROWSE_HELPER", "counter")
 	roots := []activeBrowseRoot{{path: root, browse: true}}
 
 	h.serveBrowseRoots(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://x/", nil), "/", roots, "", false)
@@ -1224,5 +1266,182 @@ func BenchmarkBrowseThemeProvisioning(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func assertRenderedPolicy(t *testing.T, label string, header http.Header) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"Cache-Control":           "no-store",
+		"X-Content-Type-Options":  "nosniff",
+		"Content-Security-Policy": "sandbox allow-same-origin",
+		"X-Frame-Options":         "SAMEORIGIN",
+	} {
+		if got := header.Get(name); got != want {
+			t.Errorf("%s %s=%q want %q", label, name, got, want)
+		}
+	}
+}
+
+func TestBrowseRendererEnvironmentAllowList(t *testing.T) {
+	inherited := []string{
+		"PATH=/usr/bin:/bin", "HOME=/home/janus", "TMPDIR=/tmp/j", "LANG=en_US.UTF-8",
+		"LC_ALL=C", "LC_CTYPE=UTF-8", "TZ=UTC", "USER=janus",
+		"AWS_ACCESS_KEY_ID=AKIA", "AWS_SECRET_ACCESS_KEY=secret", "JANUS_CONTROL_TOKEN=token",
+		"JANUS_BROWSE_FILE=/operator", "LC_MESSAGES=C", "SHELL=/bin/zsh", "SSH_AUTH_SOCK=/tmp/agent",
+		"=C:=C:\\", "MALFORMED",
+	}
+	got := browseRendererEnvironment(inherited, map[string]string{
+		"JANUS_BROWSE_URL": "/a", "JANUS_BROWSE_FILE": "/root/a",
+	})
+	want := []string{
+		"PATH=/usr/bin:/bin", "HOME=/home/janus", "TMPDIR=/tmp/j", "LANG=en_US.UTF-8",
+		"LC_ALL=C", "LC_CTYPE=UTF-8", "TZ=UTC", "USER=janus",
+		"JANUS_BROWSE_FILE=/root/a", "JANUS_BROWSE_URL=/a",
+	}
+	if runtime.GOOS != "windows" && !slices.Equal(got, want) {
+		t.Fatalf("renderer environment:\n got %q\nwant %q", got, want)
+	}
+	for _, item := range got {
+		if strings.Contains(item, "secret") || strings.Contains(item, "token") ||
+			strings.Contains(item, "AKIA") || item == "JANUS_BROWSE_FILE=/operator" {
+			t.Fatalf("renderer environment leaked %q", item)
+		}
+	}
+}
+
+func TestBrowseListingOmitsDotEntries(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{".git", ".well-known", "sub", "sub/.well-known", "sub/.cache"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{
+		".env": "SECRET=1", ".git/config": "[core]", ".well-known/security.txt": "Contact: x",
+		"visible.txt": "v", "sub/.hidden": "h", "sub/shown.txt": "s", ".htaccess": "deny",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := newBrowseTestHandler(t, nil)
+	roots := []activeBrowseRoot{{path: root, cache: filesCacheRevalidate, browse: true}}
+	list := func(target string) string {
+		t.Helper()
+		out := httptest.NewRecorder()
+		if !h.serveBrowseRoots(out, httptest.NewRequest(http.MethodGet, "http://x"+target, nil), target, roots, "", false) || out.Code != http.StatusOK {
+			t.Fatalf("listing %s: %d", target, out.Code)
+		}
+		if got := out.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+			t.Fatalf("listing X-Frame-Options=%q", got)
+		}
+		return out.Body.String()
+	}
+	top := list("/")
+	for _, want := range []string{"visible.txt", "sub/", ".well-known/"} {
+		if !strings.Contains(top, want) {
+			t.Errorf("top listing missing %q", want)
+		}
+	}
+	for _, hidden := range []string{".env", ".git", ".htaccess"} {
+		if strings.Contains(top, hidden) {
+			t.Errorf("top listing shows %q", hidden)
+		}
+	}
+	nested := list("/sub/")
+	if !strings.Contains(nested, "shown.txt") {
+		t.Error("nested listing missing shown.txt")
+	}
+	for _, hidden := range []string{".hidden", ".well-known", ".cache"} {
+		if strings.Contains(nested, hidden) {
+			t.Errorf("nested listing shows %q", hidden)
+		}
+	}
+	if wellKnown := list("/.well-known/"); !strings.Contains(wellKnown, "security.txt") {
+		t.Errorf(".well-known listing missing security.txt")
+	}
+}
+
+// Dot-segment refusal covers cold roots, hot browsable roots (janus serve's
+// registration), renderers, and the reserved theme-asset prefix. Every
+// refusal is the same 404 a missing file gets.
+func TestBrowseRefusesDotPaths(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{".git", ".well-known", "docs/.private"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{
+		".env": "SECRET=1", ".git/config": "[core]", ".well-known/security.txt": "Contact: x",
+		".notes.md": "# hidden", "docs/.private/plan.md": "# hidden", "docs/readme.md": "# shown",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renderer := &browseRenderer{extension: ".md", contentType: "text/html; charset=utf-8", executable: "/nonexistent", concurrency: 1, id: "md"}
+	h := newBrowseTestHandler(t, map[string]*browseRenderer{".md": renderer})
+	h.coldRoots = []BrowseRoot{{Path: root}}
+
+	cold := func(target string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "http://x"+target, nil)
+		out := httptest.NewRecorder()
+		requestPath, err := validatedRequestPath(req)
+		if err != nil {
+			out.Code = http.StatusBadRequest
+			return out
+		}
+		if err := h.serveColdBrowsePath(out, req, requestPath); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	hot := func(target string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "http://x"+target, nil)
+		req.Header.Set("Accept", "text/html")
+		out := httptest.NewRecorder()
+		rec := AppRecord{Files: &FilesPolicy{Roots: []FilesRoot{{Path: root, Cache: filesCacheRevalidate, Browse: true}}}}
+		if handled, err := h.serveFiles(out, req, rec); err != nil || !handled {
+			t.Fatalf("%s: handled=%v err=%v", target, handled, err)
+		}
+		return out
+	}
+	missing := cold("/absent.txt")
+	for _, target := range []string{
+		"/.env", "/.git/config", "/.git/", "/.git", "/%2Eenv", "/%2egit/config", "/.ENV",
+		"/.notes.md", "/.notes.md?raw", "/docs/.private/plan.md", "/docs/.private/",
+		"/.Well-Known/security.txt", "//.well-known/security.txt", "/.well-known/.hidden",
+	} {
+		for label, serve := range map[string]func(string) *httptest.ResponseRecorder{"cold": cold, "hot": hot} {
+			out := serve(target)
+			if out.Code != http.StatusNotFound || out.Body.String() != missing.Body.String() {
+				t.Errorf("%s %s: %d %q", label, target, out.Code, out.Body.String())
+			}
+		}
+	}
+	for _, target := range []string{"/.well-known/security.txt", "/docs/readme.md?raw"} {
+		for label, serve := range map[string]func(string) *httptest.ResponseRecorder{"cold": cold, "hot": hot} {
+			if out := serve(target); out.Code != http.StatusOK {
+				t.Errorf("%s %s: %d", label, target, out.Code)
+			}
+		}
+	}
+	if h.app.state.browse.counters.renderAttempts.Load() != 0 {
+		t.Fatal("a refused dot path reached a renderer")
+	}
+
+	for _, target := range []string{
+		browseAssetPrefix + h.browseCfg.theme.hash + "/.browse.css",
+		browseAssetPrefix + h.browseCfg.theme.hash + "/x/.y",
+	} {
+		out := httptest.NewRecorder()
+		h.serveBrowseAsset(out, httptest.NewRequest(http.MethodGet, "http://x"+target, nil))
+		if out.Code != http.StatusNotFound {
+			t.Errorf("theme asset %s: %d", target, out.Code)
+		}
 	}
 }
