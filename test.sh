@@ -519,6 +519,7 @@ test "status page + sign-out: re-minted CSRF, revoked server-side" case_auth_sta
 test "CSRF enforced on both POST arms" case_auth_csrf_enforced
 test "spoofed Remote-User dies at the edge" case_auth_spoof_dies
 test "every spelling of a gated path stays gated" case_auth_noncanonical_paths_gated
+test "a segment of dots and whitespace alone is 400" case_auth_ambiguous_segments_refused
 test "auth-off site strips every identity spelling" case_auth_off_site_strips_identity
 test "fixation dead: pre-set cookie never honored, never re-minted" case_auth_fixation_dead
 test "wrong password and unknown user → one generic 401" case_auth_wrong_creds

@@ -967,8 +967,6 @@ func FuzzAuthGateCanonical(f *testing.F) {
 
 // Trailing dots and spaces fold out of a segment, as Windows and IIS fold
 // them, so /admin./secret and /admin%20/secret stay under gate /admin/; a
-// segment of dots and spaces holding .. that folds away (/x/..%20/admin) is
-// also read as .., as a backend that trims before resolving reads it; a
 // gate prefix whose segment ends in a dot is refused, since it could never
 // match.
 func TestAuthGateFoldsTrailingDotsAndSpaces(t *testing.T) {
@@ -976,7 +974,7 @@ func TestAuthGateFoldsTrailingDotsAndSpaces(t *testing.T) {
 	ah := newAuthHarnessGates(t, users, 0, map[string][]string{"/admin/": {"alice"}, "/": {"alice", "bob"}})
 	bob := ah.login(t, "app.test", "bob", "bob-pass")
 	for _, p := range []string{"/admin./secret", "/admin%20/secret", "/ADMIN.%20/x", "/admin.../x", "/admin%2e/x",
-		"/x/..%20/admin/s", "/x/..%2e/admin", "/x/.../admin/s", "/x/..%20.%20/admin/s", "/x/..%2520/admin/s", "/x/%20../admin/s"} {
+		"/admin%09/x", "/admin%c2%a0/x", "/admin.%0b/x"} {
 		r := authReq(http.MethodGet, "app.test", p, nil)
 		r.AddCookie(&http.Cookie{Name: authCookieName, Value: bob})
 		if rr, passed := ah.wall(t, r); passed != nil {
@@ -991,14 +989,59 @@ func TestAuthGateFoldsTrailingDotsAndSpaces(t *testing.T) {
 	if _, err := normalizeGatePrefix("/admin./"); err == nil {
 		t.Error("a gate prefix segment ending in a dot was accepted")
 	}
+	if _, err := normalizeGatePrefix("/admin /"); err == nil {
+		t.Error("a gate prefix holding Unicode whitespace was accepted")
+	}
 	if got := authCanonicalPath("/a/../b/./c./"); got != "/a/../b/./c/" {
 		t.Errorf("dot segments must survive the fold: %q", got)
 	}
 }
 
+// A segment of dots and whitespace alone (other than . and ..) is refused
+// with 400 on a gated site, in the decoded path or its one further
+// decoding: backends read it kept, dropped, or as .., and a path mixing
+// readings (/app/x/.../..%20/..%20/admin/s resolves to /app/admin/s
+// behind a backend that trims spaces but keeps ...) escapes every fixed
+// set of forms. Names that merely hold dots or spaces still pass.
+func TestAuthWallRefusesAmbiguousSegments(t *testing.T) {
+	users := map[string]string{"alice": testCred(t, "alice-pass"), "bob": testCred(t, "bob-pass")}
+	nested := newAuthHarnessGates(t, users, 0, map[string][]string{"/app/admin/": {"alice"}, "/": {"alice", "bob"}})
+	only := newAuthHarnessGates(t, users, 0, map[string][]string{"/app/admin/": {"alice"}})
+	bob := nested.login(t, "app.test", "bob", "bob-pass")
+	ambiguous := []string{
+		"/app/x/.../..%20/..%20/admin/s", "/app/x/%20../..%20/..%20/admin/s",
+		"/x/..%20/admin/s", "/x/..%2e/admin", "/x/.../admin/s", "/x/..%20.%20/admin/s",
+		"/x/..%2520/admin/s", "/x/%20../admin/s", "/x/..%09/admin", "/x/..%0b/admin",
+		"/x/..%c2%a0/admin", "/a/%20/b", "/a/...;p/b", `/a\..%20\b`, "/app/x/.../y",
+	}
+	for _, p := range ambiguous {
+		for _, c := range []struct {
+			ah     *authHarness
+			cookie string
+		}{{nested, bob}, {only, ""}} {
+			r := authReq(http.MethodGet, "app.test", p, nil)
+			if c.cookie != "" {
+				r.AddCookie(&http.Cookie{Name: authCookieName, Value: c.cookie})
+			}
+			rr, passed := c.ah.wall(t, r)
+			if passed != nil || rr.Code != http.StatusBadRequest {
+				t.Errorf("%s (session %t): status %d, passed %t; want 400", p, c.cookie != "", rr.Code, passed != nil)
+			}
+		}
+	}
+	for _, p := range []string{"/report..pdf", "/v1.2./x", "/a.%20b/c", "/app/adminx", "/x/./y", "/app/x/../y", "/x/.hidden"} {
+		r := authReq(http.MethodGet, "app.test", p, nil)
+		r.AddCookie(&http.Cookie{Name: authCookieName, Value: bob})
+		if rr, passed := nested.wall(t, r); passed == nil {
+			t.Errorf("bob was refused %s (status %d)", p, rr.Code)
+		}
+	}
+}
+
 // The account ladder is keyed on the credential, not the whole users
 // table: two sites whose tables differ but hold the same alice share one
-// budget for her.
+// budget for her. A name a table does not hold keeps that table's own
+// row, so burning it on one site says nothing on another.
 func TestAuthAccountLadderFollowsTheCredential(t *testing.T) {
 	alice := testCred(t, "alice-pass")
 	a := newAuthHarnessGates(t, map[string]string{"alice": alice}, 0, map[string][]string{"/": {"alice"}})
@@ -1018,6 +1061,18 @@ func TestAuthAccountLadderFollowsTheCredential(t *testing.T) {
 	}
 	if blocked, _ := a.st.accountCheck(authAccountScope(b.users["bob"]), "bob"); blocked {
 		t.Fatal("another account was held")
+	}
+	for i := 0; i <= authAccountFreeFails; i++ {
+		a.postLoginFrom(t, "a.test", "203.0.113."+strconv.Itoa(i+1)+":1", "", "dave", "wrong")
+	}
+	if blocked, _ := a.st.accountCheck(a.h.authCfg.accountScope("dave"), "dave"); !blocked {
+		t.Fatal("guesses against a name the table does not hold left its ladder open")
+	}
+	// Site b answers dave as it answers any name it does not hold: 401, not
+	// the 429 that would tell a held name (401) from an unheld one.
+	bh := &authHarness{h: &Handler{logger: zap.NewNop(), authCfg: b}, st: a.st}
+	if rr := bh.postLoginFrom(t, "b.test", "203.0.113.200:1", "", "dave", "wrong"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("an unknown name burned on one site answers %d on another: a user-enumeration oracle", rr.Code)
 	}
 }
 

@@ -26,12 +26,14 @@ A hardening round. What an upgrading operator notices first:
 - **Auth:** `Remote-User` and `Rip-Site`, in every spelling, are stripped
   on every site, auth on or off. Gates match every spelling of a path
   (doubled slashes, `;parameters`, dot segments, a second decoding, the
-  escaped path, trailing dots and spaces, a `..%20` read as `..`) and
-  require authorization at each spelling's gate. The client ladders are
+  escaped path, trailing dots and whitespace) and require authorization
+  at each spelling's gate; a path with a segment of dots and whitespace
+  alone (`...`, `..%20`) is 400 on a gated site. The client ladders are
   scoped to the users table and a new per-account ladder to the
-  credential, never the Host; both claim each attempt as they check it.
-  A password change or a new sign-in ends the old session; an audit log
-  records sign-ins, failures, throttles, and revocations.
+  credential (a name the table does not hold, to the table), never the
+  Host; both claim each attempt as they check it. A password
+  change or a new sign-in ends the old session; an audit log records
+  sign-ins, failures, throttles, and revocations.
 - **One socket belongs to one app:** a path another app publishes is 409;
   upstream paths must be absolute and clean.
 - **The TCP control listeners refuse browsers** (any `Origin`, and on
