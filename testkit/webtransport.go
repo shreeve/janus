@@ -117,6 +117,7 @@ func runWT(args []string) {
 		if _, _, err := net.SplitHostPort(dialAddr); err != nil {
 			dialAddr = net.JoinHostPort(dialAddr, "443")
 		}
+		dialAddr = loopbackAddr(dialAddr)
 	}
 	d.DialAddr = func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		return quic.DialAddrEarly(ctx, dialAddr, tlsCfg, cfg)
