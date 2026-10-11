@@ -372,6 +372,28 @@ downloads.example.com {
 	}
 }
 
+# 11) vista — VistA's RPC Broker over HTTPS. Each POST /rpc carries one
+# broker message to the session's own em process (a service manager
+# starts one per connection on the Unix socket) and its reply back; a
+# TCPConnect starts a session and answers with a __Host-ov cookie, which
+# rotates when the user signs on. Not a cascade: routes live on exact
+# hosts. The global gate / covers /rpc, so the route states its stance:
+# VistA's sign-on authenticates its sessions (`auth exempt`), and every
+# other path on this host stays behind the gate. Serve the route on a
+# host that carries nothing untrusted: every app on it shares the origin.
+vista.example.com {
+	import janus_access
+	janus {
+		# The socket path holds at most 103 bytes (macOS's sun_path).
+		vista /rpc unix//run/openvista/rpc.sock {
+			auth exempt
+			# max_sessions 256 · max_unsigned 32 · per_client 64 · per_client_unsigned 8
+			# per_client_exempt 10.20.0.0/24   # terminal servers: many users, one address
+			# signon_timeout 180s · rpc_timeout 10m · queue 8 · max_request 1MiB · max_reply 64MiB
+		}
+	}
+}
+
 # On-demand TLS — the catch-all for names this file does not mention:
 # customer domains that CNAME to this edge. Caddy mints a certificate
 # per SNI at handshake time, gated by the ask in the global block, so

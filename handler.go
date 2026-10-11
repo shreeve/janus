@@ -41,6 +41,9 @@ type Handler struct {
 	// Webtransport lists this exact-host site's relay routes (capability 10).
 	Webtransport []*WebtransportRoute `json:"webtransport,omitempty"`
 
+	// Vista lists this exact-host site's VistA broker routes (capability 11).
+	Vista []*VistaRoute `json:"vista,omitempty"`
+
 	app    *App
 	dp     *dataPlane
 	logger *zap.Logger
@@ -58,6 +61,8 @@ type Handler struct {
 	browseCfg     *BrowseSettings
 	coldRoots     []BrowseRoot
 	coldActive    []activeBrowseRoot
+
+	vistaRoutes []*vistaSiteRoute
 }
 
 // CaddyModule returns the Caddy module information.
@@ -90,6 +95,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		return err
 	}
 	if err := h.provisionBrowse(); err != nil {
+		return err
+	}
+	if err := h.provisionVista(); err != nil {
 		return err
 	}
 	h.logger.Info("janus handler ready",
@@ -217,6 +225,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		_, err := w.Write([]byte("pong\n"))
 		return err
 	}
+	// A vista route is matched on the escaped path byte for byte. Outside
+	// an exact gate it is served here, before the auth wall: VistA's
+	// sign-on authenticates its sessions. Every other request on the site
+	// loses the session cookie both ways, so only this handler reads or
+	// sets it.
+	var vistaRoute *vistaSiteRoute
+	if len(h.vistaRoutes) > 0 && !frontDoor {
+		vistaRoute = h.vistaRouteFor(r.URL.EscapedPath())
+		if vistaRoute != nil && !vistaRoute.limits.gated {
+			return h.serveVista(w, r, vistaRoute)
+		}
+		if vistaRoute == nil {
+			stripVistaCookie(r)
+			w = &vistaRespStrip{ResponseWriter: w}
+		}
+	}
 	host := normalizeHostHeader(r.Host)
 	var rec AppRecord
 	resolved := false
@@ -256,6 +280,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if frontDoor {
 		h.app.mdnsSharedRoutes.ServeHTTP(w, r)
 		return nil
+	}
+	// A vista route under its exact gate, now that the wall has passed it.
+	if vistaRoute != nil {
+		return h.serveVista(w, r, vistaRoute)
 	}
 	// The relay descriptor: a route's path over TCP answers the JSON a page
 	// reads before it dials, keyed on this site's routes and independent of
@@ -395,6 +423,17 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 			}
 			h.Webtransport = append(h.Webtransport, route)
+		case "vista":
+			route, err := parseVistaRoute(d)
+			if err != nil {
+				return err
+			}
+			for _, existing := range h.Vista {
+				if existing.Path == route.Path {
+					return d.Errf("vista: path %s is declared twice in this site", route.Path)
+				}
+			}
+			h.Vista = append(h.Vista, route)
 		case "control":
 			return d.Err("control is process-wide; configure it in the global janus options block")
 		case "mdns":

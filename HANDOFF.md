@@ -59,7 +59,8 @@ drives most decisions; MedLabs is the application behind them.
                     auth*.go, files_*.go, sendfile*.go, browse_*.go, access*.go,
                     exposure.go (wan refusals), tls_permission.go (on-demand TLS gate),
                     control*.go (/1.0 listeners and surfaces),
-                    webtransport*.go (UDP 443 datagram relay, tickets, admission)
+                    webtransport*.go (UDP 443 datagram relay, tickets, admission),
+                    vista*.go (VistA's RPC Broker: sessions, the XWB walker and reply rule)
 *.html              embedded pages: mdns.html (status dashboard), trust.html,
                     trust_safari.html, auth.html — self-contained, no external resources
 cmd/janus/          the binary: main.go (verb table), service_*.go (autostart/start/stop/
@@ -98,6 +99,7 @@ Capabilities, in landing order (the order never changes in docs or
 | 8 | browse | site (cascades) | [capability-browse](docs/20260801-042700-capability-browse.md) |
 | 9 | access log | per-site `log` | [capability-access-log](docs/20260801-081600-capability-access-log.md) |
 | 10 | webtransport | process-wide listener, site routes (no cascade) | [capability-webtransport](docs/20260928-200621-capability-webtransport.md) |
+| 11 | vista | site routes (no cascade) | [capability-vista](docs/20261010-232539-capability-vista.md) |
 
 Exposure modes (`localhost` | `lan` | `wan`) are not a capability;
 they are the binary's job (where the service edge listens, and the pf
@@ -115,7 +117,7 @@ certificate for them, and mdns announces nothing.
   **foreground** shell: its fixture processes die when the parent
   detaches, and this has cost real debugging time. `test.sh` groups run
   ping, control, apps, data, heartbeat, tls, hub, tenant, mdns, auth,
-  files, sendfile, browse, access, webtransport; the cases are the sourced files in
+  files, sendfile, browse, access, webtransport, vista; the cases are the sourced files in
   `tests/acceptance/`.
 - **Before tagging, run `go test -race ./...` locally.** The release
   workflow runs the full check (unit, vet, race on two platforms, then

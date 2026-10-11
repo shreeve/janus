@@ -30,6 +30,7 @@ type janusState struct {
 	browse       *browseSupervisor
 	ctlSockets   *controlSocketPool
 	webtransport *wtRelay
+	vista        *vistaPool
 	logger       *zap.Logger
 }
 
@@ -64,6 +65,7 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 		browse:       newBrowseSupervisor(),
 		ctlSockets:   &controlSocketPool{},
 		webtransport: newWtRelay(logger.Named("webtransport")),
+		vista:        newVistaPool(logger.Named("vista")),
 		logger:       logger,
 	}
 	reg.browse = st.browse
@@ -89,6 +91,7 @@ func newJanusState(logger *zap.Logger, ttl time.Duration) (*janusState, error) {
 // released: the process is done with Janus entirely.
 func (st *janusState) Destruct() error {
 	st.webtransport.closeAll()
+	st.vista.closeAll()
 	st.registry.stopSweeper()
 	st.auth.stop()
 	detached := st.registry.tombstoneAll("generation_stop")

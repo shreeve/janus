@@ -22,6 +22,7 @@ are immutable.
 | [`20260801-042700-capability-browse.md`](20260801-042700-capability-browse.md) | Capability 8: browse (navigable hot and cold roots with themes and bounded renderers) |
 | [`20260801-081600-capability-access-log.md`](20260801-081600-capability-access-log.md) | Capability 9: access log (durable JSON encoder plus bounded app-scoped live NDJSON) |
 | [`20260928-200621-capability-webtransport.md`](20260928-200621-capability-webtransport.md) | Capability 10: webtransport (WebTransport datagram relay on UDP 443 to a config-fixed UDP target, with auth-gate tickets) |
+| [`20261010-232539-capability-vista.md`](20261010-232539-capability-vista.md) | Capability 11: vista (VistA's RPC Broker over HTTPS: one em per session behind `POST /rpc`, sign-on-aware caps, token rotation) |
 | [`20260826-184613-v1.7-hardening.md`](20260826-184613-v1.7-hardening.md) | v1.7 authoritative addendum: throughput, reload lifecycle, security, and release hardening across the nine capabilities |
 | [`20260719-141200-tls-ask.md`](20260719-141200-tls-ask.md) | On-demand TLS gating via `/1.0/tls/ask` |
 | [`20260907-000352-exposure-modes.md`](20260907-000352-exposure-modes.md) | Exposure modes (`localhost` \| `lan` \| `wan`): the front-door contract, what holds it on each platform, the measured connection matrix, and the doors closed on the way |
@@ -39,6 +40,7 @@ are immutable.
 | [`20260801-102358-bench-raw-access-log.txt`](20260801-102358-bench-raw-access-log.txt) | Five-run Capability 9 encoder, subscriber, and honest file/sendfile/gzip/zstd/WebSocket path matrix |
 | [`20260805-022544-files-precompressed-measurement.md`](20260805-022544-files-precompressed-measurement.md) | Capability 6 precompressed-sidecar hit and fallback cost, with five-run raw provenance |
 | [`20260826-184613-bench-raw-v1.7-access.txt`](20260826-184613-bench-raw-v1.7-access.txt) | v1.7 access no-subscriber fast-path benchmark provenance |
+| [`20261011-015419-bench-raw-vista.txt`](20261011-015419-bench-raw-vista.txt) | Five-run Capability 11 round trips (one session and 64), admission, idle-session memory, and a 64 MiB streamed reply |
 
 ## Tutorials (runnable, living)
 

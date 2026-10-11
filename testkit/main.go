@@ -17,6 +17,7 @@
 //	testkit now-ns
 //	testkit udp-echo --listen ADDR
 //	testkit wt --url URL [--ca FILE] [--origin O] [--resolve IP:PORT] [--n N] [--size B]
+//	testkit vistaem --sock S [--log F]
 package main
 
 import (
@@ -63,6 +64,8 @@ func main() {
 		runUDPEcho(args)
 	case "wt":
 		runWT(args)
+	case "vistaem":
+		cmdVistaEm(args)
 	case "now-ns":
 		fmt.Println(time.Now().UnixNano())
 	default:

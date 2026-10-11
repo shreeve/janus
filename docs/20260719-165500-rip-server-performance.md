@@ -690,6 +690,41 @@ and that is the tax's worst case; a slow tenant pays it in dropped
 observations (at-most-once by contract), never in client-visible
 latency or delivery.
 
+### vista: VistA RPC sessions (2026-10-11)
+
+Capability 11's contract measurement
+([capability-vista](20261010-232539-capability-vista.md)). Raw legs:
+[20261011-015419-bench-raw-vista.txt](20261011-015419-bench-raw-vista.txt).
+Rig: `go test -bench Vista`, five runs of 2 s, one process holding the
+edge (`serveVista` on an `httptest` TLS server with HTTP/2), the Go
+client, and the fake em on a Unix socket; Apple M5, under `cpuq`'s 2–6
+core grant beside other sessions' jobs, so absolutes are a loaded laptop's
+and the spread is wide. A real em adds its own RPC time; these measure
+Janus's share and the transport.
+
+| Leg | Median | Range |
+| --- | --- | --- |
+| `XWB IM HERE` round trip, one session | 155 µs (~6.5k/s) | 146–159 µs |
+| the same, 64 sessions in parallel | 44.4 µs/op (~22.5k/s aggregate) | 41.7–45.8 µs |
+| admission to a refusal (no token: 401), never touching em | 109 µs | 59–114 µs |
+| an idle session's heap, Janus and fake em together | 39.7 KB, 2 goroutines | 39.4–41.4 KB |
+| a 64 MiB reply streamed through | 357 MB/s | 353–363 MB/s |
+
+Attribution. An idle session's Janus side is one reader goroutine
+blocked in `Read` on a pooled 32 KiB buffer, the session struct, and its
+map entries; the other goroutine and the rest of the heap are the fake
+em's connection. A streamed reply's Janus side is one pooled 32 KiB read
+at a time: an allocation profile of the 64 MiB leg attributes its
+megabytes to the fake em, which builds the whole reply in memory, and
+the process's 218–346 MiB peak is that buffer and the transport's, not a
+held reply. Before pooling, the reader copied each read (64 MiB of
+short-lived allocation per 64 MiB reply); the pool removed it. An
+earlier draft of the big-reply leg sampled the heap with
+`ReadMemStats` in a tight loop, which stops the world, and measured
+0.41 MB/s; sampling every 10 ms gave the numbers above. One session's
+round trip (~155 µs) is the floor CPRS sees per RPC from the edge; the
+broker's own RPCs take milliseconds, so Janus is not the limit.
+
 ### Next-best lever
 
 The ranked list is closed: #1, #2, #3, and #4 are shipped with

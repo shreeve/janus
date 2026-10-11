@@ -133,6 +133,9 @@ type App struct {
 
 	reconcileMu      sync.Mutex
 	reconcilePending bool
+
+	// vistaKeys are the vista routes (host and path) this generation declares.
+	vistaKeys map[string]bool
 }
 
 // CaddyModule returns the Caddy module information.
@@ -252,6 +255,19 @@ func (a *App) Start() error {
 		a.state.webtransport.retire(a)
 		return err
 	}
+	if err := a.startVista(); err != nil {
+		a.stopAccessStreams()
+		if serr := a.stopControlListeners(); serr != nil {
+			a.logger.Error("janus control unwind", zap.Error(serr))
+		}
+		if serr := a.stopMdns(); serr != nil {
+			a.logger.Error("janus mdns unwind", zap.Error(serr))
+		}
+		a.stopBrowse()
+		a.state.webtransport.retire(a)
+		a.state.vista.retire(a)
+		return err
+	}
 	a.stageReconciliation()
 	if !a.hasActivePredecessor() {
 		a.commitReconciliation()
@@ -300,6 +316,7 @@ func (a *App) Cleanup() error {
 		if !deleted {
 			a.state.mdns.generationRetired(a)
 			a.state.webtransport.retire(a)
+			a.state.vista.retire(a)
 		}
 		stateErr = err
 		a.state = nil
@@ -331,6 +348,9 @@ func (a *App) commitReconciliation() bool {
 	a.reconcileAuth()
 	if a.state != nil && a.state.webtransport != nil {
 		a.state.webtransport.commit(a)
+	}
+	if a.state != nil && a.state.vista != nil {
+		a.state.vista.commit(a, a.vistaKeys)
 	}
 	return true
 }
