@@ -7,7 +7,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -62,11 +61,14 @@ type wtReport struct {
 // runWT dials a relay route, sends N datagrams of SIZE bytes, and waits
 // for each echo before sending the next; the report is JSON on stdout.
 // A non-200 status or any mismatch exits nonzero, so a shell case can
-// gate on it and still read the report.
+// gate on it and still read the report. The relay's certificate is
+// verified against -ca (or -cacert), else SSL_CERT_FILE, else the system
+// roots.
 func runWT(args []string) {
 	fs := flag.NewFlagSet("wt", flag.ExitOnError)
 	rawURL := fs.String("url", "", "https://host/path to dial")
-	ca := fs.String("ca", "", "PEM root to trust (system roots when empty)")
+	ca := fs.String("ca", "", "PEM bundle to trust (else SSL_CERT_FILE, else the system roots)")
+	fs.StringVar(ca, "cacert", "", "the same as -ca")
 	origin := fs.String("origin", "", "Origin header value (none when empty)")
 	resolve := fs.String("resolve", "", "ip:port to dial instead of the URL's host")
 	n := fs.Int("n", 10, "datagrams to send")
@@ -97,19 +99,12 @@ func runWT(args []string) {
 	// The library does not fill the server name from the URL; the SNI the
 	// relay picks its certificate by is the URL's host.
 	tlsConf := &tls.Config{NextProtos: []string{http3.NextProtoH3}, MinVersion: tls.VersionTLS13, ServerName: u.Hostname()}
-	if *ca != "" {
-		pem, err := os.ReadFile(*ca)
-		if err != nil {
-			rep.Error = err.Error()
-			exit()
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			rep.Error = "no certificate in " + *ca
-			exit()
-		}
-		tlsConf.RootCAs = pool
+	roots, err := trustRoots(*ca)
+	if err != nil {
+		rep.Error = "trust: " + err.Error()
+		exit()
 	}
+	tlsConf.RootCAs = roots
 	d := &webtransport.Transport{
 		TLSClientConfig: tlsConf,
 		QUICConfig:      &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true, DisablePathMTUDiscovery: !*pmtud},
