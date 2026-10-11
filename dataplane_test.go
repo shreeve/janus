@@ -1488,3 +1488,319 @@ func TestPublishedCapSurvivesTheControlPlane(t *testing.T) {
 		t.Fatal("a negative concurrency was accepted")
 	}
 }
+
+// --- response-header timeout --------------------------------------------------
+
+// silentUpstream accepts connections, reads the request, and never answers:
+// the worker that would pin a client (and its socket's slot) forever without
+// a response-header bound.
+func silentUpstream(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "janus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "u.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			c.Close()
+		}
+		mu.Unlock()
+	})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+			go io.Copy(io.Discard, c) // read forever, answer never
+		}
+	}()
+	return sock
+}
+
+// TestUpstreamResponseHeaderTimeout504 pins the bound on a worker that
+// accepts and never answers: 504 with no-store, the in-flight charge
+// released (a published concurrency of 1 would otherwise hold the socket at
+// its cap and 503 the whole app), and the socket marked unhealthy.
+func TestUpstreamResponseHeaderTimeout504(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	dp.transport.ResponseHeaderTimeout = 100 * time.Millisecond
+	sock := silentUpstream(t)
+	registerApp(t, reg, "app.test", Upstream{Path: sock, Concurrency: 1})
+
+	for _, method := range []string{"GET", "POST"} {
+		body := ""
+		if method == "POST" {
+			body = "payload"
+		}
+		start := time.Now()
+		rr, err := doServe(dp, method, "app.test", "/", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rr.Code != http.StatusGatewayTimeout {
+			t.Fatalf("%s: want 504, got %d %q", method, rr.Code, rr.Body.String())
+		}
+		if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s: 504 Cache-Control = %q, want no-store", method, got)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("%s: timeout took %v, want ~100ms", method, elapsed)
+		}
+		dp.stateMu.RLock()
+		st := dp.state[sock]
+		dp.stateMu.RUnlock()
+		if st == nil || !st.unhealthyNow() {
+			t.Fatalf("%s: silent worker was not marked unhealthy", method)
+		}
+		if got := st.inflight.Load(); got != 0 {
+			t.Fatalf("%s: in-flight charge leaked: %d", method, got)
+		}
+		st.unhealthyUntil.Store(0) // let the next round select it again
+	}
+}
+
+// TestResponseHeaderTimeoutSparesStreamsAfterHeaders pins that the bound
+// covers only the wait for headers: a response whose body trickles out for
+// longer than the timeout completes, and the socket stays healthy.
+func TestResponseHeaderTimeoutSparesStreamsAfterHeaders(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	dp.transport.ResponseHeaderTimeout = 100 * time.Millisecond
+	sock := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		for i := range 3 {
+			time.Sleep(100 * time.Millisecond)
+			io.WriteString(w, "chunk"+string(rune('0'+i))+";")
+			w.(http.Flusher).Flush()
+		}
+	}))
+	registerApp(t, reg, "app.test", Upstream{Path: sock})
+
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK || rr.Body.String() != "chunk0;chunk1;chunk2;" {
+		t.Fatalf("want the whole slow stream, got %d %q", rr.Code, rr.Body.String())
+	}
+	dp.stateMu.RLock()
+	st := dp.state[sock]
+	dp.stateMu.RUnlock()
+	if st == nil || st.unhealthyNow() {
+		t.Fatal("a slow body after prompt headers marked the worker unhealthy")
+	}
+}
+
+// TestResponseHeaderTimeoutSparesTheRing pins that the doorbell keeps its
+// own bound: a ring answered after the worker header timeout still wakes the
+// held request.
+func TestResponseHeaderTimeoutSparesTheRing(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	dp.transport.ResponseHeaderTimeout = 50 * time.Millisecond
+	worker := startUnixHTTP(t, echoUpstream("fresh", nil))
+	var appID string
+	bell := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		if _, err := reg.setUpstreams(appID, []Upstream{{Path: worker}}); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	appID = registerApp(t, reg, "app.test", Upstream{Path: bell, Doorbell: true})
+
+	rr, err := doServe(dp, "GET", "app.test", "/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK || rr.Body.String() != "upstream:fresh" {
+		t.Fatalf("want 200 upstream:fresh after a slow ring, got %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+// TestResponseHeaderTimeoutOrdering pins the relation between the bounds:
+// the worker header wait outlasts the ring hold and the hub bridge POST
+// deadline, so neither of those ever meets it, and the production value is
+// the documented 120s.
+func TestResponseHeaderTimeoutOrdering(t *testing.T) {
+	dp, _ := newTestDataPlane(t)
+	if got := dp.transport.ResponseHeaderTimeout; got != 120*time.Second {
+		t.Fatalf("ResponseHeaderTimeout = %v, want 120s", got)
+	}
+	if upstreamResponseHeaderTimeout <= hubBridgeTimeout || upstreamResponseHeaderTimeout <= defaultRingTimeout {
+		t.Fatalf("header timeout %v must exceed the bridge (%v) and ring (%v) bounds",
+			upstreamResponseHeaderTimeout, hubBridgeTimeout, defaultRingTimeout)
+	}
+}
+
+// --- Janus-generated responses are never cacheable -----------------------------
+
+func TestJanusGeneratedResponsesAreNoStore(t *testing.T) {
+	dp, reg := newTestDataPlane(t)
+	noStore := func(what string, rr *httptest.ResponseRecorder) {
+		t.Helper()
+		if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s Cache-Control = %q, want no-store", what, got)
+		}
+	}
+
+	// Unknown host: a 404 that must not outlive an empty registry.
+	rr, err := doServe(dp, "GET", "nope.test", "/", "")
+	var he caddyhttp.HandlerError
+	if !errors.As(err, &he) || he.StatusCode != http.StatusNotFound {
+		t.Fatalf("want HandlerError 404, got %v", err)
+	}
+	noStore("unknown-host 404", rr)
+
+	// Empty upstreams (down on purpose).
+	registerApp(t, reg, "empty.test")
+	rr, err = doServe(dp, "GET", "empty.test", "/", "")
+	if err != nil || rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("empty: want 503, got %d %v", rr.Code, err)
+	}
+	noStore("empty-upstreams 503", rr)
+
+	// All upstreams unhealthy.
+	registerApp(t, reg, "dead.test", Upstream{Path: filepath.Join(t.TempDir(), "gone.sock")})
+	rr, err = doServe(dp, "GET", "dead.test", "/", "")
+	if err != nil || rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("dead: want 503, got %d %v", rr.Code, err)
+	}
+	noStore("all-unhealthy 503", rr)
+
+	// Ring failure (a doorbell nobody listens on).
+	dp.maxRings = 1
+	registerApp(t, reg, "bell.test", Upstream{Path: filepath.Join(t.TempDir(), "bell.sock"), Doorbell: true})
+	rr, err = doServe(dp, "GET", "bell.test", "/", "")
+	if err != nil || rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ring: want 503, got %d %v", rr.Code, err)
+	}
+	noStore("ring-failure 503", rr)
+
+	// Capacity: the one worker sits at its published cap past the busy wait.
+	dp.busyWait = 50 * time.Millisecond
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	sock := startUnixHTTP(t, slotUpstream("w", release, entered, nil))
+	registerApp(t, reg, "busy.test", Upstream{Path: sock, Concurrency: 1})
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		_, _ = doServe(dp, "GET", "busy.test", "/", "")
+	}()
+	<-entered
+	rr, err = doServe(dp, "GET", "busy.test", "/", "")
+	close(release)
+	<-first
+	if err != nil || rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("busy: want 503, got %d %v", rr.Code, err)
+	}
+	noStore("capacity 503", rr)
+}
+
+// --- X-Forwarded-* and trusted_proxies -----------------------------------------
+
+// forwardedFor runs one request through the data plane with the given peer,
+// trust verdict (nil: no Caddy vars at all), and inbound headers, and
+// returns the headers the worker saw.
+func forwardedFor(t *testing.T, trusted *bool, remote string, overTLS bool, inbound http.Header) http.Header {
+	t.Helper()
+	dp, reg := newTestDataPlane(t)
+	seen := make(chan http.Header, 1)
+	up := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	registerApp(t, reg, "app.test", Upstream{Path: up})
+
+	target := "http://app.test/"
+	if overTLS {
+		target = "https://app.test/"
+	}
+	r := httptest.NewRequest("GET", target, nil)
+	for k, vs := range inbound {
+		r.Header[k] = vs
+	}
+	r.RemoteAddr = remote
+	if trusted != nil {
+		r = r.WithContext(context.WithValue(r.Context(), caddyhttp.VarsCtxKey, map[string]any{
+			caddyhttp.TrustedProxyVarKey: *trusted,
+		}))
+	}
+	rr := httptest.NewRecorder()
+	if err := dp.serve(rr, r); err != nil {
+		t.Fatal(err)
+	}
+	return <-seen
+}
+
+// TestTrustedProxyXForwardedIsAppended pins Caddy's reverse_proxy rule for a
+// peer inside the server's trusted_proxies: the inbound chain is kept and
+// the peer appended; inbound Proto and Host are kept; X-Real-IP never is.
+func TestTrustedProxyXForwardedIsAppended(t *testing.T) {
+	trusted := true
+	h := forwardedFor(t, &trusted, "10.0.0.2:4444", false, http.Header{
+		"X-Forwarded-For":   {"198.51.100.9", "192.0.2.7"},
+		"X-Forwarded-Proto": {"https"},
+		"X-Forwarded-Host":  {"shop.example.com"},
+		"X-Real-Ip":         {"198.51.100.9"},
+	})
+	if got := h.Get("X-Forwarded-For"); got != "198.51.100.9, 192.0.2.7, 10.0.0.2" {
+		t.Fatalf("trusted peer: X-Forwarded-For = %q, want the chain plus the peer", got)
+	}
+	if got := h.Get("X-Forwarded-Proto"); got != "https" {
+		t.Fatalf("trusted peer: X-Forwarded-Proto = %q, want the inbound https", got)
+	}
+	if got := h.Get("X-Forwarded-Host"); got != "shop.example.com" {
+		t.Fatalf("trusted peer: X-Forwarded-Host = %q, want the inbound host", got)
+	}
+	if got := h.Values("X-Real-Ip"); len(got) != 0 {
+		t.Fatalf("X-Real-IP survived a trusted hop: %q", got)
+	}
+
+	// A trusted peer that sent nothing gets Janus's own hop.
+	h = forwardedFor(t, &trusted, "10.0.0.2:4444", true, nil)
+	if h.Get("X-Forwarded-For") != "10.0.0.2" || h.Get("X-Forwarded-Proto") != "https" || h.Get("X-Forwarded-Host") != "app.test" {
+		t.Fatalf("trusted peer without inbound headers: %v", h)
+	}
+}
+
+// TestUntrustedPeerXForwardedIsReplaced pins the default: without a trusted
+// verdict (explicitly untrusted, or no Caddy vars at all) every inbound
+// X-Forwarded-* claim and X-Real-IP is discarded.
+func TestUntrustedPeerXForwardedIsReplaced(t *testing.T) {
+	untrusted := false
+	for name, trust := range map[string]*bool{"untrusted": &untrusted, "no-caddy-vars": nil} {
+		h := forwardedFor(t, trust, "[2001:db8::5%en0]:4444", false, http.Header{
+			"X-Forwarded-For":   {"198.51.100.9"},
+			"X-Forwarded-Proto": {"https"},
+			"X-Forwarded-Host":  {"evil.example"},
+			"X-Real-Ip":         {"198.51.100.9"},
+		})
+		if got := h.Get("X-Forwarded-For"); got != "2001:db8::5" {
+			t.Fatalf("%s: X-Forwarded-For = %q, want the peer alone", name, got)
+		}
+		if got := h.Get("X-Forwarded-Proto"); got != "http" {
+			t.Fatalf("%s: X-Forwarded-Proto = %q, want our own hop's http", name, got)
+		}
+		if got := h.Get("X-Forwarded-Host"); got != "app.test" {
+			t.Fatalf("%s: X-Forwarded-Host = %q, want the request host", name, got)
+		}
+		if got := h.Values("X-Real-Ip"); len(got) != 0 {
+			t.Fatalf("%s: client X-Real-IP survived: %q", name, got)
+		}
+	}
+}

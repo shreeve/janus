@@ -236,12 +236,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 				facts.setClass("auth")
 			} else {
 				facts.clearOwner()
-				return caddyhttp.Error(http.StatusNotFound,
+				return unknownHostError(w,
 					fmt.Errorf("janus: unknown host %q", host))
 			}
 		} else if requireHotClaim {
 			facts.clearOwner()
-			return caddyhttp.Error(http.StatusNotFound, nil)
+			return unknownHostError(w, nil)
 		}
 		rr, handled, err := h.serveAuthWall(w, r)
 		if handled || err != nil {
@@ -280,14 +280,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return h.serveColdBrowsePath(w, r, requestPath)
 	}
 	if h.dp == nil {
-		return caddyhttp.Error(http.StatusNotFound, nil)
+		return unknownHostError(w, nil)
 	}
 	if !resolved {
 		rec, resolved = h.dp.registry.resolveRequestHost(r.Host)
 	}
 	if !resolved {
 		facts.clearOwner()
-		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
+		return unknownHostError(w, fmt.Errorf("janus: unknown host %q", host))
 	}
 	facts.setOwner(rec)
 	if rec.siteValue != "" {
