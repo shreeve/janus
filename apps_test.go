@@ -230,6 +230,14 @@ func TestValidateUpstreamsDoorbellSoleEntry(t *testing.T) {
 		{[]Upstream{{Path: "/run/bell.sock", Doorbell: true, Concurrency: 1}}, false},                       // cap on a doorbell
 		{[]Upstream{{Path: ""}}, false},                                                                     // empty path
 		{[]Upstream{{Path: "/run/a.sock"}, {Path: "/run/a.sock"}}, false},                                   // duplicate path
+		{[]Upstream{{Path: "run/a.sock"}}, false},                                                           // relative
+		{[]Upstream{{Path: "./a.sock"}}, false},                                                             // relative
+		{[]Upstream{{Path: "@abstract"}}, false},                                                            // not a filesystem path
+		{[]Upstream{{Path: "/run//a.sock"}}, false},                                                         // unclean
+		{[]Upstream{{Path: "/run/x/../a.sock"}}, false},                                                     // unclean
+		{[]Upstream{{Path: "/run/./a.sock"}}, false},                                                        // unclean
+		{[]Upstream{{Path: "/run/a.sock/"}}, false},                                                         // unclean
+		{[]Upstream{{Path: "/run/bell.sock/.", Doorbell: true}}, false},                                     // unclean doorbell
 	}
 	for i, tt := range cases {
 		err := validateUpstreams(tt.ups)

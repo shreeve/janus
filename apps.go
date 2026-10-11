@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -269,6 +270,13 @@ func validateUpstreams(ups []Upstream) error {
 	for _, u := range ups {
 		if u.Path == "" {
 			return errBadRequest("upstream path is required")
+		}
+		// One spelling per socket: per-socket health and in-flight state
+		// is keyed by path, so a relative or unclean alias of a published
+		// socket would split that state (and a relative path would resolve
+		// against whatever directory Janus runs in).
+		if !filepath.IsAbs(u.Path) || filepath.Clean(u.Path) != u.Path {
+			return errBadRequest("upstream path %q must be an absolute, clean unix socket path", u.Path)
 		}
 		if seen[u.Path] {
 			return errBadRequest("duplicate upstream path %q", u.Path)
