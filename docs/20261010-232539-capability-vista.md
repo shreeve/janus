@@ -167,7 +167,10 @@ nothing is streamed to the backend.
   the stream stays aligned; `rpc_timeout` and `max_reply` still bound it,
   and sign-on detection still runs on it.
 - **The response** goes out as the reply is read: headers with the first
-  reply byte, then the body, flushed per read. Each write to the client
+  reply byte, then the body, flushed per read. For `XUS AV CODE` and `XUS
+  CVC` alone, the headers wait until the reply's first data line is
+  judged (Sign-on), at most the two short strings and 64 bytes of data,
+  since a rotated token must ride in those headers. Each write to the client
   has a 30 s deadline; a client that stops reading has its response
   aborted and the reply drains.
 
