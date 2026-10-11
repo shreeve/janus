@@ -12,10 +12,15 @@ import (
 	"go.uber.org/zap"
 )
 
+// wtProtocol reports whether an extended CONNECT names WebTransport:
+// `webtransport-h3` (draft-ietf-webtrans-http3-15 and later) or the
+// earlier drafts' `webtransport`, which browsers still send.
+func wtProtocol(p string) bool { return p == "webtransport-h3" || p == "webtransport" }
+
 // serveHTTP is the HTTP/3 handler for one socket.
 func (r *wtRelay) serveHTTP(sock *wtSocket, w http.ResponseWriter, req *http.Request) {
 	table := r.live.Load()
-	if req.Method != http.MethodConnect || req.Proto != "webtransport" {
+	if req.Method != http.MethodConnect || !wtProtocol(req.Proto) {
 		r.refusedMethod.Add(1)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

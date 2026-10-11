@@ -32,10 +32,11 @@ The first user is a remote-desktop host that speaks its own protocol on
   non-browser client sets any Origin it likes.
 - Exposure: the relay's UDP sockets sit inside the exposure contract on the
   same terms as the TCP front door (below).
-- Dependency: `github.com/quic-go/webtransport-go` v0.10.0, whose `go.mod`
-  requires quic-go v0.59.0; minimal version selection keeps Caddy 2.11.4's
-  v0.59.1. Later webtransport-go releases require quic-go v0.60 and up and
-  wait for a Caddy that ships one. It brings `dunglas/httpsfv` with it.
+- Dependency: `github.com/quic-go/webtransport-go` v0.13.0, whose `go.mod`
+  requires quic-go v0.62.0; minimal version selection keeps Caddy 2.11.7's
+  v0.63.0, so the relay and Caddy's own HTTP/3 listener share one quic-go.
+  It brings `dunglas/httpsfv` with it. The module builds with
+  `toolchain go1.27.2`.
 
 ## The relay model
 
@@ -300,7 +301,7 @@ match wins:
 
 | # | Condition | Answer |
 | --- | --- | --- |
-| 1 | Method is not `CONNECT` with `:protocol webtransport` | 405 (a GET over HTTP/3 is not the descriptor; that is served over TCP) |
+| 1 | Method is not `CONNECT` with `:protocol webtransport-h3` (or the earlier drafts' `webtransport`) | 405 (a GET over HTTP/3 is not the descriptor; that is served over TCP) |
 | 2 | Host is not a site with routes | 404, logged with the host |
 | 3 | The TLS server name the certificate was chosen for differs from Host | 421, logged (Caddy sites do not enforce this; a non-browser client can front one name with another's certificate) |
 | 4 | `wan` mode and Host is a local family name | 421 |
@@ -582,7 +583,7 @@ loopback:
   on port 80, judges by port only on darwin, and still rejects UDP
   elsewhere on the front door; `PfAnchor` passes UDP on 443 and not on 80;
   the Windows rules are two; the `https_port` and anchor-mismatch refusals.
-- Relay, with `webtransport.Dialer` (whose `Dial` returns the HTTP
+- Relay, with `webtransport.Transport` (whose `Dial` returns the HTTP
   response, so statuses and `Retry-After` are assertable) and a UDP echo
   fixture on `127.0.0.1:0`, the server's `quic.Config` with path MTU
   discovery disabled so the first-flight budget is what is measured:

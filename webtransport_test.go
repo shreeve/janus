@@ -149,7 +149,7 @@ func (f *wtFixture) route() *wtRoute { return f.table.routes[wtRouteKey(wtTestHo
 // budget.
 func (f *wtFixture) dial(t *testing.T, path string, hdr http.Header) (*http.Response, *webtransport.Session, error) {
 	t.Helper()
-	d := &webtransport.Dialer{
+	d := &webtransport.Transport{
 		TLSClientConfig: &tls.Config{RootCAs: f.pool, ServerName: wtTestHost, NextProtos: []string{http3.NextProtoH3}},
 		QUICConfig:      &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true, DisablePathMTUDiscovery: true},
 		DialAddr: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
@@ -905,4 +905,12 @@ func TestWebtransportTargetChangeClosesSession(t *testing.T) {
 	}
 	f.relay.commit(gen2)
 	wtWaitFor(t, "session closed on target change", func() bool { return sess.Context().Err() != nil })
+}
+
+func TestWebtransportProtocolNames(t *testing.T) {
+	for p, want := range map[string]bool{"webtransport-h3": true, "webtransport": true, "": false, "websocket": false, "WEBTRANSPORT": false} {
+		if got := wtProtocol(p); got != want {
+			t.Errorf("wtProtocol(%q) = %v, want %v", p, got, want)
+		}
+	}
 }

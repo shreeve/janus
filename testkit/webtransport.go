@@ -110,7 +110,7 @@ func runWT(args []string) {
 		}
 		tlsConf.RootCAs = pool
 	}
-	d := &webtransport.Dialer{
+	d := &webtransport.Transport{
 		TLSClientConfig: tlsConf,
 		QUICConfig:      &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true, DisablePathMTUDiscovery: !*pmtud},
 	}
