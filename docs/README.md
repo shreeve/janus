@@ -27,6 +27,20 @@ are immutable.
 | [`20260907-000352-exposure-modes.md`](20260907-000352-exposure-modes.md) | Exposure modes (`localhost` \| `lan` \| `wan`): the front-door contract, what holds it on each platform, the measured connection matrix, and the doors closed on the way |
 | [`20260920-001500-macos-app-bundle.md`](20260920-001500-macos-app-bundle.md) | Janus as `Janus.app` on macOS: the bundle, its identity, where it installs, the command symlink, and how the service item points at it |
 
+## Drafts (awaiting owner review)
+
+Proposed contracts, each with its own adversarial review and the
+decisions it needs. None is implemented; the contracts above stay
+authoritative until the owner rules and a draft moves into that table.
+
+| Doc | Amends | Role |
+| --- | --- | --- |
+| [`20261010-210000-files-sendfile-confine.md`](20261010-210000-files-sendfile-confine.md) | files, sendfile | `confine`: a process-wide cold allowlist of directory trees for hot file roots and `X-Sendfile` targets, enforced through `os.Root`, with Caddy's storage and Janus's own state always denied |
+| [`20261010-210100-metrics-and-alerting.md`](20261010-210100-metrics-and-alerting.md) | control (new read-only surface) | Prometheus exposition through Caddy's registry and `GET /1.0/metrics`, bounded labels, a start-refusal record, and `janus status --check` for an edge that is not running |
+| [`20261010-210200-trust-bootstrap-hardening.md`](20261010-210200-trust-bootstrap-hardening.md) | mdns (`/trust`) | A Janus-generated name-constrained local root handed to Caddy's pki app, with an out-of-band fingerprint compare as the bootstrap step |
+| [`20261010-210300-auth-session-lifetime.md`](20261010-210300-auth-session-lifetime.md) | auth | Absolute session `lifetime`, suspend-proof session clocks, per-user revocation, and closing the connections an ended session authorized |
+| [`20261010-210400-macos-pf-verifier.md`](20261010-210400-macos-pf-verifier.md) | exposure modes | A root-owned pf verifier that checks, repairs within a budget, and publishes a verdict the macOS edge must see to keep serving |
+
 ## Measurements (claims and their evidence)
 
 | Doc | Role |
