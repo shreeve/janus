@@ -2,8 +2,10 @@ package janus
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 )
@@ -175,6 +177,22 @@ func (c *hubConn) enqueueAndClose(data []byte, code int, reason string) bool {
 	return true
 }
 
+// hubCloseReason fits a reason into a Close frame: valid UTF-8 (RFC 6455
+// requires it, and a peer fails the connection on an invalid reason) and
+// at most hubCloseReasonMax bytes, cut on a rune boundary so the cut never
+// splits a multi-byte character.
+func hubCloseReason(reason string) string {
+	reason = strings.ToValidUTF8(reason, "")
+	if len(reason) <= hubCloseReasonMax {
+		return reason
+	}
+	cut := hubCloseReasonMax
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut]
+}
+
 // closing reports whether the connection accepts no further outbound
 // frames: a close began, a slow-consumer overflow tripped, or a kick's
 // final frame is queued. A closing connection executes no client frame.
@@ -305,9 +323,7 @@ func (c *hubConn) attachBridge(bridge *hubBridge) bool {
 // the socket to us or observes the close and keeps ownership.
 func (c *hubConn) closeWith(code int, reason string) {
 	c.closeOnce.Do(func() {
-		if len(reason) > hubCloseReasonMax {
-			reason = reason[:hubCloseReasonMax]
-		}
+		reason = hubCloseReason(reason)
 		c.qmu.Lock()
 		c.qclosed = true
 		c.queue = nil

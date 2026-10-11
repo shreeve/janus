@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -577,6 +578,36 @@ func TestHubTrustedKick(t *testing.T) {
 		defer hub.mu.Unlock()
 		return len(hub.conns) == 0 && len(hub.channels) == 0
 	})
+}
+
+func TestHubCloseReasonCutsOnRuneBoundary(t *testing.T) {
+	long := strings.Repeat("é", 62) // 124 bytes; byte 123 is a continuation byte
+	for in, want := range map[string]string{
+		"":                       "",
+		"slow consumer":          "slow consumer",
+		strings.Repeat("a", 200): strings.Repeat("a", hubCloseReasonMax),
+		long:                     strings.Repeat("é", 61),
+		"bad\xffbyte":            "badbyte",
+	} {
+		got := hubCloseReason(in)
+		if got != want || !utf8.ValidString(got) || len(got) > hubCloseReasonMax {
+			t.Errorf("hubCloseReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestHubKickWithMultibyteReasonClosesCleanly drives a 124-byte kick reason
+// whose 123-byte cut would split a rune: the peer must see a well-formed
+// Close frame carrying the reason cut on a rune boundary.
+func TestHubKickWithMultibyteReasonClosesCleanly(t *testing.T) {
+	hub := newTestAppHub()
+	a, aws := dialHubConn(t, hub, hubDefaultMaxChannels)
+	reason := strings.Repeat("é", 62)
+	mustExec(t, hub, hubPlanePublish, nil, fmt.Sprintf(`{"@":[%q],"*":%q}`, a.id, reason))
+	if got := string(readWS(t, aws)); got != fmt.Sprintf(`{"*":%q}`, reason) {
+		t.Fatalf("kick frame: %s", got)
+	}
+	expectWSClose(t, aws, hubCloseNormal, strings.Repeat("é", 61))
 }
 
 // TestHubClosedConnExecutesNothing pins that a frame the reader still holds
