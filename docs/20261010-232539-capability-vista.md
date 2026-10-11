@@ -1,4 +1,4 @@
-# Capability 11: rpc
+# Capability 11: vista
 
 Status: **Draft — awaiting owner review.** Built to OpenVista's
 [RPC-HTTPS contract](../../openvista/docs/RPC-HTTPS.md) (§1 client and
@@ -6,7 +6,7 @@ Janus, §2 Janus and em, §3 the reply rule), with the limits Em and the
 owner settled on 2026-10-10, Em's review against the M side, and an
 adversarial review (below, with what it changed).
 
-`rpc` holds one stream per client session to a Unix socket that a service
+`vista` holds one stream per client session to a Unix socket that a service
 manager answers with one process per connection. Each HTTPS request
 carries one message to that stream, and its one reply back. The client
 speaks plain HTTPS (`POST`, HTTP/1.1 or 2); the backend speaks a strictly
@@ -14,10 +14,10 @@ request-and-reply byte protocol that keeps per-connection state. Janus
 reads a request only to check that it is one well-formed message and a
 reply only to find its end, plus the one sign-on fact named below.
 
-The first and only protocol is `xwb`, VistA's RPC Broker: OpenVista's
-clients (CPRS through its workstation relay, and Rip's `xwb` package in a
-browser) reach VistA on em, each session one em process running
-`XWBP^%ZISTCPS`.
+The protocol is XWB, VistA's RPC Broker; the capability is named for
+VistA because nothing else speaks it. OpenVista's clients (CPRS through
+its workstation relay, and Rip's `rip/vista` package in a browser) reach
+VistA on em, each session one em process running `XWBP^%ZISTCPS`.
 
 ```
  client ── HTTPS POST /rpc ──▶ janus ── Unix socket, one stream per session ──▶ em: XWBP^%ZISTCPS
@@ -28,7 +28,7 @@ browser) reach VistA on em, each session one em process running
 
 - Capability order: **11**, after webtransport.
 - Surface: routes in exact-host site blocks; no global block.
-- Cascade: **no**. A route belongs to the site that declares it; `rpc` in
+- Cascade: **no**. A route belongs to the site that declares it; `vista` in
   the global `janus` block is a parse error.
 - Default: **off**. Nothing exists until a site declares a route.
 - Exposure: no new listener. Routes are served by the site's HTTPS servers
@@ -43,10 +43,10 @@ browser) reach VistA on em, each session one em process running
   backend processes; and hands the backend the client's true address in
   the PROXY line. The target socket is trusted as a registered upstream
   is; its mode admits only Janus's user.
-- **Every app served on an rpc host shares its origin** and can drive the
+- **Every app served on a vista host shares its origin** and can drive the
   sessions of a browser that holds the cookie (a page's script can send
   `X-OV: 1` to its own origin). Serve a route on a host that carries only
-  the rpc route and the web client that uses it, and nothing untrusted.
+  the vista route and the web client that uses it, and nothing untrusted.
 - **TLS ends at Janus.** A request that arrives without TLS (an HTTP site,
   or an L7 balancer that terminated TLS in front) is refused. A balancer
   in front must pass TCP through (L4, optionally with the PROXY protocol
@@ -66,8 +66,7 @@ browser) reach VistA on em, each session one em process running
 ```caddyfile
 vista.example.org {
 	janus {
-		rpc /rpc unix//run/openvista/xwb.sock {
-			protocol xwb               # the framing rule; the only legal value, and the default
+		vista /rpc unix//run/openvista/xwb.sock {
 			max_sessions 256           # sessions on this route, default 256, range 1–65535
 			max_unsigned 32            # sessions not yet signed on, default 32, range 1–max_sessions
 			per_client 64              # sessions from one client key, default 64, range 1–max_sessions
@@ -85,7 +84,8 @@ vista.example.org {
 }
 ```
 
-`rpc <path> <target> [{ … }]` declares one route. The path is absolute,
+`vista <path> <target> [{ … }]` declares one route. The path is the
+endpoint clients post to (`/rpc` in RPC-HTTPS); it is absolute,
 exact, unique within the site, and canonical (no empty, `.`, or `..`
 segment, no trailing `/`, no percent escape). The target is a Caddy
 network address with network `unix` (`unix//run/openvista/xwb.sock`), an
@@ -109,7 +109,7 @@ gates). It is legal only when such a gate exists.
 ## Requests and responses
 
 **`POST <path>`**, `Content-Type: application/x-xwb`. The body is exactly
-one `xwb` message (RPC-HTTPS §3). The response, `200` with
+one XWB message (RPC-HTTPS §3). The response, `200` with
 `Content-Type: application/x-xwb` and `Cache-Control: no-store`, is the
 backend's reply, byte for byte. A request body is read whole (within
 `max_request`, and within 30 s) and walked before it joins a queue;
@@ -138,8 +138,8 @@ nothing is streamed to the backend.
   Path=/; Max-Age=0`.
 - **On the rest of the site**, `__Host-ov` is stripped from every request
   forwarded anywhere else (an upstream, the hub bridge, files), and from
-  every `Set-Cookie` in every non-rpc response, as the auth wall does for
-  its own cookie. Only the rpc handler ever sets it.
+  every `Set-Cookie` in every non-vista response, as the auth wall does for
+  its own cookie. Only the vista handler ever sets it.
 
 ### Sessions
 
@@ -171,7 +171,7 @@ nothing is streamed to the backend.
   has a 30 s deadline; a client that stops reading has its response
   aborted and the reply drains.
 
-### Reading a reply (`protocol xwb`, RPC-HTTPS §3)
+### Reading a reply (RPC-HTTPS §3)
 
 A short string, a short string, then data to `\x04`, then one more `\x04`
 when the data's first byte is `\x18`. Janus reads by this rule and never
@@ -204,7 +204,7 @@ then. An ended or rotated token is a tombstone for 10 minutes (at most
 `max_sessions` × 4 per route, oldest dropped first), so its next request
 gets `401` with `OV-Session-Ended` naming the cause.
 
-## Sign-on (`protocol xwb`)
+## Sign-on
 
 The one fact Janus reads from the protocol. A session is **signed on** by
 either:
@@ -232,7 +232,7 @@ meets no limit stock VistA lacks) is ended and its stream closed, so em
 exits. With `max_unsigned` and `per_client_unsigned` this bounds what
 clients that never sign on can hold.
 
-## The stream (`protocol xwb`)
+## The stream
 
 On a new session Janus dials the target (3 s limit) and writes, first and
 once, a PROXY protocol version 1 line:
@@ -323,20 +323,20 @@ VistA's sign-on is the authentication, and the CPRS relay cannot sign on
 to Janus. Where a site `auth` gate covers a route's path:
 
 - **`auth exempt`** in the route serves the route outside the gate: the
-  rpc handler runs before the wall for exactly the route's path (Admission:
+  vista handler runs before the wall for exactly the route's path (Admission:
   byte-for-byte), and every other path stays behind it.
 - **A gate whose prefix is exactly the route's path** (`gate /rpc { … }`)
   puts the route behind the wall: a web-only site behind Janus's login.
-- **Neither** is a Start error: "rpc /rpc on vista.example.org lies under
+- **Neither** is a Start error: "vista /rpc on vista.example.org lies under
   gate /; add `auth exempt` to the route, or `gate /rpc { … }`". Janus
   never decides it silently.
 
 Identity headers (`Remote-User`, `Rip-Site`, every spelling) are stripped
-on every Janus site before admission; `rpc` injects none.
+on every Janus site before admission; `vista` injects none.
 
 ## Lifecycle across reloads
 
-Sessions live in pooled process state (`janusState.rpc`), so a reload
+Sessions live in pooled process state (`janusState.vista`), so a reload
 keeps them. Routes follow stage and commit (`stageReconciliation`,
 `commitReconciliation`): nothing staged reaches requests until it commits.
 
@@ -357,13 +357,12 @@ keeps them. Routes follow stage and commit (`stageReconciliation`,
 
 Parse time:
 
-- `rpc` in the global `janus` block.
+- `vista` in the global `janus` block.
 - A route without a path and target; a path not absolute, not canonical,
   or repeated within the site.
 - A target whose network is not `unix`, whose path is not absolute and
   clean, or that carries a port.
-- An unknown or repeated option; a value outside its range; `protocol`
-  other than `xwb`; a `per_client*` above its route cap; `max_unsigned`
+- An unknown or repeated option; a value outside its range; a `per_client*` above its route cap; `max_unsigned`
   above `max_sessions`; a `per_client_exempt` entry that is not a CIDR.
 - `origin any`, an empty `origin`, `null`, or an entry that is not an
   `https://` origin or `same`.
@@ -383,7 +382,7 @@ The target is not dialed at Start; a backend that is down is a 502 per
 
 ## Control and observability
 
-`GET /1.0/rpc` on every control listener answers `{"routes":{}}` with no
+`GET /1.0/vista` on every control listener answers `{"routes":{}}` with no
 routes, otherwise:
 
 ```json
@@ -391,7 +390,6 @@ routes, otherwise:
   "routes": {
     "vista.example.org/rpc": {
       "target": "unix//run/openvista/xwb.sock",
-      "protocol": "xwb",
       "sessions": 3, "unsigned": 1, "running": 1, "queued": 0, "draining": 0,
       "oldest_running_ms": 840,
       "max_sessions": 256, "max_unsigned": 32,
@@ -423,13 +421,13 @@ The access log (capability 9) records `/rpc` requests like any other, with
 `Cookie`, `Authorization`, and `Set-Cookie` reading `REDACTED`. Janus adds
 the session id to each `/rpc` entry's extra fields, so an audit can join a
 request to its session's start and end lines. An aborted response logs as
-status 200 with `rpc_aborted: true` in those fields. A route has no
+status 200 with `vista_aborted: true` in those fields. A route has no
 registry owner, so `/rpc` requests never appear in any app's live NDJSON
 stream.
 
 ## Non-goals (v1)
 
-- Any protocol but `xwb`; TCP targets; a target per request or registered
+- The broker's other protocols (M2M, the callback broker `{XWB}`); TCP targets; a target per request or registered
   hot through `/1.0`.
 - Retries, replay, resuming a session on another stream.
 - Push to the client: a web client uses the hub (RPC-HTTPS §1).
@@ -447,7 +445,7 @@ Settled with Em on 2026-10-10, for the owner's review:
 
 | # | Decision | Ruling |
 | --- | --- | --- |
-| 1 | Name | `rpc`, `protocol xwb` its first framing rule |
+| 1 | Name | `vista` (the owner, 2026-10-11; first drafted as `rpc`), with no `protocol` option: XWB is VistA's only framing, and a one-value option is the decorative toggle rule 3 forbids |
 | 2 | Sign-on | Strict `XUS AV CODE` DUZ, plus `XUS CVC` after an expired code; `signon_timeout` 180 s |
 | 3 | PROXY client | TCP peer, or Caddy's client IP when `trusted_proxies` trusts the peer; port 0 then |
 | 4 | Limits | `rpc_timeout` 10 m from leaving the queue, `queue` 8, `max_request` 1 MiB, `max_reply` 64 MiB streamed |
@@ -491,7 +489,7 @@ by severity, and what this revision did:
 | Finding | Revision |
 | --- | --- |
 | Critical: a stale cookie after any end but `bye` 401s forever; a `TCPConnect` with a live token was undefined | `TCPConnect` always starts a new session (`replaced`); every session-ending answer to a cookie clears it |
-| Critical: session fixation, by a planted `__Host-ov` from a co-hosted app or script | Rotation at sign-on; `Set-Cookie: __Host-ov` stripped from every non-rpc response |
+| Critical: session fixation, by a planted `__Host-ov` from a co-hosted app or script | Rotation at sign-on; `Set-Cookie: __Host-ov` stripped from every non-vista response |
 | High: the gate exemption could match spellings the route does not (`/RPC`, `/rpc/`) | The route is byte-exact on the escaped path; everything else is gated as usual |
 | High: a partial write cancelled with its client would desync the stream | Bodies are read and walked whole before queueing and written whole regardless of the client |
 | High: `\x04` in data delivers a reply to the wrong request | Leftover bytes at a reply's end end the session; XWBRW is asked to refuse such data |
@@ -514,9 +512,9 @@ pre-sign-on limit, the evidence for the default).
 ## Housekeeping this capability lands with
 
 AGENTS.md's capability table gains row 11 and its `./test.sh` order line
-gains `rpc`; `docs/README.md` gains the index row; the README's capability
+gains `vista`; `docs/README.md` gains the index row; the README's capability
 list and HANDOFF's table gain the row; `Caddyfile` gains a route on
-`rpc.janus.localhost` for the acceptance suite; `Caddyfile.example` gains a
+`vista.janus.localhost` for the acceptance suite; `Caddyfile.example` gains a
 commented example; `Caddyfile.minimal` is unchanged.
 
 ## Acceptance
@@ -541,7 +539,7 @@ success, a security refusal, an M error with its second `\x04`, `#BYE#`).
 - Admission: every row, in order; the route's byte-exact path match.
 - The token: Set-Cookie only on `TCPConnect` and sign-on; Cookie and Bearer;
   every 400 form; route binding; clearing on every session-ending answer;
-  `__Host-ov` stripped from forwarded requests and non-rpc responses.
+  `__Host-ov` stripped from forwarded requests and non-vista responses.
 - Sessions: FIFO under concurrent requests on one HTTP/2 connection and
   across connections; the queue cap; a client gone while queued (never
   sent), while writing (written whole), and during the reply (drained, the
@@ -559,7 +557,7 @@ success, a security refusal, an M error with its second `\x04`, `#BYE#`).
 - No token, body, RPC name, or reply line in any log line: an observer
   test over every path above.
 
-`./test.sh` group `rpc` (after webtransport), with the testkit's fake em:
+`./test.sh` group `vista` (after webtransport), with the testkit's fake em:
 
 - `TCPConnect` → 200, `accept`, a `__Host-ov` cookie and no other token
   header; `XWB IM HERE` with the cookie and `X-OV: 1` → 200; with Bearer
@@ -579,7 +577,7 @@ signs on through Janus to VistA, as `test/relay`'s mini-Janus does today.
 
 ## Measurement
 
-Per AGENTS.md rule 8, with raw provenance as `docs/*-bench-raw-rpc.txt`:
+Per AGENTS.md rule 8, with raw provenance as `docs/*-bench-raw-vista.txt`:
 `XWB IM HERE` round trips per second and their latency on one session and
 on 64 concurrent sessions against the fake em; the admission path's cost;
 memory per idle session; and a 64 MiB reply's throughput and Janus's peak
