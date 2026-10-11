@@ -173,7 +173,9 @@ func (h *Handler) provisionBrowse() error {
 // enabled and everything else routes through the data plane (registry
 // hosts → upstreams; unknown hosts → 404).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	r.Header.Del(ripSiteHeader)
+	// Identity headers are Janus's to assert, on every site, auth on or off,
+	// before any branch can reach an upstream, the hub, or files.
+	stripClientIdentityHeaders(r.Header)
 	// A local name in wan mode: not served here, front door included.
 	if wanExposure() && localFamilyHost(normalizeHostHeader(r.Host)) {
 		return caddyhttp.Error(http.StatusMisdirectedRequest, fmt.Errorf("janus: %s is a local name; the edge is in wan mode", r.Host))
@@ -236,12 +238,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 				facts.setClass("auth")
 			} else {
 				facts.clearOwner()
-				return caddyhttp.Error(http.StatusNotFound,
+				return unknownHostError(w,
 					fmt.Errorf("janus: unknown host %q", host))
 			}
 		} else if requireHotClaim {
 			facts.clearOwner()
-			return caddyhttp.Error(http.StatusNotFound, nil)
+			return unknownHostError(w, nil)
 		}
 		rr, handled, err := h.serveAuthWall(w, r)
 		if handled || err != nil {
@@ -249,7 +251,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 		facts.clearOwner()
 		r = rr
-		w = &authRespStrip{ResponseWriter: w}
+		w = &authRespStrip{ResponseWriter: w, private: authGatedUser(rr.Context()) != ""}
 	}
 	if frontDoor {
 		h.app.mdnsSharedRoutes.ServeHTTP(w, r)
@@ -280,14 +282,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return h.serveColdBrowsePath(w, r, requestPath)
 	}
 	if h.dp == nil {
-		return caddyhttp.Error(http.StatusNotFound, nil)
+		return unknownHostError(w, nil)
 	}
 	if !resolved {
 		rec, resolved = h.dp.registry.resolveRequestHost(r.Host)
 	}
 	if !resolved {
 		facts.clearOwner()
-		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
+		return unknownHostError(w, fmt.Errorf("janus: unknown host %q", host))
 	}
 	facts.setOwner(rec)
 	if rec.siteValue != "" {

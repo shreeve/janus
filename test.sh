@@ -4,7 +4,10 @@
 # For operators/users: prove cold capabilities behave end-to-end.
 # Developers still use idiomatic `go test ./...` while building.
 #
-# Groups run in capability order: ping (1), control (2), …, access (9) last.
+# Groups run in capability order: ping (1), control (2), …, webtransport (10) last.
+#
+# HTTPS uses Caddy's internal CA for *.janus.localhost names (which resolve
+# to the loopback without DNS); every curl trusts exactly that root.
 #
 #   ./test.sh
 #   NO_COLOR=1 ./test.sh
@@ -21,6 +24,10 @@ export XDG_CONFIG_HOME="$TEST_RUN_DIR/config"
 export XDG_STATE_HOME="$TEST_RUN_DIR/state"
 export JANUS_TEST_CONTROL="$TEST_RUN_DIR/run/janus.sock"
 export JANUS_TEST_ACCESS_LOG="$TEST_RUN_DIR/access.log"
+# Caddy storage is pinned under the run directory, so the internal CA root
+# that signs every site certificate lands here (see start_caddy).
+export XDG_DATA_HOME="$TEST_RUN_DIR/caddy-data"
+CADDY_LOCAL_ROOT="$XDG_DATA_HOME/caddy/pki/authorities/local/root.crt"
 mkdir -p "$TEST_RUN_DIR/run"
 CADDY_BIN="${CADDY_BIN:-$ROOT/bin/janus}"
 CADDY_LOG="${CADDY_LOG:-$TEST_RUN_DIR/caddy.log}"
@@ -123,6 +130,12 @@ ne() {
 
 # --- HTTP helpers ---------------------------------------------------------
 
+# Every HTTPS request trusts the edge's own internal CA and nothing else
+# (never -k). The root exists once Caddy has issued its first certificate.
+curl() {
+	command curl --cacert "$CADDY_LOCAL_ROOT" "$@"
+}
+
 http_code() {
 	curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$1"
 }
@@ -198,10 +211,6 @@ report() {
 
 # --- lifecycle ------------------------------------------------------------
 
-need_certs() {
-	[[ -f certs/ripdev.io.crt && -f certs/ripdev.io.key ]]
-}
-
 need_caddy() {
 	[[ -x "$CADDY_BIN" ]]
 }
@@ -273,7 +282,7 @@ start_caddy() {
 			rm -f "$CADDY_PID_FILE"
 			return 1
 		fi
-		if curl -sS -o /dev/null --max-time 1 https://on.ripdev.io/ping 2>/dev/null \
+		if curl -sS -o /dev/null --max-time 1 https://on.janus.localhost/ping 2>/dev/null \
 			&& curl -sS -o /dev/null --max-time 1 http://127.0.0.1:7600/1.0/health 2>/dev/null; then
 			return 0
 		fi
@@ -346,11 +355,6 @@ SUITE_START_NS=$(now_ns)
 
 printf '%s\n' "$(paint "$BOLD" "Janus acceptance")"
 
-if ! need_certs; then
-	echo "missing certs/ripdev.io.{crt,key}" >&2
-	exit 1
-fi
-
 if ! need_caddy; then
 	printf '%s\n' "$(paint "$DIM" "building $CADDY_BIN …")"
 	build_caddy || exit 1
@@ -359,14 +363,19 @@ fi
 printf '%s\n' "$(paint "$DIM" "building testkit …")"
 build_testkit || exit 1
 
+# testkit's WebSocket and WebTransport clients verify the edge against the
+# same root (their -cacert default). Exported only after the builds: go
+# reads SSL_CERT_FILE too, and must still trust the module proxy.
+export SSL_CERT_FILE="$CADDY_LOCAL_ROOT"
+
 printf '%s\n' "$(paint "$DIM" "starting caddy …")"
 start_caddy || exit 1
 
 group "ping"
-test "catchall foo.ripdev.io → pong" case_ping_catchall_foo
-test "catchall bar.ripdev.io → pong" case_ping_catchall_bar
-test "on.ripdev.io explicit on → pong" case_ping_on_explicit
-test "off.ripdev.io explicit off → 404" case_ping_off_explicit
+test "catchall foo.janus.localhost → pong" case_ping_catchall_foo
+test "catchall bar.janus.localhost → pong" case_ping_catchall_bar
+test "on.janus.localhost explicit on → pong" case_ping_on_explicit
+test "off.janus.localhost explicit off → 404" case_ping_off_explicit
 test "TLS verify trusted (no -k)" case_ping_tls_trusted
 
 group "control"
@@ -377,6 +386,7 @@ test "unix GET /1.0 → janus meta" case_control_unix_root
 test "unix GET /1.0/health → ok" case_control_unix_health
 test "unknown /1.0 paths → 404, wrong method → 405" case_control_unknown_paths_404
 test "control JSON rejects repeated fields at every depth" case_control_duplicate_json
+test "TCP control refuses browser Origin and non-loopback Host" case_control_refuses_browsers
 test "reload → both listeners serve one live registry" case_reload_no_split_brain
 test "changed TTL reload is rejected and reports the running value" case_reload_ttl_rejected
 test "aborted reload → later reloads still work" case_reload_abort_recovery
@@ -506,6 +516,8 @@ test "to survives login; hostile targets collapse to /" case_auth_to
 test "status page + sign-out: re-minted CSRF, revoked server-side" case_auth_status_signout
 test "CSRF enforced on both POST arms" case_auth_csrf_enforced
 test "spoofed Remote-User dies at the edge" case_auth_spoof_dies
+test "every spelling of a gated path stays gated" case_auth_noncanonical_paths_gated
+test "auth-off site strips every identity spelling" case_auth_off_site_strips_identity
 test "fixation dead: pre-set cookie never honored, never re-minted" case_auth_fixation_dead
 test "wrong password and unknown user → one generic 401" case_auth_wrong_creds
 test "throttle ladder: 5th try during wait → 429; pairs isolated" case_auth_throttle
@@ -536,6 +548,7 @@ test "precompressed representation-specific conditionals" case_files_precompress
 test "precompressed HEAD, encoded range, and no double encode" case_files_precompressed_head_range_and_encode
 test "precompressed SPA shell and directory index" case_files_precompressed_shell_and_index
 test "FIFO canonical files and sidecars never block" case_files_special_files
+test "dotfiles answer 404; /.well-known/ is served with nosniff" case_files_dotfiles_refused
 test "strict site/files JSON fields reject" case_files_strict_hot_fields
 test "cascade: site files off beats global on" case_files_cascade_off
 

@@ -15,7 +15,7 @@ case_reload_ttl_rejected() {
 	json_has "$(cat "$TEST_RUN_DIR/ttl-reload.log")" 'requires a restart'
 	capi GET /1.0
 	json_has "$REPLY_BODY" '"heartbeat_ttl":"15s"'
-	eq "$(http_body https://on.ripdev.io/ping)" "pong"
+	eq "$(http_body https://on.janus.localhost/ping)" "pong"
 }
 
 case_reload_no_split_brain() {
@@ -27,7 +27,7 @@ case_reload_no_split_brain() {
 	# pre-reload registration SURVIVES the reload — only DELETE, TTL reap,
 	# or a process restart removes it. Split-brain would show a fresh,
 	# empty registry behind one listener.
-	capi POST /1.0/apps '{"name":"reload","hosts":["reload.ripdev.io"]}'
+	capi POST /1.0/apps '{"name":"reload","hosts":["reload.janus.localhost"]}'
 	eq "$REPLY_CODE" "201"
 	local old_id
 	old_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -69,9 +69,9 @@ case_reload_no_split_brain() {
 	# The active HTTPS handler is bound to that same registry. With no
 	# upstreams the registered host is unavailable (503), never unknown
 	# (404); this catches a data-plane/control-plane split after reload.
-	eq "$(http_code https://reload.ripdev.io/)" "503"
+	eq "$(http_code https://reload.janus.localhost/)" "503"
 	# Its host is still claimed: a rival registration conflicts.
-	capi POST /1.0/apps '{"name":"rival","hosts":["reload.ripdev.io"]}'
+	capi POST /1.0/apps '{"name":"rival","hosts":["reload.janus.localhost"]}'
 	eq "$REPLY_CODE" "409"
 	capi DELETE "/1.0/apps/$old_id"
 	eq "$REPLY_CODE" "204"
@@ -119,7 +119,7 @@ case_reload_abort_recovery() {
 	done
 	ok "-n \"$ready\"" "control listeners never answered after post-abort reload"
 	ok "-S \"$TEST_RUN_DIR/run/janus.sock\"" "control socket vanished after post-abort reload"
-	eq "$(http_code https://foo.ripdev.io/ping)" "404"
+	eq "$(http_code https://foo.janus.localhost/ping)" "404"
 	# Restore the canonical config for the rest of the suite.
 	if ! XDG_DATA_HOME="$TEST_RUN_DIR/caddy-data" \
 		reload_caddy --config "$ROOT/Caddyfile" --force >>"$CADDY_LOG" 2>&1; then

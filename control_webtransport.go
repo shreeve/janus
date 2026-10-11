@@ -33,18 +33,22 @@ type wtRouteStatus struct {
 }
 
 type wtStatus struct {
-	Enabled         bool                     `json:"enabled"`
-	Listen          []string                 `json:"listen"`
-	Sessions        int64                    `json:"sessions"`
-	MaxSessions     int                      `json:"max_sessions"`
-	MaxDatagram     int                      `json:"max_datagram"`
-	IdleTimeout     string                   `json:"idle_timeout"`
-	Routes          map[string]wtRouteStatus `json:"routes"`
-	RefusedHost     int64                    `json:"refused_host"`
-	RefusedPath     int64                    `json:"refused_path"`
-	RefusedFronting int64                    `json:"refused_fronting"`
-	RefusedMethod   int64                    `json:"refused_method"`
-	RetriesSent     int64                    `json:"retries_sent"`
+	Enabled           bool                     `json:"enabled"`
+	Listen            []string                 `json:"listen"`
+	Sessions          int64                    `json:"sessions"`
+	MaxSessions       int                      `json:"max_sessions"`
+	MaxDatagram       int                      `json:"max_datagram"`
+	IdleTimeout       string                   `json:"idle_timeout"`
+	Routes            map[string]wtRouteStatus `json:"routes"`
+	RefusedHost       int64                    `json:"refused_host"`
+	RefusedPath       int64                    `json:"refused_path"`
+	RefusedFronting   int64                    `json:"refused_fronting"`
+	RefusedMethod     int64                    `json:"refused_method"`
+	RetriesSent       int64                    `json:"retries_sent"`
+	Connections       int64                    `json:"connections"`
+	MaxConnections    int64                    `json:"max_connections"`
+	RefusedConns      int64                    `json:"refused_connections"`
+	SessionlessCloses int64                    `json:"sessionless_closes"`
 }
 
 func (a *App) handleWebtransportState(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +68,8 @@ func (r *wtRelay) status() wtStatus {
 		RefusedHost: r.refusedHost.Load(), RefusedPath: r.refusedPath.Load(),
 		RefusedFronting: r.refusedFronting.Load(), RefusedMethod: r.refusedMethod.Load(),
 		RetriesSent: r.retriesSent.Load(),
+		Connections: r.connN.Load(), MaxConnections: r.connLimit(),
+		RefusedConns: r.refusedConns.Load(), SessionlessCloses: r.sessionlessCloses.Load(),
 	}
 	for _, l := range table.listen {
 		st.Listen = append(st.Listen, l.String())

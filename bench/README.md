@@ -18,7 +18,7 @@ Raw result files land flat under `docs/` as
 | `hub.sh` | The hub arm: the six Phase 7 measurements from the hub contract's "Bench plan" (fan-out throughput, delivery latency, connection ceiling + idle cost, slow-consumer isolation, reload under fan-out, text-bridge tax). Needs no rip manager — it registers its own app and runs `hubbench` as both fixture tenant and load client. Every leg tees to `$RAW`. |
 | `hubbench/` | Go bench client behind `hub.sh` (own tiny module; `hub.sh` builds it). Modes: `tenant` (bridge fixture on a unix socket, 204 answers, optional text delay, 5s heartbeats), `subs` (N wss subscribers: delivery counts, publish→receive latency percentiles, max inter-delivery gap, close codes, optional wedged conns), `pub` (paced publisher through `POST /1.0/apps/{id}/hub/publish` with embedded timestamps), `send` (client-send throughput via no-delivery bare events), `ramp` (admitted conns/s, then idle hold for RSS reads). WSS with `InsecureSkipVerify` — bench client only; the acceptance suite proves real trust. |
 | `leakprobe.sh` | RSS slope-vs-plateau probe: hammers one worker direct-UDS in batches, snapshots its RSS after each. Reads a running pool; starts nothing. |
-| `app.rip` | The bench tenant: ping-class `/` returns `{ok:true}`; `/io` sleeps 5ms. Claims `bench.ripdev.io`. |
+| `app.rip` | The bench tenant: ping-class `/` returns `{ok:true}`; `/io` sleeps 5ms. Claims `bench.janus.localhost`. |
 | `parse.rip` | oha JSON (stdin) → one summary line: `LABEL: rps N 200s/s N non200 N p50 X.XXms p99 X.XXms`. The format is stable — raw files are diffed across sessions. |
 | `sock.rip` | Prints the first worker socket path from `/1.0/apps`. |
 | `count.rip` | oha JSON (stdin) → total request count. |

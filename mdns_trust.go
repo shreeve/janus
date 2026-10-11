@@ -88,19 +88,45 @@ func (a *App) trustRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /trust/ca.mobileconfig", a.trustServeProfile)
 }
 
+// CertFingerprint is a certificate's SHA-256 fingerprint as `openssl x509
+// -fingerprint -sha256` prints it: uppercase hex byte pairs joined by
+// colons. The trust pages show it, and `janus status` and `janus trust
+// --export` print it, so an operator can compare the CA a device is about
+// to trust over plain HTTP with the one the edge holds.
+func CertFingerprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	hexed := strings.ToUpper(hex.EncodeToString(sum[:]))
+	pairs := make([]string, 0, len(sum))
+	for i := 0; i < len(hexed); i += 2 {
+		pairs = append(pairs, hexed[i:i+2])
+	}
+	return strings.Join(pairs, ":")
+}
+
+// trustFingerprint is the root's fingerprint for the trust pages, or
+// "unavailable" when there is no CA to hand out.
+func (a *App) trustFingerprint() []byte {
+	root, err := a.rootCA()
+	if err != nil {
+		return []byte("unavailable")
+	}
+	return []byte(CertFingerprint(root.Raw))
+}
+
 func (a *App) trustServePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	// A public certificate on the canonical name proves nothing about
 	// this device's trust in the local CA. Only local names can probe it.
 	canCheck := strings.HasSuffix(normalizeHostHeader(r.Host), ".local")
-	_, _ = w.Write(bytes.ReplaceAll(trustPageHTML, []byte("{{CAN_CHECK}}"), []byte(strconv.FormatBool(canCheck))))
+	page := bytes.ReplaceAll(trustPageHTML, []byte("{{CAN_CHECK}}"), []byte(strconv.FormatBool(canCheck)))
+	_, _ = w.Write(bytes.ReplaceAll(page, []byte("{{CA_FINGERPRINT}}"), a.trustFingerprint()))
 }
 
 func (a *App) trustServeSafari(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(trustSafariHTML)
+	_, _ = w.Write(bytes.ReplaceAll(trustSafariHTML, []byte("{{CA_FINGERPRINT}}"), a.trustFingerprint()))
 }
 
 // trustServeCheck is the probe target: the trust page fetches it over

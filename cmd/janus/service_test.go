@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/shreeve/janus"
 	"github.com/spf13/cobra"
 	"time"
 )
@@ -630,6 +631,10 @@ func TestTrustExport(t *testing.T) {
 	}
 	if !strings.Contains(out, "wrote "+dest) {
 		t.Errorf("out: %s", out)
+	}
+	// The fingerprint, to compare where the file is imported.
+	if fp := janus.CertFingerprint(parseRootCA([]byte(rootPEM)).Raw); !strings.Contains(out, "sha256 "+fp+"\n") {
+		t.Errorf("out lacks the fingerprint %s: %s", fp, out)
 	}
 }
 

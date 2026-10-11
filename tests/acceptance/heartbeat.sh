@@ -12,10 +12,10 @@ hb_app_id() {
 	cat "$HB_APP_FILE"
 }
 
-# hb_register — register pulse.ripdev.io and publish the shared upstream;
+# hb_register — register pulse.janus.localhost and publish the shared upstream;
 # used for both the initial registration and the post-reap re-registration.
 hb_register() {
-	capi POST /1.0/apps '{"name":"pulse","hosts":["pulse.ripdev.io"]}'
+	capi POST /1.0/apps '{"name":"pulse","hosts":["pulse.janus.localhost"]}'
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -28,8 +28,8 @@ hb_register() {
 case_hb_register_traffic() {
 	start_data_upstream "$TEST_RUN_DIR/run/hb.sock" hb "$TEST_RUN_DIR/hb.hits" || return 1
 	hb_register
-	eq "$(http_code https://pulse.ripdev.io/)" "200"
-	eq "$(http_body https://pulse.ripdev.io/)" "upstream:hb"
+	eq "$(http_code https://pulse.janus.localhost/)" "200"
+	eq "$(http_body https://pulse.janus.localhost/)" "upstream:hb"
 }
 
 case_hb_beat_204() {
@@ -45,7 +45,7 @@ case_hb_beat_unknown_404() {
 case_hb_ttl_reaps() {
 	# Stop heartbeating; wait past TTL (2s) + a sweep interval.
 	sleep 3.5
-	eq "$(http_code https://pulse.ripdev.io/)" "404"
+	eq "$(http_code https://pulse.janus.localhost/)" "404"
 	capi GET "/1.0/apps/$(hb_app_id)"
 	eq "$REPLY_CODE" "404"
 	capi GET /1.0/apps
@@ -58,8 +58,8 @@ case_hb_ttl_reaps() {
 
 case_hb_reregister_recovers() {
 	hb_register
-	eq "$(http_code https://pulse.ripdev.io/)" "200"
-	eq "$(http_body https://pulse.ripdev.io/)" "upstream:hb"
+	eq "$(http_code https://pulse.janus.localhost/)" "200"
+	eq "$(http_body https://pulse.janus.localhost/)" "upstream:hb"
 }
 
 case_hb_alive_not_routable() {
@@ -73,7 +73,7 @@ case_hb_alive_not_routable() {
 		eq "$REPLY_CODE" "204"
 		sleep 0.5
 	done
-	eq "$(http_code https://pulse.ripdev.io/)" "503"
+	eq "$(http_code https://pulse.janus.localhost/)" "503"
 	capi GET "/1.0/apps/$(hb_app_id)"
 	eq "$REPLY_CODE" "200"
 }

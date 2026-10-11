@@ -35,3 +35,10 @@ func configureBrowseProcess(cmd *exec.Cmd) {
 	}
 	cmd.WaitDelay = 300 * time.Millisecond
 }
+
+// browseRendererPlatformEnv names no Unix-only variables beyond the portable
+// renderer environment.
+var browseRendererPlatformEnv []string
+
+// browseEnvKeyEqual compares environment keys case-sensitively, as Unix does.
+func browseEnvKeyEqual(key, name string) bool { return key == name }

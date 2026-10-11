@@ -5,12 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -88,8 +90,8 @@ func TestTrustFrontDoor(t *testing.T) {
 		{"/trust/ca.mobileconfig", "janus.local", false, 200, "com.apple.security.root"},
 		{"/", "janus.local", true, 200, "status"},
 		{"/trust/check", "janus.local", true, 204, ""},
-		{"/trust", "janus-2.local", true, 200, "One-time setup"},       // effective name
-		{"/trust", "janus.lan.ripdev.io", true, 200, "One-time setup"}, // canonical
+		{"/trust", "janus-2.local", true, 200, "One-time setup"},         // effective name
+		{"/trust", "janus.lan.example.com", true, 200, "One-time setup"}, // canonical
 	} {
 		rr, nextCalled, err := serve(tc.path, tc.host, tc.secure)
 		if err != nil || nextCalled {
@@ -139,8 +141,49 @@ func TestTrustFrontDoor(t *testing.T) {
 	}
 }
 
+// The fingerprint reads as openssl prints it: SHA-256, uppercase hex
+// pairs joined by colons.
+func TestCertFingerprint(t *testing.T) {
+	const empty = "E3:B0:C4:42:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55"
+	if got := CertFingerprint(nil); got != empty {
+		t.Errorf("CertFingerprint(empty) = %s", got)
+	}
+	root := testRootCert(t, "Caddy Local Authority - 2026 ECC Root")
+	sum := sha256.Sum256(root.Raw)
+	if got, want := CertFingerprint(root.Raw), strings.ReplaceAll(fmt.Sprintf("% X", sum[:]), " ", ":"); got != want {
+		t.Errorf("CertFingerprint = %s, want %s", got, want)
+	}
+}
+
+// Both trust pages show the CA's fingerprint, to compare out of band with
+// `janus status` before trusting what plain HTTP delivered; with no CA
+// they say it is unavailable and never show the placeholder.
+func TestTrustPagesShowFingerprint(t *testing.T) {
+	app := newTestSharedMdnsApp(t)
+	root := testRootCert(t, "Caddy Local Authority - 2026 ECC Root")
+	app.rootCAFor = func() (*x509.Certificate, error) { return root, nil }
+	fp := CertFingerprint(root.Raw)
+	pages := map[string]func(http.ResponseWriter, *http.Request){"/trust": app.trustServePage, "/trust/safari": app.trustServeSafari}
+	for path, serve := range pages {
+		w := httptest.NewRecorder()
+		serve(w, httptest.NewRequest("GET", "http://janus.local"+path, nil))
+		if body := w.Body.String(); !strings.Contains(body, fp) || strings.Contains(body, "{{CA_FINGERPRINT}}") {
+			t.Errorf("%s does not show the fingerprint %s", path, fp)
+		}
+	}
+	app.rootCAFor = func() (*x509.Certificate, error) { return nil, errors.New("no pki") }
+	for path, serve := range pages {
+		w := httptest.NewRecorder()
+		serve(w, httptest.NewRequest("GET", "http://janus.local"+path, nil))
+		if body := w.Body.String(); !strings.Contains(body, ">unavailable<") || strings.Contains(body, "{{CA_FINGERPRINT}}") {
+			t.Errorf("%s without a CA: no 'unavailable'", path)
+		}
+	}
+}
+
 func TestTrustAutomaticCheckRequiresLocalName(t *testing.T) {
 	app := newTestSharedMdnsApp(t)
+	app.rootCAFor = func() (*x509.Certificate, error) { return nil, errors.New("no pki") }
 	for _, host := range []string{"janus.local:8080", "edge.example", "127.0.0.1:7680"} {
 		r := httptest.NewRequest("GET", "https://"+host+"/trust", nil)
 		w := httptest.NewRecorder()
@@ -158,7 +201,7 @@ func TestTrustAutomaticCheckRequiresLocalName(t *testing.T) {
 func TestMdnsFrontDoorName(t *testing.T) {
 	app := newTestSharedMdnsApp(t)
 	for host, want := range map[string]bool{
-		"janus.local": true, "janus-2.local": true, "janus.lan.ripdev.io": true,
+		"janus.local": true, "janus-2.local": true, "janus.lan.example.com": true,
 		"shop.local": false, "other.local": false, "127.0.0.1": false,
 	} {
 		if got := app.mdnsFrontDoorName(host); got != want {

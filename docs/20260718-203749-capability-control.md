@@ -50,9 +50,37 @@ Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` +
 
 - **local** host must be loopback (`127.0.0.1`, `::1`, or `localhost`).
 - **public** must be `https://` (never bare `http://`).
-- TLS listeners (public, or an `https://` local) serve `cert:…`/`key:…`
-  when given, else the committed dev pair `certs/ripdev.io.{crt,key}`
-  (same material as the data-plane demo; see `certs/README.md`).
+- TLS listeners (public, or an `https://` local) require `cert:…`/`key:…`
+  and serve that pair.
+
+## Browser guard (TCP listeners)
+
+No legitimate control client is a browser, and a browser sends
+cross-site requests to a loopback port whenever any page asks — including
+a no-cors `POST` with a `text/plain` body, which needs no preflight. The
+`local` and `public` listeners therefore refuse browser traffic before the
+token check and before the API:
+
+| Request | Listener | Response |
+| --- | --- | --- |
+| Carries an `Origin` header (any value, `null` included) | `local`, `public` | **403** |
+| `Host` is not a loopback IP literal or `localhost`, with an optional numeric port | `local` | **403** |
+
+Browsers attach `Origin` to every `fetch` and XHR across origins and to
+every `POST`, `PUT`, `PATCH`, and `DELETE` (a plain cross-site `GET` from
+an `<img>`, a `<script>`, or a navigation carries none, and reads no
+response; the `Host` rule below still holds for it); the tenant, the `janus` command,
+and Caddy's TLS ask never send it. The `Host` rule defeats DNS
+rebinding: a rebinding page reaches the listener under its own name, so
+its `Host` never passes. `public` accepts any `Host` (it answers for real
+names) and relies on its required token. `internal` (unix socket)
+listeners are unaffected — a browser cannot reach them.
+
+## Connection timeouts
+
+Every control listener bounds request headers (10 s) and closes
+keep-alive connections idle for 120 s between requests. There is no
+write timeout: the NDJSON access stream is long-lived.
 
 ## Syntax
 
@@ -72,8 +100,7 @@ Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` +
 	}
 }
 
-*.ripdev.io {
-	tls certs/ripdev.io.crt certs/ripdev.io.key
+*.janus.localhost {
 	janus
 }
 ```
@@ -111,7 +138,7 @@ Prefer env names without `$` (avoids clashing with Caddy `{$VAR}` expansion). Au
 | `cert:<path>` | TLS certificate file for this listener |
 | `key:<path>` | TLS private key file for this listener |
 
-Both or neither — one without the other is a hard parse error. Only meaningful on a TLS listener (`public`, or a `local` with an `https://` listen); a plain-HTTP or unix listener rejects them loudly. Unset, a TLS listener uses the committed dev pair `certs/ripdev.io.{crt,key}` (see `certs/README.md`). The pair loads at Start — a missing or unreadable file refuses the config.
+Both or neither — one without the other is a hard parse error. Only meaningful on a TLS listener (`public`, or a `local` with an `https://` listen); a plain-HTTP or unix listener rejects them loudly. A TLS listener without them is a hard error: Janus ships no certificate of its own. The pair loads at Start — a missing or unreadable file refuses the config.
 
 ### Defaults
 
@@ -137,6 +164,7 @@ Port **7601** for public avoids clashing with local **7600**.
 - `cert:…` without `key:…` (or the reverse), an empty `cert:`/`key:` value, or a duplicate of either on one line
 - `cert:…`/`key:…` on a non-TLS listener (`internal`, or `local` over plain `http://`)
 - Site-level `janus { control … }` (control is global only)
+- At Start, an `internal` socket path that another process is serving (`another process is serving <path>`), or that holds anything but a unix socket; a stale socket file nobody answers on is removed and rebound
 
 ## API surface (served today)
 
@@ -153,7 +181,7 @@ Port **7601** for public avoids clashing with local **7600**.
 | `POST` | `{base}/1.0/apps/{id}/heartbeat` | stamp the heartbeat clock → `204` |
 | `GET` | `{base}/1.0/tls/ask?domain=…` | on-demand TLS allowance: 200 allow / 404 deny |
 
-`{base}` is the path from the listen URL (empty for defaults and for `internal`). Unknown paths under `{base}/1.0` are `404`; a known path with the wrong method is `405`.
+`{base}` is the path from the listen URL (empty for defaults and for `internal`). Unknown paths under `{base}/1.0` are `404`; a known path with the wrong method is `405`. On `local` and `public`, the browser guard's `403` comes before either.
 
 ## Examples
 

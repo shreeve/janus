@@ -51,6 +51,65 @@ HTTPS handoff; peer CA onboarding uses the local HTTP name. A loopback-only
 front door does not produce a peer trust link. CA status reads the service's
 storage environment and prefers the running admin API's certificate.
 
+`/trust` and the CA it hands out arrive over plain HTTP, so a device cannot
+authenticate them. The trust pages show the root certificate's SHA-256
+fingerprint in the form `openssl x509 -noout -fingerprint -sha256` prints;
+`janus status` prints the same value under its `ca` line (`ca_fingerprint`
+in `--json`), and `janus trust --export <file>` prints it beside the file it
+writes. Compare the two out of band before trusting the CA on a device; iOS
+shows the fingerprint under the downloaded profile's More Details.
+
+## The supervisor log
+
+The service item hands the edge one file as stdout and stderr:
+`~/.local/state/janus/log/supervisor.log` for a user,
+`/var/log/janus/supervisor.log` for root. launchd (`StandardOutPath`,
+`StandardErrorPath`) and systemd (`StandardOutput=append:`) open it in
+append mode at every start and never rotate it. The edge keeps it bounded:
+a start under the item finds the file past 1 MiB, renames it to
+`supervisor.log.1` (replacing the previous one), and writes to a fresh
+file, which the manager's next start opens too. `janus logs --supervisor
+-f` follows across the roll.
+
+A start the edge refuses is retried by the manager every ten seconds for
+as long as the cause lasts. Each error line the edge writes there begins
+with an RFC 3339 timestamp. A refusal the edge makes before Caddy starts
+(the mode, the firewall, a foreign listener on its ports, an unusable env
+file) that repeats word for word is written at most once every ten
+minutes; the next write after that begins with a line counting the
+repeats in between. `refusal.json` in the state directory carries that
+count; the first start that passes its checks removes it. Caddy's own
+errors are written every time.
+
+`janus status` reports a job the manager holds with no edge running: a
+`CRASH LOOP` when the last process exited with a failure, and in every
+such case but a clean stop, the supervisor log's last error line with its
+timestamp (`crash_loop`, `last_exit`, `last_error` in `--json`).
+
+## The Linux system unit
+
+`sudo janus autostart` writes `/etc/systemd/system/janus.service`. The edge
+runs as root (no `User=`), confined to what the documented layout needs:
+
+| Directive | Effect |
+| --- | --- |
+| `NoNewPrivileges=yes` | Nothing the edge runs (a browse renderer) gains privilege from a setuid bit or a file capability. |
+| `ProtectSystem=full` | `/usr`, `/boot`, and `/etc` are read-only. The edge reads `/etc/janus` and never writes it; `autostart`, `serve`, and `mode` write there from outside the unit. |
+| `ProtectHome=read-only` | `/home`, `/root`, and `/run/user` are readable: registered roots serve, and tenant sockets there accept connections. The edge writes nothing there. |
+| `ReadWritePaths=-/var/lib/janus -/var/log/janus` | The state (Caddy's storage and autosave, the sockets, `scope.json`) and the logs stay writable. |
+| `CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE` | Ports 80 and 443, and reaching a tenant's worker sockets in a directory only that tenant may enter (Rip's are 0700 under `/tmp`) or a root it registers. Every other root capability is gone. |
+
+`PrivateTmp` is off: tenants put worker and doorbell sockets under `/tmp`,
+and a private `/tmp` would hide them from the edge. Without `CAP_NET_ADMIN`
+the QUIC stack behind webtransport cannot force UDP buffers past the
+kernel's `net.core.rmem_max` and `wmem_max`, and logs that it could not;
+raise those sysctls when the relay carries heavy traffic. A Caddyfile that
+writes a log or storage under `/home`, `/etc`, or `/usr` needs a drop-in
+(`systemctl edit janus`) that adds the path to `ReadWritePaths=`. The user
+unit (`systemctl --user`) carries none of this: `NoNewPrivileges` would
+void the `cap_net_bind_service` that `setcap` gives a user's binary.
+`janus autostart` rewrites the unit; `janus restart` applies it.
+
 ## Reload survival
 
 | State | Successful compatible reload | Restart |
@@ -118,6 +177,57 @@ Plain HTTP LAN discovery and `/trust` are intentional bootstrap paths:
 a device cannot necessarily validate the local CA before installing it.
 Future public redirect/HSTS changes must preserve that bootstrap and the
 exposure-mode contract.
+
+## Verifying a release
+
+Each release publishes `janus-<tag>-checksums.txt` (sha256) and, for every
+archive, a signed build provenance attestation made by the release
+workflow (Sigstore, stored with the repository's attestations). `install.sh`
+checks the sha256 always; when the GitHub CLI is installed and signed in it
+also verifies the attestation, and prints what it verified or why it could
+not (a failed attestation check is reported, never fatal). To verify a
+downloaded archive by hand:
+
+```bash
+gh attestation verify janus-<tag>-linux-amd64.tar.gz -R shreeve/janus
+```
+
+`--signer-workflow shreeve/janus/.github/workflows/release.yml` and
+`--source-ref refs/tags/<tag>` narrow it to the release workflow and the
+tag, as `install.sh` does. Releases are built with `CGO_ENABLED=0`, so the
+Linux binaries are static and run on any glibc or musl distribution, from
+a clean module download (no build cache), with every workflow action pinned
+to a commit. `govulncheck` gates every change and every release on
+vulnerabilities reachable from the code, for Linux and macOS.
+
+## macOS pf after an OS update or a Janus upgrade
+
+On macOS the `localhost` and `lan` modes are held by the pf anchor
+(`/etc/pf.anchors/janus`, loaded from `/etc/pf.conf`). A macOS update can
+restore the stock `/etc/pf.conf`, which drops the two lines that load the
+anchor. The edge then refuses to start in `localhost` or `lan` mode rather
+than open its wildcard socket unscoped; the item retries every ten
+seconds, and each refusal names the cause (written to the supervisor log
+once every ten minutes while it is unchanged). `janus status` shows
+`firewall missing: /etc/pf.conf does not load the janus anchor`, the
+`CRASH LOOP`, and the refusal line with its time.
+
+The fix is one command:
+
+```bash
+sudo janus firewall
+```
+
+It rewrites the anchor and the `pf.conf` lines, reloads pf, and enables it;
+the item's next start, within ten seconds, passes the check. `wan` mode has
+no anchor and is unaffected.
+
+An anchor written before 1.19.0 lacks the rule for UDP 443 (the
+webtransport relay's port). After an upgrade from such a release the edge
+refuses to start in `localhost` or `lan` mode, and `janus status` shows
+`firewall missing: /etc/pf.anchors/janus does not match the scope`, until
+`sudo janus firewall` (or `janus mode <scope>`, which runs it) rewrites the
+anchor.
 
 ## macOS Local Network privacy
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -59,6 +60,57 @@ func validatedRequestPath(r *http.Request) (string, error) {
 		return "", err
 	}
 	return decoded, nil
+}
+
+// wellKnownSegment is the one dot-prefixed name files and browse serve, and
+// only as a request path's first segment: RFC 8615 well-known URIs (ACME
+// challenges, security.txt).
+const wellKnownSegment = ".well-known"
+
+// hiddenRequestPath reports whether a validated, exactly-once decoded request
+// path names a segment beginning with ".", which files and browse refuse as
+// a miss. The first segment may be exactly ".well-known"; the comparison is
+// byte-exact, so "/.Well-Known/" and "//.well-known/" are hidden.
+func hiddenRequestPath(p string) bool {
+	for i := 0; i < len(p); i++ {
+		if p[i] != '.' || (i > 0 && p[i-1] != '/') {
+			continue
+		}
+		if i == 1 && strings.HasPrefix(p[1:], wellKnownSegment) &&
+			(len(p) == 1+len(wellKnownSegment) || p[1+len(wellKnownSegment)] == '/') {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// maxRangeSpecs bounds the byte-range specs Janus honors in one Range field.
+// A larger set is ignored and the full representation is served with 200, as
+// RFC 9110 section 14.2 permits, so a client cannot make one small request
+// expand into thousands of multipart part headers.
+const maxRangeSpecs = 16
+
+// tooManyRanges reports whether a bytes Range field carries more than
+// maxRangeSpecs nonempty range specs. It counts exactly the comma-separated
+// parts that net/http's and sendfile's range parsers would each turn into a
+// range or reject, skipping empty list elements as both parsers do.
+func tooManyRanges(value string) bool {
+	rest, ok := strings.CutPrefix(value, "bytes=")
+	if !ok {
+		return false
+	}
+	count := 0
+	for part := range strings.SplitSeq(rest, ",") {
+		if textproto.TrimString(part) == "" {
+			continue
+		}
+		count++
+		if count > maxRangeSpecs {
+			return true
+		}
+	}
+	return false
 }
 
 func acceptsHTML(value string) bool {
@@ -168,6 +220,10 @@ func serveOpenedFile(w http.ResponseWriter, r *http.Request, file *os.File, info
 }
 
 func serveOpenedFileFromRoot(w http.ResponseWriter, r *http.Request, root *os.Root, file *os.File, info os.FileInfo, relative, name, cache string, precompressed []string) {
+	if tooManyRanges(r.Header.Get("Range")) {
+		r = r.Clone(r.Context())
+		r.Header.Del("Range")
+	}
 	selectedFile, selectedInfo, encoding := file, info, ""
 	if len(precompressed) > 0 {
 		addVaryAcceptEncoding(w.Header())
@@ -195,6 +251,7 @@ func serveOpenedFileFromRoot(w http.ResponseWriter, r *http.Request, root *os.Ro
 	}
 
 	ext := strings.ToLower(filepath.Ext(name))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	switch cache {
 	case filesCacheNever:
 		w.Header().Set("Cache-Control", "no-store")

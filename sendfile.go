@@ -64,6 +64,9 @@ func (dp *dataPlane) applySendfile(resp *http.Response) bool {
 
 	header := resp.Header
 	clearSendfileTransportHeaders(header)
+	// Janus streams these bytes from disk and may have sniffed their type;
+	// browsers must not sniff them into anything else.
+	header.Set("X-Content-Type-Options", "nosniff")
 	modtime, ok := prepareSendfileValidators(header, info)
 	if !ok {
 		_ = file.Close()
@@ -160,7 +163,7 @@ func prepareSendfileValidators(h http.Header, info os.FileInfo) (time.Time, bool
 			return time.Time{}, false
 		}
 		modtime = parsed
-	} else if !modtime.IsZero() {
+	} else if !sendfileZeroTime(modtime) {
 		h.Set("Last-Modified", modtime.UTC().Format(http.TimeFormat))
 	}
 	return modtime, true
@@ -406,9 +409,18 @@ func checkSendfileIfMatch(r *http.Request, h http.Header) sendfileCond {
 	return sendfileCondFalse
 }
 
+var sendfileUnixEpoch = time.Unix(0, 0)
+
+// sendfileZeroTime matches net/http's isZeroTime: a zero time or the Unix
+// epoch is an unspecified modification time, which emits no Last-Modified
+// and makes date preconditions inapplicable.
+func sendfileZeroTime(t time.Time) bool {
+	return t.IsZero() || t.Equal(sendfileUnixEpoch)
+}
+
 func checkSendfileIfUnmodifiedSince(r *http.Request, modtime time.Time) sendfileCond {
 	value := r.Header.Get("If-Unmodified-Since")
-	if value == "" || modtime.IsZero() {
+	if value == "" || sendfileZeroTime(modtime) {
 		return sendfileCondNone
 	}
 	t, err := http.ParseTime(value)
@@ -455,7 +467,7 @@ func checkSendfileIfModifiedSince(r *http.Request, modtime time.Time) sendfileCo
 		return sendfileCondNone
 	}
 	value := r.Header.Get("If-Modified-Since")
-	if value == "" || modtime.IsZero() {
+	if value == "" || sendfileZeroTime(modtime) {
 		return sendfileCondNone
 	}
 	t, err := http.ParseTime(value)
@@ -512,7 +524,7 @@ func checkSendfilePreconditions(r *http.Request, h http.Header, modtime time.Tim
 		}
 	}
 	rangeHeader = r.Header.Get("Range")
-	if rangeHeader != "" && checkSendfileIfRange(r, h, modtime) == sendfileCondFalse {
+	if rangeHeader != "" && (tooManyRanges(rangeHeader) || checkSendfileIfRange(r, h, modtime) == sendfileCondFalse) {
 		rangeHeader = ""
 	}
 	return 0, rangeHeader

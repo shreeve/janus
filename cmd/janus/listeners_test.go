@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"github.com/shreeve/janus"
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -192,6 +194,62 @@ func TestExposureWatchExitsOnViolation(t *testing.T) {
 	}
 	cancel2()
 	<-done2
+}
+
+// A socket list the watch cannot read once (a descriptor limit reached for
+// a moment) is checked again; only two unreadable checks in a row, two
+// seconds apart, end the process.
+func TestExposureWatchToleratesOneUnreadableCheck(t *testing.T) {
+	p := isolatedHome(t)
+	if err := writeScope(p, scopeState{Scope: ScopeWAN}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { janus.SetExposure("", "", netip.Addr{}) })
+	prevRead, prevExit := readOwnSockets, exitExposure
+	t.Cleanup(func() { readOwnSockets, exitExposure = prevRead, prevExit })
+	run := func(fail func(call int) bool, wait time.Duration) (exited bool, after time.Duration) {
+		var mu sync.Mutex
+		calls := 0
+		readOwnSockets = func() ([]boundSocket, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			if fail(calls) {
+				return nil, errors.New("open /dev/fd: too many open files")
+			}
+			return nil, nil
+		}
+		hit := make(chan time.Duration, 1)
+		start := time.Now()
+		exitExposure = func() {
+			select {
+			case hit <- time.Since(start):
+			default:
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), wait)
+		done := make(chan struct{})
+		go func() { exposureWatch(ctx, p); close(done) }()
+		defer func() { cancel(); <-done }()
+		select {
+		case d := <-hit:
+			return true, d
+		case <-ctx.Done():
+			return false, 0
+		}
+	}
+	// Unreadable on the first check only, then on every other one: never
+	// two in a row.
+	if exited, _ := run(func(call int) bool { return call%2 == 1 }, 5*time.Second); exited {
+		t.Error("the watch stopped the edge on single unreadable checks")
+	}
+	exited, after := run(func(int) bool { return true }, 6*time.Second)
+	if !exited {
+		t.Fatal("the watch kept serving with its sockets unreadable")
+	}
+	if after < 1500*time.Millisecond {
+		t.Errorf("the watch stopped the edge %v after the first unreadable check; the second comes two seconds later", after)
+	}
 }
 
 func TestForeignListener(t *testing.T) {

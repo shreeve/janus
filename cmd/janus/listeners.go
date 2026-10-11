@@ -100,11 +100,15 @@ func udpViolation(a netip.AddrPort) string {
 // moment) is logged and ends the process with a failure exit, which the
 // supervisor answers with a restart: the edge stays down, loudly, until the
 // Caddyfile or the scope is fixed. An unreadable scope ends it the same way.
+// A socket list that cannot be read (a descriptor limit reached for a
+// moment makes /dev/fd unopenable) ends it only when the next check, two
+// seconds later, cannot read it either; the check in between judges
+// nothing, so a violation still needs two sightings of its own.
 func exposureWatch(ctx context.Context, p servicePaths) {
 	logger := caddy.Log().Named("janus.exposure")
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
-	strikes := 0
+	strikes, unreadable := 0, 0
 	for {
 		st, err := readScope(p)
 		if err != nil {
@@ -112,12 +116,16 @@ func exposureWatch(ctx context.Context, p servicePaths) {
 			exitExposure()
 		}
 		janus.SetExposure(string(st.Scope), st.Interface, st.lan())
-		socks, err := ownSockets()
-		if err != nil {
-			logger.Error("cannot read the edge's own sockets; refusing to serve unverified", zap.Error(err))
-			exitExposure()
-		}
-		if err := verifyExposure(st, runtime.GOOS, socks); err != nil {
+		if socks, err := readOwnSockets(); err != nil {
+			unreadable++
+			if unreadable >= 2 {
+				logger.Error("cannot read the edge's own sockets; refusing to serve unverified", zap.Error(err))
+				exitExposure()
+			} else {
+				logger.Warn("cannot read the edge's own sockets; checking again", zap.Error(err))
+			}
+		} else if err := verifyExposure(st, runtime.GOOS, socks); err != nil {
+			unreadable = 0
 			strikes++
 			if strikes >= 2 {
 				logger.Error("the edge's sockets do not match its exposure mode; stopping",
@@ -126,7 +134,7 @@ func exposureWatch(ctx context.Context, p servicePaths) {
 				exitExposure()
 			}
 		} else {
-			strikes = 0
+			unreadable, strikes = 0, 0
 		}
 		select {
 		case <-ctx.Done():
@@ -135,6 +143,10 @@ func exposureWatch(ctx context.Context, p servicePaths) {
 		}
 	}
 }
+
+// readOwnSockets is the watch's view of the process's sockets; a variable
+// so tests can make it fail.
+var readOwnSockets = ownSockets
 
 // exitExposure is how the watch ends the process; a variable so tests can
 // observe it instead.

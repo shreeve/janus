@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,6 +141,54 @@ func TestControlSocketPoolStaleFile(t *testing.T) {
 	}
 	acceptOne(t, ln, path)
 	_ = ln.Close()
+}
+
+// TestControlSocketPoolRefusesLiveSocket pins that the first bind never
+// steals a socket another process is serving: the acquire fails loudly and
+// the other listener keeps its file and its clients.
+func TestControlSocketPoolRefusesLiveSocket(t *testing.T) {
+	path := filepath.Join(shortSockDir(t), "live.sock")
+	other, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("other process bind: %v", err)
+	}
+	defer other.Close()
+
+	pool := &controlSocketPool{}
+	ln, err := pool.acquire(path)
+	if err == nil {
+		_ = ln.Close()
+		t.Fatal("acquire stole a socket another listener is serving")
+	}
+	if !strings.Contains(err.Error(), "another process is serving "+path) {
+		t.Fatalf("want a loud refusal naming the path, got %v", err)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode().Type() != fs.ModeSocket {
+		t.Fatalf("live socket file disturbed: %v", err)
+	}
+	acceptOne(t, other, path)
+	if len(pool.entries) != 0 {
+		t.Fatalf("refused acquire left pool entries: %v", pool.entries)
+	}
+}
+
+// TestControlSocketPoolRefusesNonSocketFile pins that a regular file at the
+// configured path is never unlinked to make room for the socket.
+func TestControlSocketPoolRefusesNonSocketFile(t *testing.T) {
+	path := filepath.Join(shortSockDir(t), "plain.sock")
+	if err := os.WriteFile(path, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pool := &controlSocketPool{}
+	if ln, err := pool.acquire(path); err == nil {
+		_ = ln.Close()
+		t.Fatal("acquire replaced a regular file")
+	} else if !strings.Contains(err.Error(), "not a unix socket") {
+		t.Fatalf("want a not-a-socket refusal, got %v", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "keep me" {
+		t.Fatalf("regular file disturbed: %q %v", b, err)
+	}
 }
 
 // TestControlSocketPoolPermissionBits pins the "path|bits" address form.

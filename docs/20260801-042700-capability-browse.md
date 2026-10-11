@@ -219,20 +219,22 @@ the request:
 3. a reserved theme asset path → immutable theme asset;
 4. `proxy_first` match → existing doorbell/worker path;
 5. method other than GET or HEAD → **404**, preserving files behavior;
-6. for each ordered root:
+6. a path with a dot segment other than a leading `/.well-known/` → **404**
+   before any root or the shell is consulted (Capability 6's dotfile rule);
+7. for each ordered root:
    1. a regular-file hit wins;
    2. if browse is cold-enabled and that root is browsable, default view or
       raw delivery is selected;
    3. otherwise a directory hit on a browsable root wins;
    4. a nonmatching or non-browsable directory continues to the next root;
-7. a winning directory without a trailing slash → **308** to the same escaped
+8. a winning directory without a trailing slash → **308** to the same escaped
    path plus `/`, preserving the query;
-8. a winning directory checks, in order, `index.html`, `index.rip`,
+9. a winning directory checks, in order, `index.html`, `index.rip`,
    `index.ts`, `index.tsx`, `index.jsx`, and `index.js`; a regular index file
    receives the same default-view decision as an ordinary file;
-9. a directory with no index → listing HTML;
-10. no root match plus an HTML navigation and configured shell → shell;
-11. every other miss → **404**.
+10. a directory with no index → listing HTML;
+11. no root match plus an HTML navigation and configured shell → shell;
+12. every other miss → **404**.
 
 GET and HEAD use the same 308. `Location` is the original once-escaped
 `EscapedPath` plus `/` and, when nonempty, `?` plus the original RawQuery.
@@ -245,7 +247,13 @@ shadow later roots.
 
 A cold claim skips Hub, `proxy_first`, SPA shell, doorbell, and
 worker routing. It applies its ordered cold roots after auth and path
-validation; a miss is terminal 404.
+validation; a miss, including a refused dot-segment path, is terminal 404.
+
+The dot-segment rule is Capability 6's: it runs on the validated, decoded
+path (`/%2Eenv` is `/.env`), compares bytes exactly (`/.ENV` and
+`/.Well-Known/` are refused), and answers exactly as a missing file does.
+It covers hot and cold roots, directory redirects, indexes, renderers, raw
+delivery, and `janus serve`, whose directory is a hot browsable root.
 
 ## Directory listing
 
@@ -256,7 +264,9 @@ are exactly Capability 6's rules.
 
 The listing:
 
-- includes every entry, including dotfiles, up to a hard limit of 10,000;
+- omits every entry whose name begins with `.`, except `.well-known` at the
+  selected root's top level, and includes every other entry;
+- reads at most 10,000 entries, dot entries included;
 - sorts directories first and files second, each by bytewise name;
 - includes parent navigation below the selected root only;
 - shows escaped breadcrumbs, name, size, modification time, and type icon;
@@ -275,8 +285,10 @@ returns the same terminal generic 503. Rejected listings do not increment the
 listing counter or publish their theme.
 
 Selecting a root is authorization to list everything reachable within that
-root. Janus maintains no allowed-root list and does not hide dotfiles,
-configuration names, databases, or source files. Choosing `/` authorizes `/`.
+root except dot entries, which are neither listed nor served. Janus
+maintains no allowed-root list and does not hide configuration names,
+databases, or source files whose names do not begin with `.`. Choosing `/`
+authorizes `/`.
 Descriptor-relative confinement guarantees that listing and ordinary byte
 delivery cannot use path syntax or a symlink race to escape the chosen root.
 Renderer execution has the separately documented pathname trust boundary.
@@ -292,7 +304,8 @@ Sockets, FIFOs, devices, and other non-file entries use kind `other`, icon
 `binary`, and their `Lstat` metadata; URL, RawURL, and PreviewURL are empty.
 
 Listing responses are `text/html; charset=utf-8`,
-`Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. GET returns
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and
+`X-Frame-Options: SAMEORIGIN`. GET returns
 the page; HEAD computes the same headers and
 Content-Length without writing the body.
 
@@ -356,7 +369,8 @@ any additional regular assets are addressed beneath:
 
 This prefix is reserved on browse-enabled sites and is handled before app
 roots, shells, or upstreams. Asset paths are descriptor-confined,
-dot-segment-free, and content-addressed. Theme assets receive
+content-addressed, and have no segment beginning with `.`; such a request
+is a 404 like any unknown asset. Theme assets receive
 `Cache-Control: public, max-age=31536000, immutable`, a content hash ETag,
 correct MIME metadata, and GET/HEAD semantics. A matching `If-None-Match`
 returns **304** with the immutable cache and validator headers and no body.
@@ -430,9 +444,12 @@ operator's default for that extension. Native browser types such as audio,
 images, video, and PDF remain native unless the operator explicitly configures
 a renderer for their extension.
 
-Renderer output is standalone; Janus does not wrap or rewrite it. Janus makes
-these variables available to the child in addition to the inherited process
-environment:
+Renderer output is standalone; Janus does not wrap or rewrite it. The child's
+environment is fixed. From Janus's own environment it receives only `PATH`,
+`HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, and `USER`, each only
+when set (on Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, and
+`USERPROFILE`). Every other variable, including DNS-provider credentials and
+tokens, stays in Janus. Janus adds:
 
 - `JANUS_BROWSE_FILE` — absolute selected pathname;
 - `JANUS_BROWSE_URL` — escaped request path without query;
@@ -459,9 +476,10 @@ promise applies to listing and ordinary/raw delivery, not to what a configured
 child subsequently opens.
 
 Provisioning resolves argv zero once to an absolute executable path and stores
-it in the generation snapshot; requests do not consult `PATH` again. Janus
-inherits the operator environment but overwrites every `JANUS_BROWSE_*`
-variable it defines.
+it in the generation snapshot; requests do not consult `PATH` again. An
+operator `JANUS_BROWSE_*` variable never reaches the child; only the values
+Janus defines do. A renderer that needs other configuration receives it as
+literal argv tokens in its `command` line.
 
 GET captures stdout and returns it only after a successful exit. HEAD never
 spawns; it returns the configured content type, no Content-Length, and no body.
@@ -506,8 +524,18 @@ request or generation cancellation otherwise uses the cancellation behavior
 above. Start failure has no exit status.
 
 Rendered success is status 200 with the configured Content-Type,
-`Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. It has no
-ETag, Last-Modified, ranges, or compression promise.
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+`Content-Security-Policy: sandbox allow-same-origin`, and
+`X-Frame-Options: SAMEORIGIN`; a renderer HEAD carries the same headers. It
+has no ETag, Last-Modified, ranges, or compression promise.
+
+Rendered output often passes tenant-authored content through, and it is
+served on the site's origin, beneath its auth gate. The sandbox, which
+grants no `allow-scripts`, keeps that content from running script, submitting
+forms, or opening popups with the origin's session; `allow-same-origin`
+keeps the document's own origin so its relative images and stylesheets load
+beneath the same gate. Rendered output is therefore static presentation:
+links, images, and stylesheets work, script does not.
 
 One pooled renderer supervisor owns the total running-child count across
 overlapping Caddy generations. Admission under one mutex applies the proposed
@@ -632,6 +660,7 @@ Caddy site admission
 → reserved theme asset
 → hot claim: Hub interception → proxy_first bypass
 → cold claim: ordered cold roots → terminal 404
+→ dot-segment path → 404
 → ordered file roots
    → ordinary/raw file
    → renderer
@@ -659,13 +688,17 @@ Go tests pin:
 - cold/hot cascade and per-root browse gating;
 - ordered roots, index precedence, trailing slash, shell fallback, and method
   behavior;
-- dotfiles, Unicode, reserved characters, malformed escapes, traversal, and
-  symlink confinement;
+- dot-segment refusal (`/.env`, `/.git/config`, `/%2Eenv`, `/.ENV`, nested
+  and renderer-owned dotfiles) on hot and cold roots, `/.well-known/`
+  delivery, listing omission, Unicode, reserved characters, malformed
+  escapes, traversal, and symlink confinement;
 - listing sort, breadcrumbs, metadata, preview, rendered/default/raw links,
   HEAD, cache headers, and theme assets;
 - ordinary audio/image/PDF MIME delivery with no renderer;
-- argv substitution without a Janus-created shell, inherited environment,
-  renderer metadata variables, and working directory;
+- argv substitution without a Janus-created shell, the fixed renderer
+  environment (an arbitrary secret variable never reaches the child),
+  renderer metadata variables, working directory, and the rendered sandbox
+  and framing headers;
 - global and extension concurrency, timeout, cancellation, output/stderr caps,
   nonzero exit, missing executable, and process cleanup;
 - heartbeat and process leases, reaping, heartbeat rejection, DELETE, and

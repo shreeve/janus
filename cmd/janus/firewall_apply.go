@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -51,21 +52,60 @@ var hostFwOps = func() fwOps {
 	}
 }
 
-// writeFileAtomic writes beside the target and renames over it, so a
-// reader (pf at boot) never sees a partial file.
+// writeFileAtomic writes a uniquely named file beside the target, flushes
+// it to disk, renames it over the target, and flushes the directory, so a
+// reader (pf at boot, launchd, systemd) sees the old file or the new one
+// whole — never a partial file — and a crash or power loss right after
+// cannot leave an empty one. Two writers never share a temporary name.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	fail := func(err error) error {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return fail(err)
+	}
+	// CreateTemp makes the file 0600; the target's mode is set before
+	// the file becomes visible under its name.
+	if err := f.Chmod(perm); err != nil {
+		return fail(err)
+	}
+	if err := f.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return nil
+	return syncDir(dir)
+}
+
+// syncDir flushes a directory, so a rename in it survives a crash.
+// Windows cannot flush a directory handle; there the rename stands alone.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // firewallVerdict is what a check found.

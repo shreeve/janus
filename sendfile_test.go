@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net"
@@ -769,5 +770,338 @@ func BenchmarkSendfileDelivery(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// sendfileOutcome runs one instruction for name through applySendfile.
+func sendfileOutcome(t *testing.T, name, method, suppliedETag string, headers http.Header) (int, string, http.Header) {
+	t.Helper()
+	dp, resp, _ := testSendfileResponse(t, method, http.StatusOK, name)
+	if suppliedETag != "" {
+		resp.Header.Set("ETag", suppliedETag)
+	}
+	for key, values := range headers {
+		resp.Request.Header[key] = values
+	}
+	dp.applySendfile(resp)
+	return resp.StatusCode, readSendfileBody(t, resp), resp.Header
+}
+
+// serveContentOutcome runs the same request through net/http ServeContent,
+// the semantics the sendfile contract promises to match.
+func serveContentOutcome(t *testing.T, name, method, etag string, headers http.Header) (int, string, http.Header) {
+	t.Helper()
+	file, err := os.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(method, "http://app.test/download", nil)
+	for key, values := range headers {
+		req.Header[key] = values
+	}
+	out := httptest.NewRecorder()
+	out.Header().Set("ETag", etag)
+	http.ServeContent(out, req, name, info.ModTime(), file)
+	return out.Code, out.Body.String(), out.Header()
+}
+
+func TestSendfileConditionalRequestsMatchServeContent(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "data.txt")
+	if err := os.WriteFile(name, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modtime := time.Date(2026, 1, 2, 3, 4, 5, 500_000_000, time.UTC)
+	if err := os.Chtimes(name, modtime, modtime); err != nil {
+		t.Fatal(err)
+	}
+	lastModified := modtime.Format(http.TimeFormat)
+	before := modtime.Add(-time.Hour).Format(http.TimeFormat)
+	after := modtime.Add(time.Hour).Format(http.TimeFormat)
+	defaultETag := fmt.Sprintf(`W/"%x-%x"`, modtime.UnixNano(), 10)
+
+	type headers = http.Header
+	for _, tc := range []struct {
+		name     string
+		method   string
+		supplied string // application ETag; empty keeps Janus's weak default
+		request  headers
+		want     int
+	}{
+		{"no conditions", http.MethodGet, "", nil, 200},
+		{"If-Match star", http.MethodGet, `"v1"`, headers{"If-Match": {"*"}}, 200},
+		{"If-Match strong hit", http.MethodGet, `"v1"`, headers{"If-Match": {`"v1"`}}, 200},
+		{"If-Match list hit", http.MethodGet, `"v1"`, headers{"If-Match": {`"x", "v1"`}}, 200},
+		{"If-Match miss", http.MethodGet, `"v1"`, headers{"If-Match": {`"x"`}}, 412},
+		{"If-Match weak never matches", http.MethodGet, `W/"w1"`, headers{"If-Match": {`W/"w1"`}}, 412},
+		{"If-Match against weak default", http.MethodGet, "", headers{"If-Match": {defaultETag}}, 412},
+		{"If-Match malformed", http.MethodGet, `"v1"`, headers{"If-Match": {`v1`}}, 412},
+		{"If-Match failure beats true If-Unmodified-Since", http.MethodGet, `"v1"`,
+			headers{"If-Match": {`"x"`}, "If-Unmodified-Since": {after}}, 412},
+		{"If-Match success beats false If-Unmodified-Since", http.MethodGet, `"v1"`,
+			headers{"If-Match": {`"v1"`}, "If-Unmodified-Since": {before}}, 200},
+		{"If-Unmodified-Since equal after truncation", http.MethodGet, "", headers{"If-Unmodified-Since": {lastModified}}, 200},
+		{"If-Unmodified-Since later", http.MethodGet, "", headers{"If-Unmodified-Since": {after}}, 200},
+		{"If-Unmodified-Since earlier", http.MethodGet, "", headers{"If-Unmodified-Since": {before}}, 412},
+		{"If-Unmodified-Since earlier on PUT", http.MethodPut, "", headers{"If-Unmodified-Since": {before}}, 412},
+		{"If-Unmodified-Since malformed", http.MethodGet, "", headers{"If-Unmodified-Since": {"yesterday"}}, 200},
+		{"If-None-Match strong", http.MethodGet, `"v1"`, headers{"If-None-Match": {`"v1"`}}, 304},
+		{"If-None-Match weak comparison", http.MethodGet, `"v1"`, headers{"If-None-Match": {`W/"v1"`}}, 304},
+		{"If-None-Match default weak", http.MethodHead, "", headers{"If-None-Match": {defaultETag}}, 304},
+		{"If-None-Match star", http.MethodGet, `"v1"`, headers{"If-None-Match": {"*"}}, 304},
+		{"If-None-Match miss", http.MethodGet, `"v1"`, headers{"If-None-Match": {`"x"`}}, 200},
+		{"If-None-Match hit on POST", http.MethodPost, `"v1"`, headers{"If-None-Match": {`"v1"`}}, 412},
+		{"If-None-Match miss beats If-Modified-Since", http.MethodGet, `"v1"`,
+			headers{"If-None-Match": {`"x"`}, "If-Modified-Since": {after}}, 200},
+		{"If-Match failure beats If-None-Match", http.MethodGet, `"v1"`,
+			headers{"If-Match": {`"x"`}, "If-None-Match": {`"v1"`}}, 412},
+		{"If-Modified-Since equal after truncation", http.MethodGet, "", headers{"If-Modified-Since": {lastModified}}, 304},
+		{"If-Modified-Since later", http.MethodGet, "", headers{"If-Modified-Since": {after}}, 304},
+		{"If-Modified-Since earlier", http.MethodGet, "", headers{"If-Modified-Since": {before}}, 200},
+		{"If-Modified-Since malformed", http.MethodGet, "", headers{"If-Modified-Since": {"soon"}}, 200},
+		{"If-Modified-Since ignored on POST", http.MethodPost, "", headers{"If-Modified-Since": {after}}, 200},
+		{"If-Range strong ETag hit", http.MethodGet, `"v1"`, headers{"Range": {"bytes=0-3"}, "If-Range": {`"v1"`}}, 206},
+		{"If-Range strong ETag miss", http.MethodGet, `"v1"`, headers{"Range": {"bytes=0-3"}, "If-Range": {`"x"`}}, 200},
+		{"If-Range weak ETag never satisfies", http.MethodGet, `W/"w1"`, headers{"Range": {"bytes=0-3"}, "If-Range": {`W/"w1"`}}, 200},
+		{"If-Range date equal", http.MethodGet, "", headers{"Range": {"bytes=0-3"}, "If-Range": {lastModified}}, 206},
+		{"If-Range date earlier", http.MethodGet, "", headers{"Range": {"bytes=0-3"}, "If-Range": {before}}, 200},
+		{"If-Range date later", http.MethodGet, "", headers{"Range": {"bytes=0-3"}, "If-Range": {after}}, 200},
+		{"If-Range malformed", http.MethodGet, "", headers{"Range": {"bytes=0-3"}, "If-Range": {"garbage"}}, 200},
+		{"If-Range without Range", http.MethodGet, `"v1"`, headers{"If-Range": {`"v1"`}}, 200},
+		{"If-Range ignored on POST", http.MethodPost, `"v1"`, headers{"Range": {"bytes=0-3"}, "If-Range": {`"x"`}}, 206},
+		{"Range after If-None-Match miss", http.MethodGet, `"v1"`, headers{"Range": {"bytes=2-5"}, "If-None-Match": {`"x"`}}, 206},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, header := sendfileOutcome(t, name, tc.method, tc.supplied, tc.request)
+			if status != tc.want {
+				t.Fatalf("sendfile status=%d want %d headers=%v", status, tc.want, header)
+			}
+			etag := tc.supplied
+			if etag == "" {
+				etag = defaultETag
+			}
+			stdStatus, stdBody, _ := serveContentOutcome(t, name, tc.method, etag, tc.request)
+			if stdStatus != status {
+				t.Fatalf("sendfile status=%d, ServeContent status=%d", status, stdStatus)
+			}
+			if (status == 200 || status == 206) && tc.method != http.MethodHead && stdBody != body {
+				t.Fatalf("sendfile body=%q, ServeContent body=%q", body, stdBody)
+			}
+			if got := header.Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("X-Content-Type-Options=%q", got)
+			}
+		})
+	}
+}
+
+func TestSendfileConditionHelpers(t *testing.T) {
+	modtime := time.Date(2026, 1, 2, 3, 4, 5, 500_000_000, time.UTC)
+	request := func(method string, pairs ...string) *http.Request {
+		req := httptest.NewRequest(method, "http://app.test/", nil)
+		for i := 0; i+1 < len(pairs); i += 2 {
+			req.Header.Set(pairs[i], pairs[i+1])
+		}
+		return req
+	}
+	strong := http.Header{"Etag": {`"v1"`}}
+	weak := http.Header{"Etag": {`W/"v1"`}}
+	lastModified := modtime.Format(http.TimeFormat)
+	earlier := modtime.Add(-time.Second).Format(http.TimeFormat)
+	later := modtime.Add(time.Second).Format(http.TimeFormat)
+	for _, tc := range []struct {
+		name string
+		got  sendfileCond
+		want sendfileCond
+	}{
+		{"IUS absent", checkSendfileIfUnmodifiedSince(request("GET"), modtime), sendfileCondNone},
+		{"IUS zero modtime", checkSendfileIfUnmodifiedSince(request("GET", "If-Unmodified-Since", lastModified), time.Time{}), sendfileCondNone},
+		{"IUS epoch modtime", checkSendfileIfUnmodifiedSince(request("GET", "If-Unmodified-Since", lastModified), time.Unix(0, 0)), sendfileCondNone},
+		{"IUS malformed", checkSendfileIfUnmodifiedSince(request("GET", "If-Unmodified-Since", "never"), modtime), sendfileCondNone},
+		{"IUS equal truncated", checkSendfileIfUnmodifiedSince(request("GET", "If-Unmodified-Since", lastModified), modtime), sendfileCondTrue},
+		{"IUS earlier", checkSendfileIfUnmodifiedSince(request("GET", "If-Unmodified-Since", earlier), modtime), sendfileCondFalse},
+		{"IUS RFC 850 date", checkSendfileIfUnmodifiedSince(request("GET", "If-Unmodified-Since", modtime.Format(time.RFC850)), modtime), sendfileCondTrue},
+		{"IUS asctime date", checkSendfileIfUnmodifiedSince(request("GET", "If-Unmodified-Since", modtime.Format(time.ANSIC)), modtime), sendfileCondTrue},
+		{"IMS absent", checkSendfileIfModifiedSince(request("GET"), modtime), sendfileCondNone},
+		{"IMS POST", checkSendfileIfModifiedSince(request("POST", "If-Modified-Since", lastModified), modtime), sendfileCondNone},
+		{"IMS zero modtime", checkSendfileIfModifiedSince(request("GET", "If-Modified-Since", lastModified), time.Time{}), sendfileCondNone},
+		{"IMS epoch modtime", checkSendfileIfModifiedSince(request("GET", "If-Modified-Since", lastModified), time.Unix(0, 0)), sendfileCondNone},
+		{"IMS malformed", checkSendfileIfModifiedSince(request("GET", "If-Modified-Since", "never"), modtime), sendfileCondNone},
+		{"IMS equal truncated", checkSendfileIfModifiedSince(request("HEAD", "If-Modified-Since", lastModified), modtime), sendfileCondFalse},
+		{"IMS earlier", checkSendfileIfModifiedSince(request("GET", "If-Modified-Since", earlier), modtime), sendfileCondTrue},
+		{"IR absent", checkSendfileIfRange(request("GET"), strong, modtime), sendfileCondNone},
+		{"IR POST", checkSendfileIfRange(request("POST", "If-Range", `"x"`), strong, modtime), sendfileCondNone},
+		{"IR strong hit", checkSendfileIfRange(request("GET", "If-Range", `"v1"`), strong, modtime), sendfileCondTrue},
+		{"IR strong miss", checkSendfileIfRange(request("GET", "If-Range", `"v2"`), strong, modtime), sendfileCondFalse},
+		{"IR weak request", checkSendfileIfRange(request("GET", "If-Range", `W/"v1"`), strong, modtime), sendfileCondFalse},
+		{"IR weak representation", checkSendfileIfRange(request("GET", "If-Range", `"v1"`), weak, modtime), sendfileCondFalse},
+		{"IR date equal", checkSendfileIfRange(request("GET", "If-Range", lastModified), strong, modtime), sendfileCondTrue},
+		{"IR date differs", checkSendfileIfRange(request("GET", "If-Range", later), strong, modtime), sendfileCondFalse},
+		{"IR date zero modtime", checkSendfileIfRange(request("GET", "If-Range", lastModified), strong, time.Time{}), sendfileCondFalse},
+		{"IR malformed", checkSendfileIfRange(request("GET", "If-Range", "nonsense"), strong, modtime), sendfileCondFalse},
+		{"IM weak list skips to strong", checkSendfileIfMatch(request("GET", "If-Match", `W/"v1", "v1"`), strong), sendfileCondTrue},
+		{"INM weak hit", checkSendfileIfNoneMatch(request("GET", "If-None-Match", `W/"v1"`), strong), sendfileCondFalse},
+		{"INM malformed", checkSendfileIfNoneMatch(request("GET", "If-None-Match", `v1`), strong), sendfileCondTrue},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s: got %d want %d", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// A file whose modification time is the Unix epoch has no usable date
+// validator, exactly as net/http's ServeContent treats it.
+func TestSendfileEpochModtimeMatchesServeContent(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "epoch.txt")
+	if err := os.WriteFile(name, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	epoch := time.Unix(0, 0)
+	if err := os.Chtimes(name, epoch, epoch); err != nil {
+		t.Fatal(err)
+	}
+	status, body, header := sendfileOutcome(t, name, http.MethodGet, "", nil)
+	if status != 200 || body != "0123456789" || header.Get("Last-Modified") != "" {
+		t.Fatalf("epoch file: status=%d body=%q headers=%v", status, body, header)
+	}
+	for _, request := range []http.Header{
+		{"If-Modified-Since": {epoch.UTC().Format(http.TimeFormat)}},
+		{"If-Unmodified-Since": {epoch.Add(-time.Hour).UTC().Format(http.TimeFormat)}},
+	} {
+		status, _, header = sendfileOutcome(t, name, http.MethodGet, "", request)
+		stdStatus, _, stdHeader := serveContentOutcome(t, name, http.MethodGet, header.Get("ETag"), request)
+		if status != http.StatusOK || stdStatus != status || stdHeader.Get("Last-Modified") != "" {
+			t.Fatalf("epoch %v: sendfile=%d ServeContent=%d std headers=%v", request, status, stdStatus, stdHeader)
+		}
+	}
+}
+
+func multipartPartCount(t *testing.T, contentType, body string) int {
+	t.Helper()
+	boundary, ok := strings.CutPrefix(contentType, "multipart/byteranges; boundary=")
+	if !ok {
+		return 0
+	}
+	reader := multipart.NewReader(strings.NewReader(body), boundary)
+	count := 0
+	for {
+		_, err := reader.NextPart()
+		if err == io.EOF {
+			return count
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		count++
+	}
+}
+
+func singleByteRanges(n int) string {
+	specs := make([]string, n)
+	for i := range specs {
+		specs[i] = fmt.Sprintf("%d-%d", i, i)
+	}
+	return "bytes=" + strings.Join(specs, ",")
+}
+
+func TestTooManyRanges(t *testing.T) {
+	for value, want := range map[string]bool{
+		"":                                  false,
+		"bytes=0-1":                         false,
+		singleByteRanges(maxRangeSpecs):     false,
+		singleByteRanges(maxRangeSpecs + 1): true,
+		singleByteRanges(maxRangeSpecs) + ", ,,\t,": false,
+		"items=" + strings.Repeat("0-0,", 40):       false,
+		"bytes=" + strings.Repeat("x,", 17):         true,
+	} {
+		if got := tooManyRanges(value); got != want {
+			t.Errorf("%q: got %v want %v", value, got, want)
+		}
+	}
+}
+
+// Sendfile and registered files apply one range policy: at most
+// maxRangeSpecs specs, and net/http's rule that ranges summing past the
+// representation size are ignored. Both answer every case identically.
+func TestSendfileAndFilesRangePolicyAgree(t *testing.T) {
+	content := strings.Repeat("abcdefghijklmnop", 4) // 64 bytes
+	name := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		value  string
+		status int
+		parts  int
+	}{
+		{"single", "bytes=2-5", 206, 0},
+		{"two disjoint", "bytes=0-1,8-9", 206, 2},
+		{"cap exactly", singleByteRanges(maxRangeSpecs), 206, maxRangeSpecs},
+		{"cap plus one", singleByteRanges(maxRangeSpecs + 1), 200, 0},
+		{"many ranges ignored", singleByteRanges(1000), 200, 0},
+		{"invalid beyond cap ignored", "bytes=" + strings.Repeat("x,", 17), 200, 0},
+		{"overlap within size", "bytes=0-9,5-14", 206, 2},
+		{"overlap past size", "bytes=0-,0-", 200, 0},
+		{"suffix overlap past size", "bytes=-64,10-20", 200, 0},
+		{"unsatisfiable", "bytes=100-200", 416, 0},
+		{"invalid", "bytes=5-1", 416, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := http.Header{"Range": {tc.value}}
+			status, body, header := sendfileOutcome(t, name, http.MethodGet, "", request)
+			if status != tc.status {
+				t.Fatalf("sendfile status=%d want %d", status, tc.status)
+			}
+			if got := multipartPartCount(t, header.Get("Content-Type"), body); got != tc.parts {
+				t.Fatalf("sendfile parts=%d want %d", got, tc.parts)
+			}
+			if status == 200 && body != content {
+				t.Fatalf("sendfile full body=%q", body)
+			}
+
+			file, err := os.Open(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := file.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "http://app.test/data.bin", nil)
+			req.Header.Set("Range", tc.value)
+			out := httptest.NewRecorder()
+			serveOpenedFile(out, req, file, info, "data.bin", filesCacheRevalidate)
+			file.Close()
+			if out.Code != tc.status {
+				t.Fatalf("files status=%d want %d", out.Code, tc.status)
+			}
+			if got := multipartPartCount(t, out.Header().Get("Content-Type"), out.Body.String()); got != tc.parts {
+				t.Fatalf("files parts=%d want %d", got, tc.parts)
+			}
+			if out.Code == 200 && out.Body.String() != content {
+				t.Fatalf("files full body=%q", out.Body.String())
+			}
+			if req.Header.Get("Range") != tc.value {
+				t.Fatal("files range policy mutated the caller's request")
+			}
+		})
+	}
+}
+
+func TestSendfileSetsNosniffOverApplicationValue(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "upload")
+	if err := os.WriteFile(name, []byte("<html><script>alert(1)</script>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dp, resp, _ := testSendfileResponse(t, http.MethodGet, http.StatusOK, name)
+	resp.Header.Set("X-Content-Type-Options", "sniff-please")
+	dp.applySendfile(resp)
+	_ = readSendfileBody(t, resp)
+	if got := resp.Header.Values("X-Content-Type-Options"); len(got) != 1 || got[0] != "nosniff" {
+		t.Fatalf("X-Content-Type-Options=%q", got)
 	}
 }

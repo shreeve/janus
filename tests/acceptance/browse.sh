@@ -16,53 +16,53 @@ case_browse_setup_and_listing() {
 	printf 'cold-root' >"$BROWSE_COLD_ROOT/cold.txt"
 
 	capi POST /1.0/apps \
-		"{\"name\":\"browse\",\"hosts\":[\"browseone.ripdev.io\",\"browsetwo.ripdev.io\"],\"lease\":\"process\",\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
+		"{\"name\":\"browse\",\"hosts\":[\"browseone.janus.localhost\",\"browsetwo.janus.localhost\"],\"lease\":\"process\",\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
 	printf '%s' "$id" >"$BROWSE_APP_FILE"
 
 	local body
-	body="$(http_body https://browseone.ripdev.io/)"
+	body="$(http_body https://browseone.janus.localhost/)"
 	json_has "$body" 'page.md'
 	json_has "$body" 'image.png'
 	json_has "$body" '/_janus/browse/'
-	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://browseone.ripdev.io/sub)" "308"
-	eq "$(http_body https://browseone.ripdev.io/sub/)" '<h1>index</h1>'
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://browseone.janus.localhost/sub)" "308"
+	eq "$(http_body https://browseone.janus.localhost/sub/)" '<h1>index</h1>'
 }
 
 case_browse_raw_and_renderer() {
-	eq "$(http_body 'https://browseone.ripdev.io/page.md?raw')" '# rendered'
-	eq "$(http_body https://browseone.ripdev.io/page.md)" '# rendered'
-	eq "$(http_body https://browsetwo.ripdev.io/page.md)" '# rendered'
+	eq "$(http_body 'https://browseone.janus.localhost/page.md?raw')" '# rendered'
+	eq "$(http_body https://browseone.janus.localhost/page.md)" '# rendered'
+	eq "$(http_body https://browsetwo.janus.localhost/page.md)" '# rendered'
 	local headers
-	headers="$(curl -sS -I --max-time 5 'https://browseone.ripdev.io/audio.mp3?raw' | tr -d '\r')"
+	headers="$(curl -sS -I --max-time 5 'https://browseone.janus.localhost/audio.mp3?raw' | tr -d '\r')"
 	json_has "$headers" 'content-type: audio/mpeg'
 	json_has "$headers" 'cache-control: no-cache'
 }
 
 case_browse_renderer_bounds() {
-	curl -sS --max-time 5 https://browseone.ripdev.io/wait.hold \
+	curl -sS --max-time 5 https://browseone.janus.localhost/wait.hold \
 		>"$TEST_RUN_DIR/browse/hold.out" &
 	local pid=$!
 	sleep 0.2
 	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
-		https://browsetwo.ripdev.io/wait.hold)" "503"
+		https://browsetwo.janus.localhost/wait.hold)" "503"
 	wait "$pid"
 	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
-		https://browseone.ripdev.io/wait.slow)" "504"
+		https://browseone.janus.localhost/wait.slow)" "504"
 	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
-		https://browseone.ripdev.io/wait.fail)" "502"
+		https://browseone.janus.localhost/wait.fail)" "502"
 }
 
 case_browse_cascade_lease_and_status() {
 	capi POST /1.0/apps \
-		"{\"name\":\"browseoff\",\"hosts\":[\"browseoff.ripdev.io\"],\"lease\":\"process\",\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
+		"{\"name\":\"browseoff\",\"hosts\":[\"browseoff.janus.localhost\"],\"lease\":\"process\",\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
 	eq "$REPLY_CODE" "201"
-	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://browseoff.ripdev.io/)" "404"
+	eq "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://browseoff.janus.localhost/)" "404"
 
 	capi POST /1.0/apps \
-		"{\"name\":\"browsereap\",\"hosts\":[\"browsereap.ripdev.io\"],\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
+		"{\"name\":\"browsereap\",\"hosts\":[\"browsereap.janus.localhost\"],\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
 	eq "$REPLY_CODE" "201"
 	local reap_id
 	reap_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -96,20 +96,20 @@ case_browse_cold_restart_and_conflict() {
 		echo "cold browse fixture disappeared: $BROWSE_COLD_ROOT/cold.txt" >&2
 		return 1
 	}
-	eq "$(http_body https://coldbrowse.ripdev.io/cold.txt)" "cold-root"
-	capi GET '/1.0/tls/ask?domain=coldbrowse.ripdev.io'
+	eq "$(http_body https://coldbrowse.janus.localhost/cold.txt)" "cold-root"
+	capi GET '/1.0/tls/ask?domain=coldbrowse.janus.localhost'
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"claim":"cold"'
-	capi POST /1.0/apps '{"name":"conflict","hosts":["coldbrowse.ripdev.io"]}'
+	capi POST /1.0/apps '{"name":"conflict","hosts":["coldbrowse.janus.localhost"]}'
 	eq "$REPLY_CODE" "409"
-	json_has "$REPLY_BODY" 'cold:coldbrowse.ripdev.io'
+	json_has "$REPLY_BODY" 'cold:coldbrowse.janus.localhost'
 	stop_caddy
 	start_caddy || return 1
 	[[ -f "$BROWSE_COLD_ROOT/cold.txt" ]] || {
 		echo "cold browse fixture disappeared across restart: $BROWSE_COLD_ROOT/cold.txt" >&2
 		return 1
 	}
-	eq "$(http_body https://coldbrowse.ripdev.io/cold.txt)" "cold-root"
+	eq "$(http_body https://coldbrowse.janus.localhost/cold.txt)" "cold-root"
 	capi GET /1.0/apps
-	[[ "$REPLY_BODY" != *'coldbrowse.ripdev.io'* ]]
+	[[ "$REPLY_BODY" != *'coldbrowse.janus.localhost'* ]]
 }

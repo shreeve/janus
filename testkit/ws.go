@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -15,16 +16,51 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// dialHub connects to the local edge (127.0.0.1:443) with SNI host and
-// completes the /hub WebSocket handshake. Verification off: the driver is
-// a fixture instrument and TLS trust is proven by the curl-based cases
-// (no curl -k anywhere in the suite).
-func dialHub(host, origin, cookie string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+// trustRoots resolves the roots a driver verifies the edge against: the
+// PEM bundle at path (a -cacert/--ca flag), else the bundle named by
+// SSL_CERT_FILE, else nil (the system roots). A named bundle replaces the
+// system roots, and it is loaded here because Go's macOS verifier ignores
+// SSL_CERT_FILE. A bundle that cannot be read or holds no certificate is
+// an error, never a silent fallback.
+func trustRoots(path string) (*x509.CertPool, error) {
+	if path == "" {
+		path = os.Getenv("SSL_CERT_FILE")
+	}
+	if path == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no certificate in %s", path)
+	}
+	return pool, nil
+}
+
+// cacertFlag removes a leading -cacert FILE (or --cacert FILE) from args
+// and returns the file and the remaining arguments.
+func cacertFlag(args []string) (string, []string) {
+	if len(args) >= 2 && (args[0] == "-cacert" || args[0] == "--cacert") {
+		return args[1], args[2:]
+	}
+	return "", args
+}
+
+// edgeAddr is the local edge the hub drivers dial.
+var edgeAddr = "127.0.0.1:443"
+
+// dialHub connects to the local edge (edgeAddr) with SNI host and
+// completes the /hub WebSocket handshake, verifying the edge's
+// certificate against roots (nil: the system roots).
+func dialHub(host, origin, cookie string, roots *x509.CertPool, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
 	d := websocket.Dialer{
 		NetDial: func(network, addr string) (net.Conn, error) {
-			return net.DialTimeout("tcp", "127.0.0.1:443", timeout)
+			return net.DialTimeout("tcp", edgeAddr, timeout)
 		},
-		TLSClientConfig:  &tls.Config{ServerName: host, InsecureSkipVerify: true},
+		TLSClientConfig:  &tls.Config{ServerName: host, RootCAs: roots, MinVersion: tls.VersionTLS12},
 		HandshakeTimeout: timeout,
 	}
 	hdr := http.Header{}
@@ -39,13 +75,18 @@ func dialHub(host, origin, cookie string, timeout time.Duration) (*websocket.Con
 
 // cmdWedge: complete the handshake, then never read — the slow-consumer
 // instrument. The kernel buffers fill and the edge's outbound queue trips.
+// Usage: testkit wedge --host H [--cacert FILE]; trust as for ws.
 func cmdWedge(args []string) {
-	var host string
-	flagValues(args, map[string]*string{"--host": &host})
+	var host, cacert string
+	flagValues(args, map[string]*string{"--host": &host, "--cacert": &cacert, "-cacert": &cacert})
 	if host == "" {
-		die("usage: testkit wedge --host H")
+		die("usage: testkit wedge --host H [--cacert FILE]")
 	}
-	conn, resp, err := dialHub(host, "-", "-", 5*time.Second)
+	roots, err := trustRoots(cacert)
+	if err != nil {
+		die("testkit wedge: trust: %v", err)
+	}
+	conn, resp, err := dialHub(host, "-", "-", roots, 5*time.Second)
 	if err != nil {
 		status := ""
 		if resp != nil {
@@ -61,7 +102,12 @@ func cmdWedge(args []string) {
 }
 
 // cmdWS: the hub acceptance driver — an RFC 6455 client with a command
-// DSL. Usage: testkit ws <host> <origin|-> <cookie|-> <cmd…>
+// DSL. Usage: testkit ws [-cacert FILE] <host> <origin|-> <cookie|-> <cmd…>
+//
+// The edge's certificate is verified, never skipped: against the PEM
+// bundle given by -cacert (or --cacert), else the bundle named by
+// SSL_CERT_FILE, else the system roots.
+//
 // Commands:
 //
 //	send=<json>          send a text frame
@@ -76,8 +122,9 @@ func cmdWedge(args []string) {
 //	pause=<ms>           sleep
 //	close                client-initiated close 1000
 func cmdWS(args []string) {
+	cacert, args := cacertFlag(args)
 	if len(args) < 3 {
-		die("usage: testkit ws HOST ORIGIN|- COOKIE|- CMD…")
+		die("usage: testkit ws [-cacert FILE] HOST ORIGIN|- COOKIE|- CMD…")
 	}
 	host, origin, cookie := args[0], args[1], args[2]
 	cmds := args[3:]
@@ -87,7 +134,11 @@ func cmdWS(args []string) {
 		os.Exit(1)
 	}
 
-	conn, resp, err := dialHub(host, origin, cookie, 10*time.Second)
+	roots, err := trustRoots(cacert)
+	if err != nil {
+		fail("trust: " + err.Error())
+	}
+	conn, resp, err := dialHub(host, origin, cookie, roots, 10*time.Second)
 	if err != nil {
 		if resp != nil {
 			fail(fmt.Sprintf("never opened: HTTP/1.1 %s", resp.Status))

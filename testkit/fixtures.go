@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,24 @@ func serveUnix(sock string, handler http.Handler) {
 		die("testkit: listen %s: %v", sock, err)
 	}
 	die("testkit: serve %s: %v", sock, http.Serve(l, handler))
+}
+
+// serveUnixAlso serves handler on every socket in the comma-separated also
+// list, then on sock. The extra listeners exist before sock does, so a
+// caller that waits for sock finds every path ready.
+func serveUnixAlso(sock, also string, handler http.Handler) {
+	for _, extra := range strings.Split(also, ",") {
+		if extra == "" {
+			continue
+		}
+		_ = os.Remove(extra)
+		l, err := net.Listen("unix", extra)
+		if err != nil {
+			die("testkit: listen %s: %v", extra, err)
+		}
+		go func() { die("testkit: serve %s: %v", extra, http.Serve(l, handler)) }()
+	}
+	serveUnix(sock, handler)
 }
 
 // appendLine appends s + "\n" to path (O_APPEND: concurrent writers safe).
@@ -182,7 +201,17 @@ func cmdAuthUpstream(args []string) {
 			w.WriteHeader(204)
 			return
 		}
-		appendLine(hits, fmt.Sprintf("%s %s remote-user=%s cookie=%s", r.Method, r.URL.RequestURI(), ru, ck))
+		// ids= records every identity header in any spelling (Remote_User,
+		// rip_site, …): whatever reaches an app, however it is spelled.
+		var ids []string
+		for name, vals := range r.Header {
+			canon := strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+			if canon == "remote-user" || canon == "rip-site" {
+				ids = append(ids, name+":"+strings.Join(vals, ","))
+			}
+		}
+		sort.Strings(ids)
+		appendLine(hits, fmt.Sprintf("%s %s remote-user=%s cookie=%s ids=%s", r.Method, r.URL.RequestURI(), ru, ck, dash(strings.Join(ids, ";"))))
 		io.Copy(io.Discard, r.Body)
 		sendText(w, 200, "remote-user:"+ru+"\n")
 	}))
@@ -209,13 +238,15 @@ func pyVal(s string, ok bool) string {
 // cmdHubTenant: the recording, scriptable bridge tenant. Serves POST
 // {bridge} (records as JSONL + answers from the playbook file),
 // answers any other request with plain:<path>, and heartbeats every app
-// id given (500ms; the suite's TTL is 2s).
+// id given (500ms; the suite's TTL is 2s). --also names further sockets
+// (comma-separated) served by the same handler: Janus gives each socket
+// path to one app, so each app the fixture serves gets its own path.
 func cmdHubTenant(args []string) {
-	var sock, hits, playbook string
+	var sock, also, hits, playbook string
 	appIDs := flagValues(args, map[string]*string{
-		"--sock": &sock, "--hits": &hits, "--playbook": &playbook})
+		"--sock": &sock, "--also": &also, "--hits": &hits, "--playbook": &playbook})
 	if sock == "" || hits == "" || playbook == "" {
-		die("usage: testkit hubtenant --sock S --hits F --playbook F ID…")
+		die("usage: testkit hubtenant --sock S [--also S2,S3…] --hits F --playbook F ID…")
 	}
 
 	go func() {
@@ -233,7 +264,7 @@ func cmdHubTenant(args []string) {
 	}()
 
 	var mu sync.Mutex
-	serveUnix(sock, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serveUnixAlso(sock, also, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			sendText(w, 200, "plain:"+r.URL.RequestURI()+"\n")
 			return

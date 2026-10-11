@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/caddyserver/caddy/v2"
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
+	"github.com/shreeve/janus"
 	"github.com/spf13/cobra"
 	"io"
 	"net"
@@ -43,10 +44,16 @@ func exportRootCA(cmd *cobra.Command, address, path string) error {
 	if err := json.NewDecoder(resp.Body).Decode(&ca); err != nil || ca.Root == "" {
 		return errors.New("admin API: /pki/ca/local carried no root certificate")
 	}
+	root := parseRootCA([]byte(ca.Root))
+	if root == nil {
+		return errors.New("admin API: /pki/ca/local carried no parseable root certificate")
+	}
 	if err := os.WriteFile(path, []byte(ca.Root), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
+	// The fingerprint, to compare on the machine that imports the file
+	// (`openssl x509 -noout -fingerprint -sha256 -in <file>`).
+	fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\nsha256 %s\n", path, janus.CertFingerprint(root.Raw))
 	return nil
 }
 
@@ -75,27 +82,38 @@ type edgeStatus struct {
 	Supervisor   string `json:"supervisor,omitempty"` // item name, or "pidfile"
 	Autostart    bool   `json:"autostart"`            // the item file exists
 	Loaded       bool   `json:"loaded"`               // the manager holds the job
-	Binary       string `json:"binary"`
-	Version      string `json:"version"`
-	Janus        string `json:"janus"`
-	Caddy        string `json:"caddy"`
-	BinaryNewer  bool   `json:"binary_newer"`
-	Config       string `json:"config"`
-	Sites        string `json:"sites"`
-	Env          string `json:"env"`
-	State        string `json:"state"`
-	Socket       string `json:"socket"` // control internal socket
-	Admin        string `json:"admin"`  // Caddy admin socket
-	Log          string `json:"log"`
-	Control      string `json:"control,omitempty"`
-	Apps         *int   `json:"apps,omitempty"` // only when control answered
+	// CrashLoop: the manager holds the job, no edge runs, and the last
+	// one exited with a failure, so the manager keeps starting it again.
+	// LastError is the supervisor log's last error line, with its
+	// timestamp, whenever the job is held, no edge runs, and the last
+	// exit was not a clean one.
+	CrashLoop   bool   `json:"crash_loop,omitempty"`
+	LastExit    *int   `json:"last_exit,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
+	Binary      string `json:"binary"`
+	Version     string `json:"version"`
+	Janus       string `json:"janus"`
+	Caddy       string `json:"caddy"`
+	BinaryNewer bool   `json:"binary_newer"`
+	Config      string `json:"config"`
+	Sites       string `json:"sites"`
+	Env         string `json:"env"`
+	State       string `json:"state"`
+	Socket      string `json:"socket"` // control internal socket
+	Admin       string `json:"admin"`  // Caddy admin socket
+	Log         string `json:"log"`
+	Control     string `json:"control,omitempty"`
+	Apps        *int   `json:"apps,omitempty"` // only when control answered
 	// The local CA that signs .local and .localhost names: its root
-	// certificate on disk, whether this machine's trust store accepts it,
-	// and the front door a phone trusts it from (when mdns answered).
-	CA           string `json:"ca,omitempty"`
-	CATrusted    *bool  `json:"ca_trusted,omitempty"`
-	TrustURL     string `json:"trust_url,omitempty"`
-	DashboardURL string `json:"dashboard_url,omitempty"`
+	// certificate on disk, its SHA-256 fingerprint (as openssl prints it,
+	// to compare with what a device is offered over plain HTTP), whether
+	// this machine's trust store accepts it, and the front door a phone
+	// trusts it from (when mdns answered).
+	CA            string `json:"ca,omitempty"`
+	CAFingerprint string `json:"ca_fingerprint,omitempty"`
+	CATrusted     *bool  `json:"ca_trusted,omitempty"`
+	TrustURL      string `json:"trust_url,omitempty"`
+	DashboardURL  string `json:"dashboard_url,omitempty"`
 	// The exposure mode. Bind is what JANUS_BIND carries; Firewall is
 	// verified / missing / unverified / none; Listeners are the front-door
 	// addresses the mode admits, each with how its reach is enforced.
@@ -155,6 +173,24 @@ func gatherStatus(p servicePaths) edgeStatus {
 	}
 	st.Running = st.PID > 0 || st.Control != ""
 	st.Unresponsive = st.PID > 0 && st.Control == ""
+	// Held but not running: a clean stop (the last exit was 0) needs no
+	// explanation; anything else shows why, from the supervisor log.
+	if st.Loaded && !st.Running {
+		if item, ok := itemFor(p).(exitReporter); ok {
+			if code, known := item.lastExit(); known {
+				st.LastExit = &code
+				st.CrashLoop = code != 0
+				if rr, ok := item.(restartReporter); ok && st.CrashLoop {
+					if pending, known := rr.restartPending(); known {
+						st.CrashLoop = pending
+					}
+				}
+			}
+		}
+		if st.LastExit == nil || *st.LastExit != 0 {
+			st.LastError = lastSupervisorError(p.sup)
+		}
+	}
 	gatherCA(&st, p)
 	if st.PID > 0 {
 		st.Uptime = elapsed(st.PID)
@@ -366,6 +402,7 @@ func gatherCA(st *edgeStatus, p servicePaths) {
 	}
 	trusted := verifyCA(root) == nil
 	st.CATrusted = &trusted
+	st.CAFingerprint = janus.CertFingerprint(root.Raw)
 }
 
 func statusEdge(p servicePaths, cmd *cobra.Command, asJSON bool, note string) error {
@@ -408,8 +445,13 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 		fmt.Fprintf(out, "edge     running (pid %d)\n", st.PID)
 	case st.Running:
 		fmt.Fprintln(out, "edge     running (pid unknown: answered on control)")
+	case st.CrashLoop:
+		fmt.Fprintf(out, "edge     CRASH LOOP: %s keeps starting it and it exits (status %d); 'janus logs --supervisor' has the history\n", st.Supervisor, *st.LastExit)
 	default:
 		fmt.Fprintln(out, "edge     stopped")
+	}
+	if st.LastError != "" {
+		fmt.Fprintf(out, "error    %s\n", st.LastError)
 	}
 	switch {
 	case st.Supervisor == "pidfile" && st.Autostart:
@@ -445,6 +487,9 @@ func printStatus(out io.Writer, p servicePaths, st edgeStatus) {
 		fmt.Fprintln(out, "ca       trusted on this machine")
 	case st.CATrusted != nil:
 		fmt.Fprintln(out, "ca       not trusted on this machine: browsers warn on its https names ('janus trust')")
+	}
+	if st.CAFingerprint != "" {
+		fmt.Fprintf(out, "         sha256 %s\n", st.CAFingerprint)
 	}
 	if st.TrustURL != "" {
 		fmt.Fprintf(out, "         phones and other devices trust it at %s\n", st.TrustURL)

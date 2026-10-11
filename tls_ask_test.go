@@ -120,6 +120,13 @@ func TestTLSAskGetOnly(t *testing.T) {
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST ask: want 405, got %d", rr.Code)
 	}
+	// The GET route serves HEAD with the GET answer's status.
+	req = httptest.NewRequest(http.MethodHead, "/1.0/tls/ask?domain=shop.example.com", nil)
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("HEAD ask for an unknown name: want 404, got %d", rr.Code)
+	}
 }
 
 func TestTLSAskWildcardNeverMatches(t *testing.T) {

@@ -215,6 +215,18 @@ func (h *Handler) hubReadLoop(c *hubConn) {
 			c.closeWith(code, reason)
 			return
 		}
+		// A close that began while this frame was in flight ends the
+		// reader; a connection that is closing (a kick's final frame or a
+		// slow-consumer close still on its way out) reads on so control
+		// frames are answered, and executes and forwards nothing.
+		select {
+		case <-c.closedCh:
+			return
+		default:
+		}
+		if c.closing() {
+			continue
+		}
 		if mt != websocket.TextMessage {
 			hub.ctr.rejectedFrames.Add(1)
 			c.closeWith(hubCloseUnsupported, "binary frames are not supported")

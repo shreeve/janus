@@ -44,6 +44,7 @@ type wtSession struct {
 	sess        *webtransport.Session
 	udp         *net.UDPConn
 	local       netip.AddrPort
+	conn        *wtConn // the QUIC connection under the session; nil when unknown
 	user        string
 	maxDatagram int
 	ring        *wtRing
@@ -72,10 +73,10 @@ func wtDialTarget(target netip.AddrPort) (*net.UDPConn, error) {
 	return c, nil
 }
 
-func newWtSession(relay *wtRelay, route *wtRoute, sess *webtransport.Session, udp *net.UDPConn, local netip.AddrPort, user string, maxDatagram int) *wtSession {
+func newWtSession(relay *wtRelay, route *wtRoute, sess *webtransport.Session, conn *wtConn, udp *net.UDPConn, local netip.AddrPort, user string, maxDatagram int) *wtSession {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &wtSession{
-		relay: relay, route: route, sess: sess, udp: udp, local: local, user: user,
+		relay: relay, route: route, sess: sess, conn: conn, udp: udp, local: local, user: user,
 		maxDatagram: maxDatagram, started: time.Now(), ctx: ctx, cancel: cancel,
 		done: make(chan struct{}),
 	}
@@ -91,6 +92,9 @@ func (s *wtSession) run() {
 	s.relay.sessMu.Lock()
 	s.relay.sessions[s] = struct{}{}
 	s.relay.sessMu.Unlock()
+	if s.conn != nil {
+		s.conn.sessionStarted()
+	}
 	s.relay.logger.Info("janus webtransport session open",
 		zap.String("route", wtRouteKey(s.route.host, s.route.path)), zap.String("user", s.user))
 	go s.fromBrowser()
@@ -135,6 +139,11 @@ func (s *wtSession) closer() {
 		zap.Int64("dropped", s.drops.Load()), zap.Uint32("code", uint32(s.endCode)), zap.String("reason", s.endMsg))
 	if s.sess.Context().Err() == nil {
 		_ = s.sess.CloseWithError(s.endCode, s.endMsg)
+	}
+	// The session's close capsule is out (CloseWithError returned once the
+	// session context ended); the connection under it goes with it.
+	if s.conn != nil {
+		s.conn.sessionEnded()
 	}
 }
 

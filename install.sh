@@ -9,7 +9,8 @@
 #   curl -fsSL .../install.sh | bash -s v1.19.0
 #
 # Downloads the release archive for this platform, verifies its sha256
-# against the published checksums, and runs the archive's own installer.
+# against the published checksums (and, when the GitHub CLI is installed,
+# its build provenance attestation), and runs the archive's own installer.
 # As a user, janus lands in ~/.local/bin — the XDG home for user
 # executables; as root it lands in /usr/local/bin, so a system deploy
 # (systemd unit, setcap) keeps its path. Override either with BIN=...;
@@ -51,6 +52,23 @@ uninstall() {
   if [ "$(uname -s)" = Darwin ]; then
     if [ "$(id -u)" = 0 ]; then plist="/Library/LaunchDaemons/${JANUS_SERVICE_LABEL:-janus.edge}.plist"; else plist="$HOME/Library/LaunchAgents/${JANUS_SERVICE_LABEL:-janus.edge}.plist"; fi
     [ -e "$plist" ] && fail "the service item $(tildify "$plist") is still installed; run 'janus autostart off stop' first"
+  fi
+  # systemd: this account's own unit (root's system unit, a user's user
+  # unit) by its file or by the manager reporting it active, and any other
+  # janus unit whose ExecStart runs the binary about to go (a user's unit
+  # can run root's /usr/local/bin/janus).
+  if [ "$(uname -s)" = Linux ]; then
+    unit="${JANUS_SERVICE_LABEL:-janus}.service"
+    if [ "$(id -u)" = 0 ]; then own="/etc/systemd/system/$unit" scope=
+    else own="$HOME/.config/systemd/user/$unit" scope=--user; fi
+    [ -e "$own" ] && fail "the service unit $(tildify "$own") is still installed; run 'janus autostart off stop' first"
+    if command -v systemctl >/dev/null && systemctl ${scope:+"$scope"} is-active --quiet "$unit" 2>/dev/null; then
+      fail "the service unit $unit is active; run 'janus autostart off stop' first"
+    fi
+    for other in /etc/systemd/system/"$unit" /home/*/.config/systemd/user/"$unit" /root/.config/systemd/user/"$unit"; do
+      [ -r "$other" ] && grep -qF "ExecStart=\"$BIN/$NAME\"" "$other" \
+        && fail "the service unit $other runs $BIN/$NAME; its owner runs 'janus autostart off stop' first"
+    done
   fi
   rm -f "$BIN/$NAME" || fail "cannot remove $(tildify "$BIN/$NAME") — re-run under sudo if it was installed system-wide"
   # macOS: the command was a symlink into the application bundle; the
@@ -125,6 +143,24 @@ main() {
   want=$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/checksums.txt")
   [ -n "$want" ]        || fail "no checksum published for $asset"
   [ "$sum" = "$want" ]  || fail "checksum mismatch for $asset"
+  info "verified: sha256 of $asset matches $NAME-$tag-checksums.txt"
+
+  # --- optional: the build provenance attestation ---------------------------
+  # Each release archive carries a signed provenance attestation. With the
+  # GitHub CLI installed and signed in, check that this archive was built by
+  # this repository's release workflow from this tag on a GitHub-hosted
+  # runner. Never required: without gh, or when it cannot verify (no
+  # sign-in, a release older than its attestations), the sha256 above is
+  # the check, and this says so.
+  if command -v gh >/dev/null; then
+    if gh_out=$(gh attestation verify "$tmp/$asset" -R "$REPO" \
+        --signer-workflow "$REPO/.github/workflows/release.yml" \
+        --source-ref "refs/tags/$tag" --deny-self-hosted-runners 2>&1); then
+      info "verified: build provenance attestation — $asset was built by $REPO's release workflow from $tag"
+    else
+      info "build provenance not verified (gh attestation verify: ${gh_out##*$'\n'}); relying on the sha256 check"
+    fi
+  fi
 
   # --- extract and hand off to the archive's own installer ------------------
   tar -xzf "$tmp/$asset" -C "$tmp"

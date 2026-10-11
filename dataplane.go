@@ -57,6 +57,18 @@ const (
 	// upstreamDialTimeout bounds one unix-socket dial.
 	upstreamDialTimeout = 3 * time.Second
 
+	// upstreamResponseHeaderTimeout bounds the wait for a worker's
+	// response headers, counted from the moment the request (body
+	// included) is fully written. It is generous on purpose: a slow
+	// report or export that computes before answering must finish, while
+	// a worker that accepted and never answers must not pin the client —
+	// and, with a published concurrency, its socket's slot — forever.
+	// Past it the client gets 504 and the socket is marked unhealthy for
+	// the usual window. Response bodies, upgraded connections, and
+	// streams after the headers are unbounded; the doorbell ring and hub
+	// bridge POSTs carry their own shorter bounds.
+	upstreamResponseHeaderTimeout = 120 * time.Second
+
 	// retryAfter accompanies every data-plane 503.
 	retryAfter = "1"
 
@@ -144,10 +156,11 @@ func newDataPlane(reg *appRegistry, logger *zap.Logger) *dataPlane {
 		flights:          map[string]*ringFlight{},
 	}
 	dp.transport = &http.Transport{
-		DialContext:         dp.dialUpstream,
-		DisableCompression:  true,
-		MaxIdleConnsPerHost: 32,
-		IdleConnTimeout:     90 * time.Second,
+		DialContext:           dp.dialUpstream,
+		DisableCompression:    true,
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: upstreamResponseHeaderTimeout,
 	}
 	return dp
 }
@@ -158,9 +171,18 @@ func (dp *dataPlane) serve(w http.ResponseWriter, r *http.Request) error {
 	rec, ok := dp.registry.resolveRequestHost(r.Host)
 	if !ok {
 		accessFactsOf(r).clearOwner()
-		return caddyhttp.Error(http.StatusNotFound, fmt.Errorf("janus: unknown host %q", host))
+		return unknownHostError(w, fmt.Errorf("janus: unknown host %q", host))
 	}
 	return dp.serveResolved(w, r, host, rec)
+}
+
+// unknownHostError is every Janus 404 for a host the registry does not
+// resolve. The registry is memory-only — a restart empties it until tenants
+// re-register, and a host can be claimed at any moment — so the 404 carries
+// Cache-Control: no-store: no browser or CDN may keep it past the gap.
+func unknownHostError(w http.ResponseWriter, err error) error {
+	w.Header().Set("Cache-Control", "no-store")
+	return caddyhttp.Error(http.StatusNotFound, err)
 }
 
 // serveResolved continues the decision table from an already-resolved
@@ -198,8 +220,7 @@ func (dp *dataPlane) serveResolved(w http.ResponseWriter, r *http.Request, host 
 			rec, ok = dp.registry.resolveHost(host)
 			if !ok {
 				accessFactsOf(r).clearOwner()
-				return caddyhttp.Error(http.StatusNotFound,
-					fmt.Errorf("janus: host %q vanished during ring", host))
+				return unknownHostError(w, fmt.Errorf("janus: host %q vanished during ring", host))
 			}
 			accessFactsOf(r).setOwner(rec)
 		case ringBootError:
@@ -543,8 +564,7 @@ func (dp *dataPlane) proxyWorkers(w http.ResponseWriter, r *http.Request, host s
 			fresh, ok := dp.registry.resolveHost(host)
 			if !ok {
 				accessFactsOf(r).clearOwner()
-				return nil, caddyhttp.Error(http.StatusNotFound,
-					fmt.Errorf("janus: host %q vanished during capacity wait", host))
+				return nil, unknownHostError(w, fmt.Errorf("janus: host %q vanished during capacity wait", host))
 			}
 			accessFactsOf(r).setOwner(fresh)
 			if _, bell := doorbellOf(fresh); bell || len(fresh.Upstreams) == 0 || fresh.ID != rec.ID {
@@ -793,6 +813,70 @@ func attemptOf(ctx context.Context) *attemptState {
 	return st
 }
 
+// setForwardedHeaders writes X-Forwarded-For, -Proto, and -Host the way
+// Caddy's own reverse_proxy does. Apps behind Janus key rate limits and
+// audit trails on these headers, so a client's claim never survives unless
+// the server's trusted_proxies vouch for the immediate peer:
+//
+//   - Untrusted peer (the default): the inbound values are discarded —
+//     ReverseProxy's Rewrite hook already cleared them from the outbound
+//     request — and the app sees one hop, the peer Janus saw, with the
+//     scheme and Host of Janus's own hop.
+//   - Trusted peer: the inbound X-Forwarded-For chain is kept and the peer
+//     is appended; the inbound X-Forwarded-Proto and X-Forwarded-Host (their
+//     last values) are kept when present.
+//
+// X-Real-IP has no trusted form here and is always stripped, so an app that
+// reads it never sees a client's claim. Pinned by
+// TestInboundXForwardedIsReplacedNotAppended and
+// TestTrustedProxyXForwardedIsAppended.
+func setForwardedHeaders(pr *httputil.ProxyRequest) {
+	in, out := pr.In, pr.Out.Header
+	out.Del("X-Real-Ip")
+	trusted, _ := caddyhttp.GetVar(in.Context(), caddyhttp.TrustedProxyVarKey).(bool)
+
+	clientIP := ""
+	if host, _, err := net.SplitHostPort(in.RemoteAddr); err == nil {
+		clientIP, _, _ = strings.Cut(host, "%")
+	}
+	chain := clientIP
+	if prior := strings.Join(in.Header.Values("X-Forwarded-For"), ", "); trusted && prior != "" {
+		chain = prior
+		if clientIP != "" {
+			chain += ", " + clientIP
+		}
+	}
+	if chain != "" {
+		out.Set("X-Forwarded-For", chain)
+	} else {
+		out.Del("X-Forwarded-For")
+	}
+
+	proto := "http"
+	if in.TLS != nil {
+		proto = "https"
+	}
+	host := in.Host
+	if trusted {
+		if prior := lastHeaderValue(in.Header, "X-Forwarded-Proto"); prior != "" {
+			proto = prior
+		}
+		if prior := lastHeaderValue(in.Header, "X-Forwarded-Host"); prior != "" {
+			host = prior
+		}
+	}
+	out.Set("X-Forwarded-Proto", proto)
+	out.Set("X-Forwarded-Host", host)
+}
+
+func lastHeaderValue(h http.Header, name string) string {
+	values := h.Values(name)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[len(values)-1]
+}
+
 // newProxy builds the reusable ReverseProxy for one socket path; it lives on
 // the socket's upstreamState (built once, under acquireUpstream's lock). The
 // struct carries no per-request state (that lives in attemptState), so one
@@ -822,14 +906,7 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 					st.autoGzip = true
 				}
 			}
-			// X-Forwarded-* are the peer WE saw, never what the client
-			// claimed: ReverseProxy's Rewrite hook clears the inbound
-			// values before this runs, so SetXForwarded has nothing to
-			// append to and the app receives one hop — ours. Apps
-			// behind Janus key rate limits and audit trails on that
-			// header, so the guarantee is pinned by
-			// TestInboundXForwardedIsReplacedNotAppended.
-			pr.SetXForwarded()
+			setForwardedHeaders(pr)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if authWallActive(resp.Request.Context()) {
@@ -892,6 +969,16 @@ func (dp *dataPlane) newProxy(path string) *httputil.ReverseProxy {
 		ErrorLog: zap.NewStdLog(dp.logger),
 	}
 	return rp
+}
+
+// responseHeaderTimedOut reports the transport's response-header timeout.
+// proxyOnce consults it only after ruling out a dial failure (wrapped in
+// dialError) and the request context ending (a hub bridge POST's own
+// deadline, or the client leaving), so the one timeout the shared transport
+// can still raise is the wait for response headers.
+func responseHeaderTimedOut(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // proxyOnce streams the request to one worker socket. It returns final=true
@@ -961,6 +1048,24 @@ func (dp *dataPlane) proxyOnce(w http.ResponseWriter, r *http.Request, path stri
 			zap.Error(at.err),
 		)
 		return false, false
+	}
+
+	if responseHeaderTimedOut(at.err) {
+		// The worker accepted the request and never answered within
+		// upstreamResponseHeaderTimeout. It may have acted on the request,
+		// so nothing is retried: the client gets 504, the transport has
+		// closed the connection, and the deferred release frees the
+		// in-flight charge. The socket stays healthy: one slow request (a
+		// long poll that withholds its headers, a heavy report) is not
+		// evidence the worker is broken, and an unhealthy mark would turn
+		// it into a 503 for every client of a one-socket app.
+		dp.logger.Warn("janus upstream response header timeout",
+			zap.String("upstream", path),
+			zap.Error(at.err),
+		)
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+		return true, false
 	}
 
 	// Dial succeeded and the worker misbehaved before a response landed.

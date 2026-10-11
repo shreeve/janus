@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -98,6 +99,7 @@ func passVerify(password, blob string) bool {
 type authSession struct {
 	user     string
 	host     string
+	cred     string // the passhash the session was minted against
 	issuedAt time.Time
 	lastSeen time.Time
 }
@@ -105,6 +107,7 @@ type authSession struct {
 // authThrottleEntry is one ladder/ban row for a throttle key.
 type authThrottleEntry struct {
 	fails        int
+	inflight     int // attempts loginClaim admitted and that have not ended
 	blockedUntil time.Time
 	banUntil     time.Time
 	lastFail     time.Time
@@ -151,7 +154,79 @@ type authStore struct {
 	reapStop chan struct{}
 	reapDone chan struct{}
 
+	// logger carries the audit events the store itself observes (control
+	// and reload revocations); the committed generation's App logger,
+	// refreshed at every reconcile. Nil logs nothing.
+	logger atomic.Pointer[zap.Logger]
+
 	now func() time.Time
+}
+
+// --- audit trail -------------------------------------------------------------
+//
+// Every login outcome, throttle or ban, sign-out, and session revocation
+// is logged through zap: info for success and sign-out, warn for failure,
+// throttle, and ban. Each event carries host, gate, client_ip, and user
+// where the event has them. Passwords, tokens, CSRF values, and session
+// ids are never logged. A failed login logs one message whether the user
+// is unknown, the password wrong, or the user not on the gate's list.
+
+// authLogUserCap bounds an attempted username in the audit trail.
+const authLogUserCap = 64
+
+// authLogUser renders a submitted username for the audit trail: capped at
+// authLogUserCap bytes, every byte outside printable ASCII replaced by ?,
+// so a hostile name can neither flood nor forge log lines.
+func authLogUser(raw string) string {
+	if len(raw) > authLogUserCap {
+		raw = raw[:authLogUserCap]
+	}
+	b := []byte(raw)
+	for i, c := range b {
+		if c < 0x21 || c > 0x7e {
+			b[i] = '?'
+		}
+	}
+	return string(b)
+}
+
+// authAuditFields are the fields every door event carries.
+func authAuditFields(r *http.Request, g *authGate, user string) []zap.Field {
+	return []zap.Field{
+		zap.String("host", normalizeHostHeader(r.Host)),
+		zap.String("gate", g.prefix),
+		zap.String("client_ip", authClientIP(r)),
+		zap.String("user", authLogUser(user)),
+	}
+}
+
+func (h *Handler) authLog() *zap.Logger {
+	if h.logger == nil {
+		return zap.NewNop()
+	}
+	return h.logger
+}
+
+// authSetUserID records the authenticated user for Caddy's access log
+// (its user_id field reads the http.auth.user.id placeholder).
+func authSetUserID(r *http.Request, user string) {
+	if repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer); ok {
+		repl.Set("http.auth.user.id", user)
+	}
+}
+
+// auditRevoked records one session ended by an operator ("control") or a
+// reload ("reload"): host and username, never a token or session id.
+func (st *authStore) auditRevoked(via string, s authSession) {
+	l := st.logger.Load()
+	if l == nil {
+		return
+	}
+	l.Info("janus auth: session revoked",
+		zap.String("via", via),
+		zap.String("host", s.host),
+		zap.String("user", s.user),
+	)
 }
 
 func newAuthStore() (*authStore, error) {
@@ -212,19 +287,9 @@ func (st *authStore) reap() {
 		}
 	}
 	for k, t := range st.throttle {
-		if t == nil {
-			delete(st.throttle, k)
-			continue
-		}
-		if !t.banUntil.IsZero() && now.Before(t.banUntil) {
-			continue // active ban
-		}
-		if !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
-			continue // active ladder wait
-		}
-		// Keep ladder state until 24h after the last failure so counts
-		// survive across wait windows; drop cold rows.
-		if t.lastFail.IsZero() || now.Sub(t.lastFail) > authThrottleBan {
+		// Keep ladder state until its window passes after the last failure
+		// so counts survive across wait windows; drop cold rows.
+		if throttleRowCold(k, t, now) {
 			delete(st.throttle, k)
 		}
 	}
@@ -247,8 +312,9 @@ func (st *authStore) sessionKey(token string) string {
 
 // mint issues a fresh session: 128 bits from crypto/rand, minted only at
 // successful login — a client-proposed token is never accepted, so
-// session fixation is dead by construction.
-func (st *authStore) mint(user, host string) (string, error) {
+// session fixation is dead by construction. The session remembers the
+// credential it was minted against: a changed passhash ends it.
+func (st *authStore) mint(user, host, cred string) (string, error) {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("janus auth: minting session token: %w", err)
@@ -257,7 +323,7 @@ func (st *authStore) mint(user, host string) (string, error) {
 	now := st.now()
 	st.mu.Lock()
 	st.sessions[st.sessionKey(token)] = &authSession{
-		user: user, host: strings.ToLower(host),
+		user: user, host: strings.ToLower(host), cred: cred,
 		issuedAt: now, lastSeen: now,
 	}
 	st.mu.Unlock()
@@ -268,13 +334,17 @@ func (st *authStore) mint(user, host string) (string, error) {
 // requesting site's effective ttl. Expired entries are deleted lazily;
 // an authorized call may request a sliding lastSeen refresh.
 func (st *authStore) lookup(token, host string, ttl time.Duration, refresh bool) (user string, issuedAt time.Time, ok bool) {
-	return st.lookupAllowed(token, host, ttl, refresh, nil)
+	return st.lookupAllowed(token, host, ttl, refresh, nil, nil)
 }
 
 // lookupAllowed combines session validation, gate authorization, and the
 // optional sliding refresh under one HMAC and one store lock. A nil allow set
-// means the caller only needs a host-valid live session.
-func (st *authStore) lookupAllowed(token, host string, ttl time.Duration, refresh bool, allow map[string]bool) (user string, issuedAt time.Time, ok bool) {
+// means the caller only needs a host-valid live session. A non-nil users
+// table (name → passhash) additionally requires the session's user to be
+// present with the very credential the session was minted against, so a
+// changed passhash ends the session on its next request, before the
+// reload's store sweep runs.
+func (st *authStore) lookupAllowed(token, host string, ttl time.Duration, refresh bool, allow map[string]bool, users map[string]string) (user string, issuedAt time.Time, ok bool) {
 	if token == "" {
 		return "", time.Time{}, false
 	}
@@ -298,55 +368,88 @@ func (st *authStore) lookupAllowed(token, host string, ttl time.Duration, refres
 	if allow != nil && !allow[s.user] {
 		return "", time.Time{}, false
 	}
+	if users != nil {
+		if cred, present := users[s.user]; !present || cred != s.cred {
+			return "", time.Time{}, false
+		}
+	}
 	if refresh {
 		s.lastSeen = now
 	}
 	return s.user, s.issuedAt, true
 }
 
-// revokeToken revokes the session a cookie names. Revoking an
-// already-dead session is a success, not an error.
-func (st *authStore) revokeToken(token string) {
+// revokeToken revokes the session a cookie names and reports the session
+// it ended (ok=false when none was live). Revoking an already-dead
+// session is a success, not an error.
+func (st *authStore) revokeToken(token string) (ended authSession, ok bool) {
 	if token == "" {
-		return
+		return authSession{}, false
 	}
 	key := st.sessionKey(token)
 	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.sessions[key]
+	if s == nil {
+		return authSession{}, false
+	}
 	delete(st.sessions, key)
-	st.mu.Unlock()
+	return *s, true
 }
 
+// authSessionIDMin is the shortest id prefix revoke-by-id accepts. A
+// listed id is 12 hex characters; a prefix shorter than 8 could name a
+// session nobody listed.
+const authSessionIDMin = 8
+
 // revokeID revokes one session by id prefix (the /1.0/auth/sessions id:
-// a 12-hex prefix of the HMACed store key). The prefix must resolve a
-// unique key: none → found=false; several → ambiguous=true.
+// a 12-hex prefix of the HMACed store key). The prefix must be at least
+// authSessionIDMin lowercase hex characters and resolve a unique key:
+// too short, malformed, or no match → found=false; several →
+// ambiguous=true.
 func (st *authStore) revokeID(prefix string) (found, ambiguous bool) {
+	if len(prefix) < authSessionIDMin || len(prefix) > sha256.Size*2 {
+		return false, false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if c := prefix[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false, false
+		}
+	}
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	match := ""
 	for k := range st.sessions {
 		if strings.HasPrefix(k, prefix) {
 			if match != "" {
+				st.mu.Unlock()
 				return false, true
 			}
 			match = k
 		}
 	}
 	if match == "" {
+		st.mu.Unlock()
 		return false, false
 	}
+	ended := *st.sessions[match]
 	delete(st.sessions, match)
+	st.mu.Unlock()
 	st.revoked.Add(1)
+	st.auditRevoked("control", ended)
 	return true, false
 }
 
 // revokeAll wipes every session ("kick everyone").
 func (st *authStore) revokeAll() int {
 	st.mu.Lock()
-	n := len(st.sessions)
+	ended := st.sessions
 	st.sessions = map[string]*authSession{}
 	st.mu.Unlock()
-	st.revoked.Add(int64(n))
-	return n
+	st.revoked.Add(int64(len(ended)))
+	for _, s := range ended {
+		st.auditRevoked("control", *s)
+	}
+	return len(ended)
 }
 
 // revokeUsersNotIn revokes sessions whose user is absent from keep. The
@@ -417,10 +520,26 @@ func (a *App) authSessionList() []authSessionInfo {
 
 // --- throttle ---------------------------------------------------------------------
 
-// authClientKey keys the throttle on the connection's RemoteAddr — Janus
-// is the TLS-terminating edge, so that is the true peer; X-Forwarded-For
-// is attacker-supplied ink. IPv6 clients key on the /64 prefix (one
-// subnet, not 2^64 fresh addresses); IPv4 keys on the address.
+// authClientIP is the client address the throttle and the audit trail
+// use: Caddy's client_ip, which honors the server's trusted_proxies (an
+// edge behind a trusted load balancer sees each client, not the
+// balancer), else the connection's RemoteAddr. With no trusted_proxies
+// configured Caddy's client_ip is the peer itself, so a client-supplied
+// X-Forwarded-For is never believed.
+func authClientIP(r *http.Request) string {
+	if ip, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && ip != "" {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// authClientKey maps a client address (bare or host:port) to its throttle
+// key. IPv6 clients key on the /64 prefix (one subnet, not 2^64 fresh
+// addresses); IPv4 keys on the address.
 func authClientKey(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
@@ -436,12 +555,39 @@ func authClientKey(remoteAddr string) string {
 	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
+// authThrottleScope names a login's ladder scope: the realm, the users
+// table the credentials are checked against (authRealm). Every door and
+// host that checks the same table spends one budget, since a password
+// guessed through one works through all; a disjoint table never spends
+// another's, so a guesser on one site cannot ban an address from another.
+func authThrottleScope(realm string) string {
+	return realm
+}
+
 func authThrottlePairKey(gatePrefix, clientKey, user string) string {
 	return gatePrefix + "\x00" + clientKey + "\x00" + user
 }
 
 func authThrottleAggKey(gatePrefix, clientKey string) string {
 	return gatePrefix + "\x00" + clientKey + "\x00"
+}
+
+// authThrottleAccountKey keys the per-account ladder: one row per realm
+// and username, independent of client address, host, and login door. The
+// \x01 lead byte keeps it disjoint from the client rows.
+func authThrottleAccountKey(realm, user string) string {
+	return "\x01" + realm + "\x00" + user
+}
+
+func authThrottleAccountRow(key string) bool {
+	return strings.HasPrefix(key, "\x01")
+}
+
+// authThrottleOutcome reports what one recorded failure set in motion, for
+// the audit trail.
+type authThrottleOutcome struct {
+	wait   time.Duration // the longest ladder wait now running (0: none)
+	banned bool          // this failure started a 24h client ban
 }
 
 // throttleCheck reports whether the pair or the client aggregate is
@@ -471,28 +617,27 @@ func (st *authStore) throttleCheck(gatePrefix, clientKey, user string) (blocked 
 }
 
 // throttleFail records one failed attempt on the pair and the client
-// aggregate for the gate. Map bound: sweep expired first; never casually
-// evict active ban rows — refuse new non-ban entries at the cap instead.
-func (st *authStore) throttleFail(gatePrefix, clientKey, user string) {
+// aggregate for the gate. The map stays bounded without ever refusing a
+// row (throttleAdmitLocked), so a new client is always tracked.
+func (st *authStore) throttleFail(gatePrefix, clientKey, user string) authThrottleOutcome {
 	now := st.now()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.throttleFailLocked(authThrottlePairKey(gatePrefix, clientKey, user), now)
-	st.throttleFailLocked(authThrottleAggKey(gatePrefix, clientKey), now)
+	a := st.throttleFailLocked(authThrottlePairKey(gatePrefix, clientKey, user), now)
+	b := st.throttleFailLocked(authThrottleAggKey(gatePrefix, clientKey), now)
+	return authThrottleOutcome{wait: max(a.wait, b.wait), banned: a.banned || b.banned}
 }
 
-func (st *authStore) throttleFailLocked(key string, now time.Time) {
+func (st *authStore) throttleFailLocked(key string, now time.Time) authThrottleOutcome {
 	t := st.throttle[key]
 	if t != nil && !t.banUntil.IsZero() && now.Before(t.banUntil) {
-		return // already banned; further fails are no-ops while banned
+		return authThrottleOutcome{} // already banned; further fails are no-ops while banned
 	}
-	if t != nil && !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
-		return // still in a 429 wait — caller should not reach here
-	}
+	// A failure arriving inside a wait is an attempt admitted before the
+	// wait began (loginClaim admits several only in the free region): its
+	// password was checked, so it counts and the ladder climbs.
 	if t == nil {
-		if !st.throttleAdmitLocked(now) {
-			return
-		}
+		st.throttleAdmitLocked(now)
 		t = &authThrottleEntry{}
 		st.throttle[key] = t
 	}
@@ -506,6 +651,7 @@ func (st *authStore) throttleFailLocked(key string, now time.Time) {
 		if !wasBanned {
 			st.banned.Add(1)
 		}
+		return authThrottleOutcome{wait: authThrottleBan, banned: !wasBanned}
 	case t.fails == 6:
 		t.blockedUntil = now.Add(authThrottleWait6)
 	case t.fails == 5:
@@ -515,54 +661,224 @@ func (st *authStore) throttleFailLocked(key string, now time.Time) {
 	default:
 		// 1–3: immediate failure, no added wait
 		t.blockedUntil = time.Time{}
+		return authThrottleOutcome{}
 	}
+	return authThrottleOutcome{wait: t.blockedUntil.Sub(now)}
 }
 
-// throttleAdmitLocked frees cold non-ban rows and reports whether a new
-// non-ban entry may be inserted. Active bans are never evicted.
-func (st *authStore) throttleAdmitLocked(now time.Time) bool {
-	if len(st.throttle) < authThrottleMaxEntries {
+// throttleRowCold reports whether a row carries nothing worth keeping: no
+// active ban or wait, and its failures have aged out of their window (24h
+// for gate rows, authAccountForget for account rows).
+func throttleRowCold(key string, e *authThrottleEntry, now time.Time) bool {
+	if e == nil {
 		return true
+	}
+	if e.inflight > 0 {
+		return false // an attempt holds it (loginClaim)
+	}
+	if !e.banUntil.IsZero() && now.Before(e.banUntil) {
+		return false
+	}
+	if !e.blockedUntil.IsZero() && now.Before(e.blockedUntil) {
+		return false
+	}
+	window := authThrottleBan
+	if authThrottleAccountRow(key) {
+		window = authAccountForget
+	}
+	return e.lastFail.IsZero() || now.Sub(e.lastFail) > window
+}
+
+// throttleAdmitLocked makes room for one new row; tracking never stops at
+// the cap. Cold rows are swept first. If the table is still full, the
+// least-recently-failed row that is not an active ban is evicted; only a
+// table made entirely of active bans gives up its soonest-expiring ban.
+func (st *authStore) throttleAdmitLocked(now time.Time) {
+	if len(st.throttle) < authThrottleMaxEntries {
+		return
 	}
 	for k, e := range st.throttle {
-		if e == nil {
-			delete(st.throttle, k)
-			continue
-		}
-		if !e.banUntil.IsZero() && now.Before(e.banUntil) {
-			continue // never casually evict active bans
-		}
-		if !e.blockedUntil.IsZero() && now.Before(e.blockedUntil) {
-			continue
-		}
-		if e.lastFail.IsZero() || now.Sub(e.lastFail) > authThrottleBan {
+		if throttleRowCold(k, e, now) {
 			delete(st.throttle, k)
 		}
 	}
-	if len(st.throttle) < authThrottleMaxEntries {
-		return true
+	for len(st.throttle) >= authThrottleMaxEntries {
+		victim, banVictim := "", ""
+		var oldest, soonest time.Time
+		for k, e := range st.throttle {
+			if e.inflight > 0 {
+				continue // an attempt holds it; its claim must stay counted
+			}
+			if !e.banUntil.IsZero() && now.Before(e.banUntil) {
+				if banVictim == "" || e.banUntil.Before(soonest) {
+					banVictim, soonest = k, e.banUntil
+				}
+				continue
+			}
+			if victim == "" || e.lastFail.Before(oldest) {
+				victim, oldest = k, e.lastFail
+			}
+		}
+		if victim == "" {
+			victim = banVictim
+		}
+		if victim == "" {
+			return // every row is held by an attempt in flight; they are few
+		}
+		delete(st.throttle, victim)
 	}
-	// Prefer refusing new non-ban entries at the cap over evicting bans.
-	return false
 }
 
-// throttleClear forgets the pair and clears the client aggregate ladder
-// for the gate. An active client ban is not cleared by success.
+// throttleClear runs on a successful login: it forgets the pair and
+// refunds the pair's own failures from the client aggregate, so a person's
+// typos before signing in do not count against everyone behind the same
+// address. Failures against other usernames stay in the aggregate — a
+// success never resets the client's spray budget — and an active
+// aggregate wait or ban is never lifted.
 func (st *authStore) throttleClear(gatePrefix, clientKey, user string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	delete(st.throttle, authThrottlePairKey(gatePrefix, clientKey, user))
-	aggKey := authThrottleAggKey(gatePrefix, clientKey)
-	if t := st.throttle[aggKey]; t != nil {
-		now := st.now()
-		if !t.banUntil.IsZero() && now.Before(t.banUntil) {
-			// Preserve the ban; drop ladder fails so a fresh spray
-			// budget starts after the ban expires.
-			t.fails = authThrottleBanAt
-			t.blockedUntil = t.banUntil
-			return
+	pairKey := authThrottlePairKey(gatePrefix, clientKey, user)
+	own := 0
+	if t := st.throttle[pairKey]; t != nil {
+		own = t.fails
+	}
+	delete(st.throttle, pairKey)
+	if t := st.throttle[authThrottleAggKey(gatePrefix, clientKey)]; t != nil && own > 0 {
+		t.fails = max(t.fails-own, 0)
+	}
+}
+
+// accountCheck reports whether the per-account ladder currently holds
+// logins to user on host, and for how long. Checked before argon2 work.
+func (st *authStore) accountCheck(realm, user string) (blocked bool, retryAfter time.Duration) {
+	now := st.now()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	t := st.throttle[authThrottleAccountKey(realm, user)]
+	if t != nil && !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
+		return true, t.blockedUntil.Sub(now)
+	}
+	return false, 0
+}
+
+// accountFail records one failed login against user on host from any
+// client. The first authAccountFreeFails failures within the forget window
+// cost nothing; each further one holds the account for a doubling wait
+// capped at authAccountWaitMax. The ladder never bans: a person waits at
+// most authAccountWaitMax, while a distributed guesser is held to about one
+// guess per authAccountWaitMax against that account.
+func (st *authStore) accountFail(realm, user string) authThrottleOutcome {
+	now := st.now()
+	key := authThrottleAccountKey(realm, user)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	t := st.throttle[key]
+	// A failure inside a wait was admitted before it began: it counts.
+	if t != nil && !t.lastFail.IsZero() && now.Sub(t.lastFail) > authAccountForget {
+		t.fails = 0
+	}
+	if t == nil {
+		st.throttleAdmitLocked(now)
+		t = &authThrottleEntry{}
+		st.throttle[key] = t
+	}
+	t.fails++
+	t.lastFail = now
+	over := t.fails - authAccountFreeFails
+	if over <= 0 {
+		t.blockedUntil = time.Time{}
+		return authThrottleOutcome{}
+	}
+	wait := authAccountWaitMax
+	if over <= 4 {
+		wait = min(authAccountWaitFirst<<(over-1), authAccountWaitMax)
+	}
+	t.blockedUntil = now.Add(wait)
+	return authThrottleOutcome{wait: wait}
+}
+
+// accountClear forgets the account ladder after a successful login: only
+// someone holding the account's password can reset it.
+func (st *authStore) accountClear(realm, user string) {
+	st.mu.Lock()
+	delete(st.throttle, authThrottleAccountKey(realm, user))
+	st.mu.Unlock()
+}
+
+// authThrottleFreeFails is the client ladder's free attempts: failures one
+// through three wait nothing; the fourth starts the ladder.
+const authThrottleFreeFails = 3
+
+func authLoginKeys(scope, clientKey, user, realm string) [3]string {
+	return [3]string{
+		authThrottlePairKey(scope, clientKey, user),
+		authThrottleAggKey(scope, clientKey),
+		authThrottleAccountKey(realm, user),
+	}
+}
+
+// loginClaim admits one login attempt or refuses it, in one critical
+// section over its three ladder rows (the pair, the client aggregate, the
+// account). A row in a wait or a ban refuses. Past a row's free attempts at
+// most one attempt per row is in flight: concurrent guesses cannot pass the
+// check together and all land in one wait, so the ladders hold under the
+// verification queue's concurrency (a busy row answers Retry-After 1). An
+// admitted attempt holds its rows until loginRelease.
+func (st *authStore) loginClaim(scope, clientKey, user, realm string) (blocked bool, retryAfter time.Duration) {
+	now := st.now()
+	keys := authLoginKeys(scope, clientKey, user, realm)
+	free := [3]int{authThrottleFreeFails, authThrottleFreeFails, authAccountFreeFails}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i, key := range keys {
+		t := st.throttle[key]
+		if t == nil {
+			continue
 		}
-		delete(st.throttle, aggKey)
+		if !t.banUntil.IsZero() && now.Before(t.banUntil) {
+			return true, t.banUntil.Sub(now)
+		}
+		if !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
+			return true, t.blockedUntil.Sub(now)
+		}
+		fails := t.fails
+		if i == 2 && !t.lastFail.IsZero() && now.Sub(t.lastFail) > authAccountForget {
+			fails = 0
+		}
+		if t.inflight > 0 && fails+t.inflight >= free[i] {
+			return true, time.Second
+		}
+	}
+	for _, key := range keys {
+		t := st.throttle[key]
+		if t == nil {
+			st.throttleAdmitLocked(now)
+			t = &authThrottleEntry{}
+			st.throttle[key] = t
+		}
+		t.inflight++
+	}
+	return false, 0
+}
+
+// loginRelease ends an admitted attempt's hold on its rows once its outcome
+// is recorded (or it was refused after the claim). A row left with no
+// failure, no wait, and nothing in flight is forgotten.
+func (st *authStore) loginRelease(scope, clientKey, user, realm string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, key := range authLoginKeys(scope, clientKey, user, realm) {
+		t := st.throttle[key]
+		if t == nil {
+			continue
+		}
+		if t.inflight > 0 {
+			t.inflight--
+		}
+		if t.inflight == 0 && t.fails == 0 && t.blockedUntil.IsZero() && t.banUntil.IsZero() {
+			delete(st.throttle, key)
+		}
 	}
 }
 
@@ -707,6 +1023,15 @@ func authWallActive(ctx context.Context) bool {
 	return active
 }
 
+// authGatedUserKey carries the user of a request that passed a gate.
+type authGatedUserKey struct{}
+
+// authGatedUser returns the user a gate admitted this request as, or "".
+func authGatedUser(ctx context.Context) string {
+	user, _ := ctx.Value(authGatedUserKey{}).(string)
+	return user
+}
+
 // serveAuthWall runs the wall for a site with effective auth on.
 // handled=true means the wall wrote the response (login door, 302/401,
 // or plain-HTTP 421); otherwise the returned request — cookies stripped,
@@ -724,12 +1049,19 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 		return r, true, h.serveAuthEndpoint(w, r, g)
 	}
 
-	gate := cfg.matchGate(path)
+	// Every form's winning gate must allow the user (matchGates): the most
+	// restrictive winner decides. The escaped path is judged too: an
+	// upstream that keeps %2F encoded reads /a/b%2Fc as one segment under
+	// /a/, where the decoded path would be /a/b/c. A refusal sends a
+	// browser to the first winner's door.
+	gates := cfg.matchGates(path, r.URL.EscapedPath())
+	var gate *authGate
 	user, authorized := "", false
-	if gate != nil {
+	if len(gates) > 0 {
+		gate = gates[0]
 		// Validate, authorize, and refresh in one store transaction. Open paths
 		// and disallowed gates never extend the idle lifetime.
-		user, authorized = h.authSessionAllowed(r, gate.allow)
+		user, authorized = h.authSessionAllowed(r, authAllowAll(gates))
 	}
 
 	if gate != nil && !authorized {
@@ -744,15 +1076,34 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 	}
 
 	// Fall-through (gated+authorized or outside every gate): strip on
-	// every proxied request when auth is on.
-	r.Header.Del("Remote-User")
+	// every proxied request when auth is on. The site handler already
+	// stripped client identity headers; the wall repeats it so its own
+	// injection is the only Remote-User whatever the caller.
+	stripClientIdentityHeaders(r.Header)
 	stripAuthCookies(r)
 	ctx := context.WithValue(r.Context(), authWallActiveKey{}, true)
 	if authorized {
 		r.Header.Set("Remote-User", user)
+		authSetUserID(r, user)
+		ctx = context.WithValue(ctx, authGatedUserKey{}, user)
 	}
 	r = r.WithContext(ctx)
 	return r, false, nil
+}
+
+// stripClientIdentityHeaders deletes every client-sent header that names
+// an identity Janus asserts: Remote-User (set only by a passed gate) and
+// Rip-Site (set only from a site registration). A name matches when it
+// equals one of those case-insensitively after mapping _ to -, because
+// CGI-style upstreams (Rack, PHP, WSGI) fold Remote_User and Remote-User
+// into the same HTTP_REMOTE_USER variable.
+func stripClientIdentityHeaders(h http.Header) {
+	for name := range h {
+		switch strings.ToLower(strings.ReplaceAll(name, "_", "-")) {
+		case "remote-user", "rip-site":
+			delete(h, name)
+		}
+	}
 }
 
 // authSessionAllowed resolves and refreshes a session only when its user is
@@ -763,7 +1114,7 @@ func (h *Handler) authSessionAllowed(r *http.Request, allow map[string]bool) (st
 	if err != nil || c.Value == "" {
 		return "", false
 	}
-	user, _, ok := cfg.store.lookupAllowed(c.Value, normalizeHostHeader(r.Host), cfg.ttl, true, allow)
+	user, _, ok := cfg.store.lookupAllowed(c.Value, normalizeHostHeader(r.Host), cfg.ttl, true, allow, cfg.users)
 	return user, ok
 }
 
@@ -837,17 +1188,57 @@ func authCookieNameReserved(name string) bool {
 }
 
 // authRespStrip strips reserved __Host-janus* Set-Cookie values from
-// upstream responses when effective auth is on.
+// upstream responses when effective auth is on. For a request that passed
+// a gate (private), it also keeps the final response out of shared caches
+// (authPrivateCacheControl): what a gate guards is per-user content.
 type authRespStrip struct {
 	http.ResponseWriter
 	wroteHeader bool
+	private     bool
 }
 
-func (w *authRespStrip) strip() {
+func (w *authRespStrip) strip(status int) {
 	if w.wroteHeader {
 		return
 	}
 	stripReservedAuthCookies(w.Header())
+	if w.private && status >= http.StatusOK {
+		authPrivateCacheControl(w.Header())
+	}
+}
+
+// authPrivateCacheControl rewrites a gated response's Cache-Control so no
+// shared cache stores it: public (and a field-qualified private="…", which
+// still lets a shared cache store the rest) becomes private, every other
+// directive (max-age, immutable, …) is kept, and private is added when
+// absent; a no-store response only has a public turned private.
+func authPrivateCacheControl(h http.Header) {
+	var out []string
+	private, noStore := false, false
+	for _, line := range h.Values("Cache-Control") {
+		for _, directive := range strings.Split(line, ",") {
+			directive = strings.TrimSpace(directive)
+			if directive == "" {
+				continue
+			}
+			name, _, _ := strings.Cut(directive, "=")
+			switch strings.ToLower(strings.TrimSpace(name)) {
+			case "public", "private":
+				if !private {
+					out = append(out, "private")
+					private = true
+				}
+				continue
+			case "no-store":
+				noStore = true
+			}
+			out = append(out, directive)
+		}
+	}
+	if !private && !noStore {
+		out = append(out, "private")
+	}
+	h.Set("Cache-Control", strings.Join(out, ", "))
 }
 
 func stripReservedAuthCookies(h http.Header) {
@@ -869,7 +1260,7 @@ func stripReservedAuthCookies(h http.Header) {
 }
 
 func (w *authRespStrip) WriteHeader(status int) {
-	w.strip()
+	w.strip(status)
 	// A 1xx informational write (e.g. 103 Early Hints) does not commit the
 	// final header set: the scrub must still run on the real status later.
 	if status >= http.StatusOK {
@@ -947,27 +1338,56 @@ func (h *Handler) serveAuthPage(w http.ResponseWriter, r *http.Request, g *authG
 }
 
 // authPageSession resolves the session for page rendering (live session
-// whose user is in this site's users table).
+// whose user is in this site's users table with the credential the
+// session was minted against).
 func (h *Handler) authPageSession(r *http.Request) (string, time.Time, bool) {
 	cfg := h.authCfg
 	c, err := r.Cookie(authCookieName)
 	if err != nil || c.Value == "" {
 		return "", time.Time{}, false
 	}
-	user, issuedAt, ok := cfg.store.lookup(c.Value, normalizeHostHeader(r.Host), cfg.ttl, false)
-	if !ok {
-		return "", time.Time{}, false
-	}
-	if _, allowed := cfg.users[user]; !allowed {
-		return "", time.Time{}, false
-	}
-	return user, issuedAt, true
+	return cfg.store.lookupAllowed(c.Value, normalizeHostHeader(r.Host), cfg.ttl, false, nil, cfg.users)
 }
 
 func (h *Handler) renderAuthPage(w http.ResponseWriter, status int, data authPageData) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	authDenyFraming(w.Header())
 	w.WriteHeader(status)
 	return authPageTmpl.Execute(w, data)
+}
+
+// authDenyFraming forbids framing the login and status page (no
+// clickjacking a sign-in or sign-out): X-Frame-Options DENY, and
+// frame-ancestors 'none' merged into every Content-Security-Policy
+// already set (replacing any frame-ancestors there), or set alone.
+func authDenyFraming(h http.Header) {
+	h.Set("X-Frame-Options", "DENY")
+	const deny = "frame-ancestors 'none'"
+	policies := h.Values("Content-Security-Policy")
+	if len(policies) == 0 {
+		h.Set("Content-Security-Policy", deny)
+		return
+	}
+	merged := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		kept := []string{}
+		for _, directive := range strings.Split(policy, ";") {
+			directive = strings.TrimSpace(directive)
+			if directive == "" {
+				continue
+			}
+			name, _, _ := strings.Cut(directive, " ")
+			if strings.EqualFold(name, "frame-ancestors") {
+				continue
+			}
+			kept = append(kept, directive)
+		}
+		merged = append(merged, strings.Join(append(kept, deny), "; "))
+	}
+	h.Del("Content-Security-Policy")
+	for _, policy := range merged {
+		h.Add("Content-Security-Policy", policy)
+	}
 }
 
 // serveAuthPost parses exactly one application/x-www-form-urlencoded
@@ -1019,20 +1439,33 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 	}
 	name := strings.ToLower(rawUser)
 	to := safeTo(r.PostForm.Get("to"), g.prefix)
-	clientKey := authClientKey(r.RemoteAddr)
+	host := normalizeHostHeader(r.Host)
+	clientKey := authClientKey(authClientIP(r))
+	scope := authThrottleScope(cfg.realm)
 
-	if blocked, retryAfter := st.throttleCheck(g.prefix, clientKey, name); blocked {
+	// Check and claim the ladders in one step (loginClaim); an admitted
+	// attempt holds them until its outcome is recorded, below.
+	blocked, retryAfter := st.loginClaim(scope, clientKey, name, cfg.realm)
+	if !blocked {
+		defer st.loginRelease(scope, clientKey, name, cfg.realm)
+	}
+	log := h.authLog()
+	if blocked {
 		st.throttled.Add(1)
 		secs := int(retryAfter/time.Second) + 1
 		if secs < 1 {
 			secs = 1
 		}
+		log.Warn("janus auth: login throttled",
+			append(authAuditFields(r, g, name), zap.Int("retry_after_s", secs))...)
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return nil
 	}
 	if !st.acquireVerify() {
 		st.throttled.Add(1)
+		log.Warn("janus auth: login throttled (verification queue full)",
+			append(authAuditFields(r, g, name), zap.Int("retry_after_s", 1))...)
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "verification queue is full", http.StatusTooManyRequests)
 		return nil
@@ -1043,10 +1476,25 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 
 	// Password OK is not enough: the user must be on this gate's allow list.
 	if !ok || !g.allow[name] {
-		st.throttleFail(g.prefix, clientKey, name)
+		client := st.throttleFail(scope, clientKey, name)
+		account := st.accountFail(cfg.realm, name)
 		st.loginFailures.Add(1)
+		// One message for every failure cause: the log never tells an
+		// unknown user from a wrong password or a disallowed gate.
+		log.Warn("janus auth: login failed", authAuditFields(r, g, name)...)
+		if client.banned {
+			log.Warn("janus auth: client banned",
+				append(authAuditFields(r, g, name), zap.Duration("ban", authThrottleBan))...)
+		} else if client.wait > 0 {
+			log.Warn("janus auth: client throttle engaged",
+				append(authAuditFields(r, g, name), zap.Duration("wait", client.wait))...)
+		}
+		if account.wait > 0 {
+			log.Warn("janus auth: account throttle engaged",
+				append(authAuditFields(r, g, name), zap.Duration("wait", account.wait))...)
+		}
 		return h.renderAuthPage(w, http.StatusUnauthorized, authPageData{
-			Host:  normalizeHostHeader(r.Host),
+			Host:  host,
 			CSRF:  r.PostForm.Get("csrf"),
 			To:    to,
 			Door:  gateDoor(g.prefix),
@@ -1054,12 +1502,23 @@ func (h *Handler) serveAuthSignIn(w http.ResponseWriter, r *http.Request, g *aut
 		})
 	}
 
-	st.throttleClear(g.prefix, clientKey, name)
-	token, err := st.mint(name, normalizeHostHeader(r.Host))
+	st.throttleClear(scope, clientKey, name)
+	st.accountClear(cfg.realm, name)
+	// A login replaces the host session: the session the request arrived
+	// with, if any, ends here rather than living on beside the new one.
+	if c, err := r.Cookie(authCookieName); err == nil {
+		if ended, live := st.revokeToken(c.Value); live {
+			log.Info("janus auth: session revoked",
+				append(authAuditFields(r, g, ended.user), zap.String("via", "login"))...)
+		}
+	}
+	token, err := st.mint(name, host, blob)
 	if err != nil {
 		return caddyhttp.Error(http.StatusInternalServerError, err)
 	}
 	st.logins.Add(1)
+	log.Info("janus auth: login succeeded", authAuditFields(r, g, name)...)
+	authSetUserID(r, name)
 	authSetCookie(w, authCookieName, token, 0)
 	authClearCookie(w, authCSRFCookieName)
 	http.Redirect(w, r, to, http.StatusSeeOther)
@@ -1075,10 +1534,14 @@ func (h *Handler) serveAuthSignOut(w http.ResponseWriter, r *http.Request, g *au
 		http.Error(w, "csrf required", http.StatusForbidden)
 		return nil
 	}
+	user := ""
 	if c, err := r.Cookie(authCookieName); err == nil {
-		st.revokeToken(c.Value)
+		if ended, live := st.revokeToken(c.Value); live {
+			user = ended.user
+		}
 	}
 	st.signouts.Add(1)
+	h.authLog().Info("janus auth: signed out", authAuditFields(r, g, user)...)
 	authClearCookie(w, authCookieName)
 	authClearCookie(w, authCSRFCookieName)
 	http.Redirect(w, r, g.door, http.StatusSeeOther)

@@ -16,9 +16,10 @@
 #   BENCH_SCRATCH  scratch dir           (default: /tmp/janus-bench-hub)
 #   RAW            raw output file       (default: $BENCH_SCRATCH/raw-hub.txt)
 #   CONTROL        control plane base    (default: http://127.0.0.1:7600)
-#   HUB_HOST       hub site              (default: hubany.ripdev.io — origin any,
+#   HUB_HOST       hub site              (default: hubany.janus.localhost — origin any,
 #                                         app floor 4096 via the global default)
 #   DUR            leg seconds           (default: 15 — the canonical length)
+#   BENCH_CA       TLS root to trust     (default: Caddy's internal CA root under XDG_DATA_HOME)
 #   HUB_SECTIONS   sections to run       (default: "1 2 3 4 5 6")
 #   HUB1_SIZES     subscriber counts     (default: "100 1000 4000")
 #   HUB1_RATES_<N> publish-rate ladder per size (defaults below)
@@ -35,8 +36,10 @@ JANUS_DIR=${JANUS_DIR:-${0:A:h:h}}
 BENCH_SCRATCH=${BENCH_SCRATCH:-/tmp/janus-bench-hub}
 RAW=${RAW:-$BENCH_SCRATCH/raw-hub.txt}
 CONTROL=${CONTROL:-http://127.0.0.1:7600}
-HUB_HOST=${HUB_HOST:-hubany.ripdev.io}
+HUB_HOST=${HUB_HOST:-hubany.janus.localhost}
 DUR=${DUR:-15}
+# The root Caddyfile's sites take certificates from Caddy's internal CA.
+CA=${BENCH_CA:-${XDG_DATA_HOME:-$HOME/.local/share}/caddy/pki/authorities/local/root.crt}
 HUB_SECTIONS=${HUB_SECTIONS:-"1 2 3 4 5 6"}
 HUB1_SIZES=${HUB1_SIZES:-"100 1000 4000"}
 HUB1_RATES_100=${HUB1_RATES_100:-"250 500 1000 2000 4000"}
@@ -133,7 +136,7 @@ start_tenant() { # [text-delay]
 }
 
 upgrade_code() { # HOST — curl-shaped upgrade attempt; prints HTTP status
-  curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --http1.1 \
+  curl -sS -o /dev/null -w '%{http_code}' --cacert $CA --max-time 5 --http1.1 \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
     -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
     "https://$1/hub" 2>/dev/null

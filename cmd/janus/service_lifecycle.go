@@ -51,6 +51,23 @@ type serviceItem interface {
 	unregister() (bool, error)
 }
 
+// exitReporter is an item whose manager tells how the job's last process
+// ended: the status it exited with, when it has exited at all. status
+// reads it to tell a crash loop from a clean stop.
+type exitReporter interface {
+	lastExit() (code int, known bool)
+}
+
+// restartReporter is a manager that can say whether it will start the
+// job again (systemd: a pending auto-restart). Where a manager reports
+// it, a failed last exit is a crash loop only while a restart is pending;
+// a unit that gave up, or was stopped, is stopped. A manager that does not
+// report it (launchd, whose KeepAlive restarts every failed exit) loops
+// on any failed exit.
+type restartReporter interface {
+	restartPending() (pending, known bool)
+}
+
 // serviceLabel is what the supervisor calls the edge: janus.edge under
 // launchd, janus (janus.service) under systemd. JANUS_SERVICE_LABEL
 // overrides it so a test host can run an edge beside the real one; pair it
@@ -65,6 +82,20 @@ func serviceLabel(def string) string {
 // itemFor is the platform's supervisor for a set of paths (nil where there
 // is none); a variable so tests can stand in a fake.
 var itemFor = newServiceItem
+
+// writeItemFile puts an item's file (plist or unit) in place when its
+// content differs, through the atomic writer: the manager reads either
+// the previous file or the new one whole, even across a crash. Reports
+// whether it wrote.
+func writeItemFile(path string, body []byte) (bool, error) {
+	if prev, err := os.ReadFile(path); err == nil && bytes.Equal(prev, body) {
+		return false, nil
+	}
+	if err := writeFileAtomic(path, body, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
 func startEdge(orig runFunc, cmd *cobra.Command, args []string, p servicePaths) error {
 	out := cmd.OutOrStdout()

@@ -1,8 +1,10 @@
 package janus
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -77,8 +79,8 @@ func TestNormalizeControlsRejectsEffectiveBindCollision(t *testing.T) {
 		"https://localhost:17601/public",
 	} {
 		controls := []Control{
-			{Mode: "local", Listen: "https://127.0.0.1:17601/local"},
-			{Mode: "public", Listen: publicListen, TokenKind: tokenEnv, Token: "JANUS_TEST_TOKEN"},
+			{Mode: "local", Listen: "https://127.0.0.1:17601/local", CertFile: "/x.crt", KeyFile: "/x.key"},
+			{Mode: "public", Listen: publicListen, TokenKind: tokenEnv, Token: "JANUS_TEST_TOKEN", CertFile: "/x.crt", KeyFile: "/x.key"},
 		}
 		err := normalizeControls(controls)
 		if err == nil || !strings.Contains(err.Error(), "overlapping tcp addresses") {
@@ -199,6 +201,11 @@ func TestControlNormalizeDefaults(t *testing.T) {
 func TestControlNormalizePublic(t *testing.T) {
 	t.Setenv("JANUS_PUB", "secret")
 	c := Control{Mode: "public", TokenKind: tokenEnv, Token: "JANUS_PUB"}
+	if err := c.normalize(); err == nil || !strings.Contains(err.Error(), "requires cert") {
+		t.Fatalf("public without cert/key: want a requires-cert error, got %v", err)
+	}
+
+	c = Control{Mode: "public", TokenKind: tokenEnv, Token: "JANUS_PUB", CertFile: "/x.crt", KeyFile: "/x.key"}
 	if err := c.normalize(); err != nil {
 		t.Fatal(err)
 	}
@@ -259,6 +266,11 @@ func TestControlNormalizeCertKey(t *testing.T) {
 	c = Control{Mode: "local", Listen: "https://127.0.0.1:7600/", CertFile: "/x.crt", KeyFile: "/x.key"}
 	if err := c.normalize(); err != nil {
 		t.Fatalf("cert/key on https local: %v", err)
+	}
+	// ... and required: Janus ships no certificate of its own.
+	c = Control{Mode: "local", Listen: "https://127.0.0.1:7600/"}
+	if err := c.normalize(); err == nil || !strings.Contains(err.Error(), "requires cert") {
+		t.Fatalf("https local without cert/key: want a requires-cert error, got %v", err)
 	}
 }
 
@@ -591,5 +603,188 @@ func TestControlAPIHandlers(t *testing.T) {
 		if err := json.Unmarshal(rr.Body.Bytes(), &health); err != nil || health["status"] != "ok" {
 			t.Fatalf("health: %s", rr.Body.String())
 		}
+	}
+}
+
+func TestLoopbackControlHost(t *testing.T) {
+	for host, want := range map[string]bool{
+		"127.0.0.1":          true,
+		"127.0.0.1:7600":     true,
+		"127.9.9.9:7600":     true,
+		"[::1]:7600":         true,
+		"[::1]":              true,
+		"localhost":          true,
+		"localhost:7600":     true,
+		"LOCALHOST:7600":     true,
+		"":                   false,
+		"::1":                false,
+		"localhost.":         false,
+		"localhost:":         false,
+		"localhost:76x0":     false,
+		"evil.example":       false,
+		"evil.example:7600":  false,
+		"127.0.0.1.nip.io":   false,
+		"app.localhost:7600": false,
+		"10.0.0.5:7600":      false,
+		"[fe80::1%lo0]:7600": false,
+		"0.0.0.0:7600":       false,
+	} {
+		if got := loopbackControlHost(host); got != want {
+			t.Errorf("loopbackControlHost(%q) = %v, want %v", host, got, want)
+		}
+	}
+}
+
+// TestControlBrowserGuard pins the CSRF and DNS-rebinding guard on TCP
+// control listeners: any Origin is refused, and on local a Host that is not
+// loopback is refused; unix-socket listeners are unaffected.
+func TestControlBrowserGuard(t *testing.T) {
+	t.Setenv("JANUS_GUARD_TOKEN", "sekrit")
+	app := &App{Control: []Control{
+		{Mode: "internal", Listen: "/tmp/janus-guard.sock"},
+		{Mode: "local", Listen: DefaultControlLocal},
+		{Mode: "public", Listen: DefaultControlPublic, Token: "JANUS_GUARD_TOKEN", TokenKind: tokenEnv, CertFile: "/x.crt", KeyFile: "/x.key"},
+	}}
+	for i := range app.Control {
+		if err := app.Control[i].normalize(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	internal := app.controlHandler(&app.Control[0])
+	local := app.controlHandler(&app.Control[1])
+	public := app.controlHandler(&app.Control[2])
+
+	do := func(h http.Handler, method, host string, header http.Header) int {
+		t.Helper()
+		r := httptest.NewRequest(method, "http://"+host+"/1.0/health", nil)
+		r.Host = host
+		for k, vs := range header {
+			r.Header[k] = vs
+		}
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, r)
+		return rr.Code
+	}
+	origin := http.Header{"Origin": {"https://evil.example"}}
+	nullOrigin := http.Header{"Origin": {"null"}}
+	bearer := http.Header{"Authorization": {"Bearer sekrit"}}
+	bearerOrigin := http.Header{"Authorization": {"Bearer sekrit"}, "Origin": {"https://evil.example"}}
+
+	cases := []struct {
+		name   string
+		h      http.Handler
+		method string
+		host   string
+		header http.Header
+		want   int
+	}{
+		{"local plain", local, "GET", "127.0.0.1:7600", nil, http.StatusOK},
+		{"local localhost", local, "GET", "localhost:7600", nil, http.StatusOK},
+		{"local origin", local, "GET", "127.0.0.1:7600", origin, http.StatusForbidden},
+		{"local null origin", local, "GET", "127.0.0.1:7600", nullOrigin, http.StatusForbidden},
+		{"local cross-site POST", local, "POST", "127.0.0.1:7600", origin, http.StatusForbidden},
+		{"local rebinding host", local, "GET", "evil.example:7600", nil, http.StatusForbidden},
+		{"public origin with token", public, "GET", "edge.example:7601", bearerOrigin, http.StatusForbidden},
+		{"public any host with token", public, "GET", "edge.example:7601", bearer, http.StatusOK},
+		{"internal origin", internal, "GET", "janus", origin, http.StatusOK},
+		{"internal any host", internal, "GET", "evil.example", nil, http.StatusOK},
+	}
+	for _, tc := range cases {
+		if got := do(tc.h, tc.method, tc.host, tc.header); got != tc.want {
+			t.Errorf("%s: status %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestControlServerClosesIdleKeepAlive pins the control servers' idle bound:
+// a keep-alive connection that sends nothing after its response is closed by
+// the server, while no write deadline caps long-lived streams.
+func TestControlServerClosesIdleKeepAlive(t *testing.T) {
+	saved := controlIdleTimeout
+	controlIdleTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { controlIdleTimeout = saved })
+
+	srv := newControlHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	if srv.WriteTimeout != 0 || srv.ReadHeaderTimeout != controlReadHeaderTimeout || srv.IdleTimeout != 100*time.Millisecond {
+		t.Fatalf("control server timeouts: write=%v readHeader=%v idle=%v",
+			srv.WriteTimeout, srv.ReadHeaderTimeout, srv.IdleTimeout)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET /1.0/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.Close {
+		t.Fatal("server closed after the response; want keep-alive")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := br.ReadByte(); err != io.EOF {
+		t.Fatalf("idle keep-alive connection: want server close (EOF), got %v", err)
+	}
+}
+
+// TestControlHubSurfaces pins the control-side answers of the three hub
+// routes that need no live hub: stats always answer, an unknown app is 404
+// on snapshot and publish, a hubless app snapshots empty, and publishing
+// into an app no hub-enabled site serves is a loud 409.
+func TestControlHubSurfaces(t *testing.T) {
+	app := &App{Control: []Control{{Mode: "local", Listen: DefaultControlLocal}}}
+	if err := app.Control[0].normalize(); err != nil {
+		t.Fatal(err)
+	}
+	app.appsReg = newAppRegistry()
+	app.hubs = newHubSet()
+	mux := app.controlMux()
+
+	do := func(method, path, body string) (int, string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return rr.Code, rr.Body.String()
+	}
+	if code, body := do(http.MethodGet, "/1.0/hub", ""); code != http.StatusOK || !json.Valid([]byte(body)) {
+		t.Fatalf("GET /1.0/hub: %d %s", code, body)
+	}
+	if code, _ := do(http.MethodGet, "/1.0/apps/nope-000000/hub", ""); code != http.StatusNotFound {
+		t.Fatalf("snapshot of an unknown app: want 404, got %d", code)
+	}
+	if code, _ := do(http.MethodPost, "/1.0/apps/nope-000000/hub/publish", `{"@":"x"}`); code != http.StatusNotFound {
+		t.Fatalf("publish to an unknown app: want 404, got %d", code)
+	}
+
+	rec, err := app.appsReg.create("hubless", []string{"hubless.test"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := do(http.MethodGet, "/1.0/apps/"+rec.ID+"/hub", "")
+	var snap struct {
+		Channels    map[string]int      `json:"channels"`
+		Connections map[string][]string `json:"connections"`
+	}
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &snap) != nil ||
+		snap.Channels == nil || len(snap.Channels) != 0 || snap.Connections == nil || len(snap.Connections) != 0 {
+		t.Fatalf("snapshot of a hubless app: want 200 and empty maps, got %d %s", code, body)
+	}
+	if code, body := do(http.MethodPost, "/1.0/apps/"+rec.ID+"/hub/publish", `{"@":"x"}`); code != http.StatusConflict {
+		t.Fatalf("publish with no hub-enabled site: want 409, got %d %s", code, body)
 	}
 }

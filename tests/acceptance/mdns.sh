@@ -197,7 +197,7 @@ case_mdns_read_only() {
 }
 
 case_mdns_register_advertises() {
-	capi POST /1.0/apps '{"name":"mdnsshop","hosts":["mdnsshop.local","mdnsshop.ripdev.io"]}'
+	capi POST /1.0/apps '{"name":"mdnsshop","hosts":["mdnsshop.local","mdnsshop.janus.localhost"]}'
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -208,7 +208,7 @@ case_mdns_register_advertises() {
 	mdns_wait_advertised mdnsshop.local
 	capi GET /1.0/mdns
 	json_has "$REPLY_BODY" "\"app\":\"$id\""
-	if printf '%s' "$REPLY_BODY" | grep -qF 'mdnsshop.ripdev.io'; then
+	if printf '%s' "$REPLY_BODY" | grep -qF 'mdnsshop.janus.localhost'; then
 		printf 'non-.local host advertised: %q' "$REPLY_BODY" >&2
 		return 1
 	fi
@@ -218,7 +218,7 @@ case_mdns_site_alias_advertises_and_withdraws() {
 	local dir="$TEST_RUN_DIR/mdns-sites-alias"
 	mkdir -p "$dir/tenant"
 	capi POST /1.0/apps \
-		"{\"name\":\"mdnssite\",\"site\":{\"host\":\"{site}.mdnssite.test\",\"dir\":\"$dir\",\"aliases\":{\"mdnssite.local\":\"tenant\",\"mdnssite.ripdev.io\":\"tenant\"}}}"
+		"{\"name\":\"mdnssite\",\"site\":{\"host\":\"{site}.mdnssite.test\",\"dir\":\"$dir\",\"aliases\":{\"mdnssite.local\":\"tenant\",\"mdnssite.janus.localhost\":\"tenant\"}}}"
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -304,7 +304,7 @@ case_mdns_status_truth() {
 	local body age
 	body="$(http_body "$MDNS_URL/status.json")"
 	json_has "$body" '"mdnsshop.local"'
-	json_has "$body" '"mdnsshop.ripdev.io"'
+	json_has "$body" '"mdnsshop.janus.localhost"'
 	json_has "$body" '"shape":"api-only"'
 	json_has "$body" '"admission":"workers"'
 	json_has "$body" '"total":1'

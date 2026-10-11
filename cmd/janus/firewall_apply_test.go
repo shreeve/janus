@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeHost records what the firewall code would do to a host. Its pfctl
@@ -522,5 +523,73 @@ func TestApplyFirewallOffDarwinIsNone(t *testing.T) {
 	h, ops := newFakeHost("windows")
 	if v, err := applyFirewall(ops, lanState()); err != nil || v.needed || len(h.cmds) != 0 {
 		t.Errorf("windows: %+v %v %v", v, err, h.cmds)
+	}
+}
+
+// The atomic writer leaves the target whole and at its mode, whatever the
+// umask, with no temporary file behind; a failed rename leaves the target
+// as it was and cleans up after itself.
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "pf.conf")
+	if err := writeFileAtomic(path, []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(path, []byte("two\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "two\n" {
+		t.Fatalf("content %q %v", got, err)
+	}
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(path); st.Mode().Perm() != 0o640 {
+			t.Errorf("mode %v, want 0640", st.Mode().Perm())
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	if len(entries) != 1 {
+		t.Errorf("temporary files left behind: %v", entries)
+	}
+	// A directory in the target's place cannot be renamed over.
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.MkdirAll(filepath.Join(blocked, "inside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(blocked, []byte("x"), 0o644); err == nil {
+		t.Error("renamed over a directory")
+	}
+	entries, _ = os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("a failed write left %s", e.Name())
+		}
+	}
+}
+
+// An item's file (plist or unit) goes through the atomic writer, and only
+// when its content changes: an identical file is not rewritten.
+func TestWriteItemFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "LaunchAgents", "janus.edge.plist")
+	if changed, err := writeItemFile(path, []byte("a")); err != nil || !changed {
+		t.Fatalf("first write: %v %v", changed, err)
+	}
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := writeItemFile(path, []byte("a")); err != nil || changed {
+		t.Errorf("identical write: %v %v", changed, err)
+	}
+	if st, _ := os.Stat(path); !st.ModTime().Equal(old) {
+		t.Error("an identical file was rewritten")
+	}
+	if changed, err := writeItemFile(path, []byte("b")); err != nil || !changed {
+		t.Errorf("changed write: %v %v", changed, err)
+	}
+	got, _ := os.ReadFile(path)
+	st, _ := os.Stat(path)
+	if string(got) != "b" || (runtime.GOOS != "windows" && st.Mode().Perm() != 0o644) {
+		t.Errorf("item file %q mode %v", got, st.Mode().Perm())
 	}
 }

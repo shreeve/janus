@@ -36,7 +36,9 @@ The same removal applies to client request trailers.
 
 A registered application upstream is trusted to select the file. Janus
 applies no configured-root jail or URL-to-path mapping. A valid instruction
-may name any regular file that Janus can open.
+may name any regular file that Janus can open; Capability 6's dotfile rule
+governs request paths, not instructions, so a dot-segment pathname the
+application authorized is delivered.
 
 Deployments maintain this invariant:
 
@@ -115,7 +117,31 @@ response transformation. Every streaming body owns exactly one descriptor
 and closes it on EOF, error, or client cancellation.
 
 Janus matches Go `http.ServeContent` semantics for preconditions, validators,
-single and multipart byte ranges, `If-Range`, and `HEAD`. The implementation
+single and multipart byte ranges, `If-Range`, and `HEAD`:
+
+- `If-Match` (strong comparison) takes precedence over
+  `If-Unmodified-Since`; either failing answers 412;
+- `If-None-Match` (weak comparison) takes precedence over
+  `If-Modified-Since`; a match answers 304 for GET and HEAD and 412
+  otherwise, and `If-Modified-Since` applies only to GET and HEAD;
+- date comparisons truncate the modification time to whole seconds, and a
+  malformed date ignores its condition;
+- a zero or Unix-epoch modification time is unspecified: Janus emits no
+  `Last-Modified` and ignores `If-Modified-Since` and
+  `If-Unmodified-Since`;
+- `If-Range` applies to GET and HEAD only; an entity tag must match the
+  representation's ETag strongly (a weak ETag never satisfies it), a date
+  must equal the modification time to the second, and anything else
+  serves the full representation;
+- ranges whose lengths sum past the file size are ignored, overlapping or
+  not, and the full representation answers 200.
+
+Janus applies one limit beyond `ServeContent`, shared with Capability 6:
+a `Range` field with more than 16 nonempty range specs is ignored and the
+full representation answers 200, as RFC 9110 permits. One small request
+therefore cannot expand into an unbounded run of multipart part headers.
+
+The implementation
 selects status, headers, offsets, and a streaming body directly; it does not
 run `ServeContent` behind a buffering recorder or producer goroutine.
 
@@ -140,6 +166,10 @@ Janus fills only omitted representation metadata:
 - a weak `ETag` from the opened file's modification time and size;
 - `Last-Modified` from the opened file;
 - `Accept-Ranges: bytes`.
+
+Janus always sends `X-Content-Type-Options: nosniff`, replacing any
+upstream value: Janus delivers these bytes from disk and may itself have
+derived their type, and browsers must not reinterpret them.
 
 One supplied `ETag` must be syntactically valid. One supplied
 `Last-Modified` must parse as an HTTP date. A malformed or repeated supplied
@@ -203,7 +233,12 @@ Go tests pin:
 - supplied representation headers win and omitted metadata is filled;
 - instruction transport headers never survive;
 - GET, HEAD, validators, single ranges, multipart ranges, and unsatisfiable
-  ranges match `http.ServeContent`;
+  ranges match `http.ServeContent`, case by case across If-Match,
+  If-Unmodified-Since, If-None-Match, If-Modified-Since, If-Range (strong
+  and weak tags, dates), their precedence, and epoch modification times;
+- the 16-spec range cap and the oversized-sum rule answer identically for
+  sendfile and registered files;
+- every transformed response carries `X-Content-Type-Options: nosniff`;
 - body-forbidden and upstream range-selection statuses reject; other
   body-capable non-200 statuses retain their status;
 - sendfile failures do not mark an upstream unhealthy;

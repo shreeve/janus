@@ -7,12 +7,11 @@
 # time keep their app alive with explicit heartbeats.
 #
 # Handshake cases use *.janus.test names (resolved to 127.0.0.1 with
-# --resolve): Caddy serves cold-loaded certs (the *.ripdev.io wildcard)
+# --resolve): Caddy serves cold-managed certs (the *.janus.localhost wildcard)
 # from its cache before consulting on-demand, so only a name the cold
 # config does NOT cover exercises the ask → mint path.
 
 TLS_APP_FILE="$TEST_RUN_DIR/tls-app-id"
-CADDY_LOCAL_ROOT="$TEST_RUN_DIR/caddy-data/caddy/pki/authorities/local/root.crt"
 
 tls_app_id() {
 	cat "$TLS_APP_FILE"

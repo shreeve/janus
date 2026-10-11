@@ -58,7 +58,7 @@ byte-identical to the listings.
   Browser 1            Browser 2            Browser 3 (act 2)
      │  HTTPS: GET /, /plumbing         +   WSS: /hub
      └───────────────────┬───────────────────┘
-                         ▼  TLS :443 (certs/ripdev.io.*, *.ripdev.io → 127.0.0.1)
+                         ▼  TLS :443 (internal CA, demo.localhost → 127.0.0.1)
         ┌──────────────────────────────────────────────────┐
         │  Janus  (./bin/janus, one process)               │
         │   ├── data plane   GET / /plumbing → worker      │
@@ -77,7 +77,7 @@ byte-identical to the listings.
 
 Three named flows you will see over and over:
 
-1. **Page load (HTTPS → data plane → worker).** `GET https://demo.ripdev.io/`
+1. **Page load (HTTPS → data plane → worker).** `GET https://demo.localhost/`
    resolves the host in the registry and proxies to the worker's unix
    socket. `/plumbing` rides the same path and declares `no-store` for
    browsers and intermediary caches.
@@ -105,9 +105,10 @@ identically — unlike the bridge-response plane used throughout below.
 ## 3. Prerequisites and launch
 
 You need Go (current stable), `bun`, and the two checkouts from section 1.
-DNS for `*.ripdev.io` resolves to `127.0.0.1` and the trusted
-wildcard cert is committed in the janus repo's `certs/` — HTTPS on
-localhost works out of the box.
+`demo.localhost` resolves to the loopback with no DNS, and Caddy's
+internal CA issues its certificate. The first run installs that CA's
+root into the system trust store (it may ask for your password), so
+HTTPS on localhost works in the browser from then on.
 
 Every command below spells the checkouts as `~/src/janus` and `~/src/rip`;
 substitute your own paths if they live elsewhere.
@@ -122,13 +123,12 @@ make janus
 
 **The demo Caddyfile.** It ships next to this page as
 `docs/counter/Caddyfile.demo`. One site; hub on with `origin same` (the
-page and the socket share `demo.ripdev.io`, so the default posture
+page and the socket share `demo.localhost`, so the default posture
 passes); control on loopback `:7600`.
 
 ```caddyfile
 {
 	auto_https disable_redirects
-	skip_install_trust
 
 	janus {
 		ping # GET /ping → pong at the edge; default is off, and the rip app has no /ping route to fall through to
@@ -137,8 +137,7 @@ passes); control on loopback `:7600`.
 	}
 }
 
-demo.ripdev.io {
-	tls certs/ripdev.io.crt certs/ripdev.io.key
+demo.localhost {
 	janus
 }
 ```
@@ -165,7 +164,7 @@ ln -sfn ~/src/rip/packages/server node_modules/@rip-lang/server
 
 bun --preload=$HOME/src/rip/src/loader.js \
   $HOME/src/rip/packages/server/server.rip \
-  --name demo --host demo.ripdev.io --workers 1 \
+  --name demo --host demo.localhost --workers 1 \
   --control http://127.0.0.1:7600
 ```
 
@@ -194,9 +193,9 @@ curl -s -X PATCH -H 'Content-Type: application/json' \
 **Verify:**
 
 ```bash
-curl -s https://demo.ripdev.io/ping           # → pong, answered at the edge: site admission proven, worker never touched — the primordial capability
+curl -s https://demo.localhost/ping           # → pong, answered at the edge: site admission proven, worker never touched — the primordial capability
 curl -s http://127.0.0.1:7600/1.0/apps        # the demo app: id, hosts, upstreams (the manager's lifecycle, visible), "bridge":"/rt/bridge"
-curl -s https://demo.ripdev.io/               # the HTML page (first hit may ride the initial boot)
+curl -s https://demo.localhost/               # the HTML page (first hit may ride the initial boot)
 curl -s http://127.0.0.1:7600/1.0/hub         # hub counters, all zeros before the first socket
 ```
 
@@ -430,15 +429,15 @@ Notes on why this is correct against the shipped contracts:
 ## 5. The acts, walked through exactly
 
 **Act 1 — realtime tally.** Open two windows on
-`https://demo.ripdev.io/` (flow 1); each opens
-`wss://demo.ripdev.io/hub`. Per handshake Janus checks origin (`same` —
+`https://demo.localhost/` (flow 1); each opens
+`wss://demo.localhost/hub`. Per handshake Janus checks origin (`same` —
 the page's Origin equals the request Host, passes), reserves a slot, mints
 a 16-char connection id, and sends the **open bridge** while the handshake
 holds:
 
 ```http
 POST /rt/bridge HTTP/1.1
-Host: demo.ripdev.io
+Host: demo.localhost
 Sec-WebSocket-Frame: open
 Janus-Hub-Client: k7f2m9x0q4w1z8p3
 Janus-Hub-App: demo-x7k2p9
@@ -465,7 +464,7 @@ rip route receives:
 
 ```http
 POST /rt/bridge HTTP/1.1
-Host: demo.ripdev.io
+Host: demo.localhost
 Sec-WebSocket-Frame: text
 Janus-Hub-Client: k7f2m9x0q4w1z8p3
 Janus-Hub-App: demo-x7k2p9
@@ -615,7 +614,7 @@ per-app breakdown under `"apps"`, keyed by app id):
   re-registers under a **new app id** with only `name`/`hosts` — the
   `bridge` is gone until you PATCH the new id.
 - **WS handshake answers 403** — origin policy. Served page and hub share
-  `demo.ripdev.io` so `origin same` passes for browsers; a non-browser
+  `demo.localhost` so `origin same` passes for browsers; a non-browser
   client (curl, wscat) sends no `Origin` header and fails `same` — that is
   the contract's posture, not a bug. Test WS by hand only via the page, or
   add an `origin any` site.
@@ -684,8 +683,8 @@ Choices this demo makes, and why — adjust with eyes open:
 7. **The arithmetic is deliberate**: four increments (1, 2, 3, 4), one
    decrement (3), then step 2 and two increments (5, 7) — a
    self-consistent sequence that lands the 3 → 5 → 7 finale.
-8. **Host `demo.ripdev.io`** rides the janus repo's committed trusted
-   wildcard certs (`certs/ripdev.io.*`, `*.ripdev.io` → 127.0.0.1).
+8. **Host `demo.localhost`** resolves to the loopback with no DNS and
+   takes its certificate from Caddy's internal CA.
 9. **`tally!` / `viewers!` (include-sender) on every bridge response** —
     required, not stylistic: bridge responses execute in the originating
     connection's exclusion context. On the publish plane the spelling

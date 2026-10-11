@@ -87,3 +87,22 @@ func TestParseLaunchdPID(t *testing.T) {
 		t.Errorf("scheduled: pid %d", got)
 	}
 }
+
+// status tells a crash loop from a clean stop by the job's last exit.
+func TestParseLaunchdLastExit(t *testing.T) {
+	for out, want := range map[string]struct {
+		code  int
+		known bool
+	}{
+		"\tstate = spawn scheduled\n\tlast exit code = 1\n":         {1, true},
+		"\tstate = not running\n\tlast exit code = 0\n":             {0, true},
+		"\tstate = not running\n\tlast exit code = 78: EX_CONFIG\n": {78, true},
+		"\tstate = running\n\tlast exit code = (never exited)\n":    {0, false},
+		"\tstate = running\n": {0, false},
+	} {
+		code, known := parseLaunchdLastExit([]byte(out))
+		if code != want.code || known != want.known {
+			t.Errorf("%q: %d %v, want %d %v", out, code, known, want.code, want.known)
+		}
+	}
+}

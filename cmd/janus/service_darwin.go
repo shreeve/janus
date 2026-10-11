@@ -4,7 +4,6 @@ package main
 // and a LaunchDaemon for root (the system domain, no session needed).
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -66,17 +65,32 @@ func parseLaunchdPID(out []byte) int {
 	return 0
 }
 
-func (l *launchdItem) register(p servicePaths, exe string) (bool, error) {
-	if err := os.MkdirAll(filepath.Dir(l.plist), 0o755); err != nil {
-		return false, err
+// lastExit is the status the job's last process exited with, from
+// `launchctl print` ("last exit code = 1"); not known before the first
+// exit ("(never exited)") or when launchd does not hold the job.
+func (l *launchdItem) lastExit() (int, bool) {
+	out, err := runOut("launchctl", "print", l.target())
+	if err != nil {
+		return 0, false
 	}
-	body := []byte(launchdPlist(l.label, p, exe))
-	prev, _ := os.ReadFile(l.plist)
-	changed := !bytes.Equal(prev, body)
-	if changed {
-		if err := os.WriteFile(l.plist, body, 0o644); err != nil {
-			return false, err
-		}
+	return parseLaunchdLastExit(out)
+}
+
+var launchdLastExit = regexp.MustCompile(`(?m)^\s*last exit code = (-?\d+)`)
+
+func parseLaunchdLastExit(out []byte) (int, bool) {
+	m := launchdLastExit.FindSubmatch(out)
+	if m == nil {
+		return 0, false
+	}
+	code, err := strconv.Atoi(string(m[1]))
+	return code, err == nil
+}
+
+func (l *launchdItem) register(p servicePaths, exe string) (bool, error) {
+	changed, err := writeItemFile(l.plist, []byte(launchdPlist(l.label, p, exe)))
+	if err != nil {
+		return false, err
 	}
 	// A previous `disable` outlives the plist; clear it so bootstrap and
 	// the next login both take.

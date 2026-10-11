@@ -335,8 +335,19 @@ func (a *App) commitReconciliation() bool {
 	return true
 }
 
+// activeJanusApp returns the janus app of Caddy's active configuration — the
+// generation that is serving. A variable only so tests can stand in for the
+// process-global caddy.ActiveContext.
+var activeJanusApp = func() (any, error) {
+	return caddy.ActiveContext().AppIfConfigured("janus")
+}
+
+// activePredecessor returns the serving generation when it is another app
+// bound to this app's pooled state: during a reload, the old generation a
+// starting app must not yet reconcile over. Nil when this app is the first
+// (or only) generation.
 func (a *App) activePredecessor() *App {
-	active, err := caddy.ActiveContext().AppIfConfigured("janus")
+	active, err := activeJanusApp()
 	if err != nil || active == nil {
 		return nil
 	}
@@ -356,8 +367,11 @@ func (a *App) commitSuccessor(next *App) bool {
 	return next.commitReconciliation()
 }
 
+// commitActiveSuccessor commits the serving generation's staged
+// reconciliation when it shares this app's pooled state — the old
+// generation's Stop after a successful reload.
 func (a *App) commitActiveSuccessor() {
-	active, err := caddy.ActiveContext().AppIfConfigured("janus")
+	active, err := activeJanusApp()
 	if err != nil || active == nil {
 		return
 	}

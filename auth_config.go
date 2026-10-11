@@ -1,8 +1,12 @@
 package janus
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/big"
+	"net/url"
+	pathpkg "path"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -41,6 +45,14 @@ const (
 	authThrottleBan        = 24 * time.Hour
 	authThrottleBanAt      = 7 // fails >= 7 → 24h ban
 	authThrottleMaxEntries = 65536
+
+	// Per-account ladder (any client, one host + username): free
+	// failures within the forget window, then a doubling 429 wait capped
+	// at authAccountWaitMax. Never a ban.
+	authAccountFreeFails = 10
+	authAccountWaitFirst = 5 * time.Second
+	authAccountWaitMax   = 60 * time.Second
+	authAccountForget    = time.Hour
 
 	// Argon2 verification concurrency: at most authVerifyConcurrency
 	// KDF runs at once; at most authVerifyQueueMax more may wait behind
@@ -118,6 +130,7 @@ type authSite struct {
 	gates []authGate        // longest-prefix-first for matching
 	ttl   time.Duration
 	store *authStore
+	realm string // the users table's identity (authRealm): the login ladders' scope
 
 	// plainHTTPLogged makes the dead-wall ERROR (plain-HTTP guarded
 	// site → 421) fire once per site, not once per request.
@@ -331,6 +344,12 @@ func normalizeGatePrefix(raw string) (string, error) {
 	if strings.ContainsAny(raw, " \t\r\n") {
 		return "", fmt.Errorf("path %q must not contain whitespace", raw)
 	}
+	// Request paths are matched in canonical form (authCanonicalPath),
+	// which reads \ as / and cuts ;parameters; a prefix carrying either
+	// could never match and would silently guard nothing.
+	if strings.ContainsAny(raw, `;\`) {
+		return "", fmt.Errorf("path %q must not contain ; or \\", raw)
+	}
 	if !strings.HasSuffix(raw, "/") {
 		raw += "/"
 	}
@@ -413,22 +432,102 @@ func longestGatePrefix(gates []AuthGate, path string) string {
 	return best
 }
 
-// gatePathMatches reports whether path is under the normalized prefix.
-// For /one/: /one, /one/, /one/two match; /ones does not.
+// gatePathMatches reports whether path is under the normalized prefix in
+// any of its gate-match forms (authGatePaths). For /one/: /one, /one/,
+// /one/two, //one/two, and /one;x/two match; /ones does not.
 func gatePathMatches(prefix, path string) bool {
+	prefix = strings.ToLower(prefix)
+	for _, form := range authGatePaths(path) {
+		if gatePrefixMatch(prefix, form) {
+			return true
+		}
+	}
+	return false
+}
+
+// gatePrefixMatch is the segment-boundary prefix test of one canonical
+// form against a lowercased normalized prefix.
+func gatePrefixMatch(prefix, form string) bool {
 	if prefix == "/" {
 		return true
 	}
-	// Fold case for the match only (never for the path handed upstream):
-	// a case-insensitive backend would otherwise let /ONE/secret slip a
-	// gate written /one/. Matching more can only over-gate, never expose.
-	prefix = strings.ToLower(prefix)
-	path = strings.ToLower(path)
-	trimmed := strings.TrimSuffix(prefix, "/")
-	if path == trimmed || path == prefix {
+	if form == prefix || form == strings.TrimSuffix(prefix, "/") {
 		return true
 	}
-	return strings.HasPrefix(path, prefix)
+	return strings.HasPrefix(form, prefix)
+}
+
+// authCanonicalPath folds a decoded request path into the form gates
+// match against: lowercased (a case-insensitive backend must not let
+// /ONE/secret slip a gate written /one/), backslashes read as slashes,
+// every ;parameter suffix cut from its segment (matrix parameters that
+// servlet-style upstreams strip), and runs of slashes collapsed (os.Root
+// and many upstreams merge them). A trailing slash survives. The
+// canonical form exists for matching only; the path handed upstream is
+// never rewritten.
+//
+// Every fold only shortens a segment or removes an empty one, and a
+// normalized gate prefix is already canonical (it carries no //, ;, \,
+// or uppercase that matters), so a raw path under a prefix stays under
+// it after folding: canonical matching can only gate more paths, never
+// fewer.
+func authCanonicalPath(p string) string {
+	p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
+	var b strings.Builder
+	b.Grow(len(p) + 1)
+	trailing := false
+	for _, seg := range strings.Split(p, "/") {
+		if i := strings.IndexByte(seg, ';'); i >= 0 {
+			seg = seg[:i]
+		}
+		if seg == "" {
+			trailing = true
+			continue
+		}
+		b.WriteByte('/')
+		b.WriteString(seg)
+		trailing = false
+	}
+	if b.Len() == 0 || trailing {
+		b.WriteByte('/')
+	}
+	return b.String()
+}
+
+// authGatePaths returns every form a gate is matched against: the
+// canonical path; the canonical path with dot segments resolved (an
+// upstream that resolves /x/../one/ must not reach /one/ unguarded); and
+// the canonical form of one further percent-decoding (an upstream that
+// decodes twice must not turn %2F or %6F into a gated path). Each form's
+// winning gate must authorize the request (matchGates), so an extra form
+// can only add a gate to satisfy, never replace one.
+func authGatePaths(p string) []string {
+	forms := make([]string, 0, 4)
+	add := func(form string) {
+		for _, f := range forms {
+			if f == form {
+				return
+			}
+		}
+		forms = append(forms, form)
+	}
+	addWithDots := func(canon string) {
+		add(canon)
+		if strings.Contains(canon, ".") {
+			cleaned := pathpkg.Clean(canon)
+			if strings.HasSuffix(canon, "/") && cleaned != "/" {
+				cleaned += "/"
+			}
+			add(cleaned)
+		}
+	}
+	addWithDots(authCanonicalPath(p))
+	if strings.IndexByte(p, '%') >= 0 {
+		if decoded, err := url.PathUnescape(p); err == nil {
+			addWithDots(authCanonicalPath(decoded))
+		}
+	}
+	return forms
 }
 
 // validateAuthUsername lowercases and checks a username: 1–64 bytes of
@@ -656,17 +755,88 @@ func compileAuthSite(users []AuthUser, gates []AuthGate, ttl time.Duration, stor
 		gates: compiled,
 		ttl:   ttl,
 		store: store,
+		realm: authRealm(umap),
 	}, nil
 }
 
-// matchGate returns the winning (longest) gate for path, or nil.
-func (cfg *authSite) matchGate(path string) *authGate {
-	for i := range cfg.gates {
-		if gatePathMatches(cfg.gates[i].prefix, path) {
-			return &cfg.gates[i]
+// authRealm names a users table: every site whose effective table is the
+// same (sites inheriting the global users, an app's several hosts) shares
+// one realm, so a password guessed on one is guessed on all and the login
+// ladders count it once. Disjoint tables never throttle each other.
+func authRealm(users map[string]string) string {
+	names := make([]string, 0, len(users))
+	for n := range users {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, n := range names {
+		h.Write([]byte(n))
+		h.Write([]byte{0})
+		h.Write([]byte(users[n]))
+		h.Write([]byte{'\n'})
+	}
+	return "realm:" + hex.EncodeToString(h.Sum(nil)[:12])
+}
+
+// matchGates returns the winning (longest) gate of each of path's
+// gate-match forms (authGatePaths), each distinct winner once, the
+// canonical form's first; nil when no form falls under a gate. A request
+// must be authorized at every winner: a form that an upstream may serve
+// (dot segments resolved, a second decoding) can land under a narrower
+// gate than the canonical path, and the most restrictive winner decides,
+// never the most permissive.
+func (cfg *authSite) matchGates(paths ...string) []*authGate {
+	var forms []string
+	for _, p := range paths {
+		forms = append(forms, authGatePaths(p)...)
+	}
+	var winners []*authGate
+	for _, form := range forms {
+		for i := range cfg.gates {
+			if !gatePrefixMatch(strings.ToLower(cfg.gates[i].prefix), form) {
+				continue
+			}
+			g := &cfg.gates[i]
+			seen := false
+			for _, w := range winners {
+				seen = seen || w == g
+			}
+			if !seen {
+				winners = append(winners, g)
+			}
+			break
 		}
 	}
+	return winners
+}
+
+// matchGate returns the first winner (the canonical form's when it lies
+// under a gate), or nil: the gate a canonical path such as a configured
+// route lies under.
+func (cfg *authSite) matchGate(path string) *authGate {
+	if winners := cfg.matchGates(path); len(winners) > 0 {
+		return winners[0]
+	}
 	return nil
+}
+
+// authAllowAll is the users every gate in gates allows.
+func authAllowAll(gates []*authGate) map[string]bool {
+	if len(gates) == 1 {
+		return gates[0].allow
+	}
+	out := map[string]bool{}
+	for user := range gates[0].allow {
+		all := true
+		for _, g := range gates[1:] {
+			all = all && g.allow[user]
+		}
+		if all {
+			out[user] = true
+		}
+	}
+	return out
 }
 
 // doorGate returns the gate whose exact login door is path, or nil.
@@ -729,35 +899,43 @@ func (a *App) reconcileAuth() {
 		}
 	}
 	st := a.state.auth
+	if a.logger != nil {
+		st.logger.Store(a.logger)
+	}
 	st.reapTTL.Store(int64(maxTTL))
 	st.mu.Lock()
-	revoked := 0
+	var ended []authSession
 	for key, session := range st.sessions {
-		if !a.authSessionAllowed(session.user, session.host) {
+		if !a.authSessionAllowed(session.user, session.host, session.cred) {
 			delete(st.sessions, key)
-			revoked++
+			ended = append(ended, *session)
 		}
 	}
 	st.mu.Unlock()
-	st.reloadRevoked.Add(int64(revoked))
-	if revoked > 0 {
-		a.logger.Warn("janus auth: sessions revoked at reload (user absent from the minting host's enabled site)",
-			zap.Int("revoked", revoked),
+	st.reloadRevoked.Add(int64(len(ended)))
+	for _, s := range ended {
+		st.auditRevoked("reload", s)
+	}
+	if len(ended) > 0 && a.logger != nil {
+		a.logger.Warn("janus auth: sessions revoked at reload (user absent from the minting host's enabled site, or credential changed)",
+			zap.Int("revoked", len(ended)),
 			zap.Bool("auth_enabled_anywhere", enabled),
 		)
 	}
 }
 
-// authSessionAllowed retains a host-bound session only when its user remains
-// in at least one enabled auth site that matches the minting host. A same-name
-// user on another host must not keep an unreachable stale session alive.
-func (a *App) authSessionAllowed(user, host string) bool {
+// authSessionAllowed retains a host-bound session only when its user remains,
+// with the credential the session was minted against, in at least one
+// enabled auth site that matches the minting host. A same-name user on
+// another host must not keep an unreachable stale session alive, and a
+// changed passhash ends every session minted under the old one.
+func (a *App) authSessionAllowed(user, host, cred string) bool {
 	host = strings.ToLower(host)
 	for _, e := range a.authSites {
 		if e.cfg == nil {
 			continue
 		}
-		if _, ok := e.cfg.users[user]; !ok {
+		if have, ok := e.cfg.users[user]; !ok || have != cred {
 			continue
 		}
 		if len(e.patterns) == 0 {

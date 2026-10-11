@@ -20,7 +20,7 @@ case_sendfile_setup() {
 	done
 	[[ -S "$SENDFILE_SOCK" ]] || return 1
 
-	capi POST /1.0/apps '{"name":"sendfile","hosts":["sendfile.ripdev.io"]}'
+	capi POST /1.0/apps '{"name":"sendfile","hosts":["sendfile.janus.localhost"]}'
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -34,22 +34,22 @@ case_sendfile_setup() {
 case_sendfile_get_head_and_range() {
 	local headers body
 	headers="$TEST_RUN_DIR/sendfile/headers"
-	body="$(curl -sS -D "$headers" --max-time 5 https://sendfile.ripdev.io/file)"
+	body="$(curl -sS -D "$headers" --max-time 5 https://sendfile.janus.localhost/file)"
 	eq "$body" "0123456789-sendfile"
 	! tr -d '\r' <"$headers" | awk -F': ' 'tolower($1)=="x-sendfile" {found=1} END {exit !found}'
 
 	eq "$(curl -sS -I -o /dev/null -w '%{http_code} %{size_download}' --max-time 5 \
-		https://sendfile.ripdev.io/file)" "200 0"
+		https://sendfile.janus.localhost/file)" "200 0"
 	eq "$(curl -sS -H 'Range: bytes=2-5' --max-time 5 \
-		https://sendfile.ripdev.io/file)" "2345"
+		https://sendfile.janus.localhost/file)" "2345"
 	eq "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Range: bytes=2-5' --max-time 5 \
-		https://sendfile.ripdev.io/file)" "206"
+		https://sendfile.janus.localhost/file)" "206"
 }
 
 case_sendfile_metadata_and_conditional() {
 	local headers
 	headers="$TEST_RUN_DIR/sendfile/custom-headers"
-	curl -sS -o /dev/null -D "$headers" --max-time 5 https://sendfile.ripdev.io/custom
+	curl -sS -o /dev/null -D "$headers" --max-time 5 https://sendfile.janus.localhost/custom
 	local clean
 	clean="$(tr -d '\r' <"$headers")"
 	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="content-type" && $2=="application/x-janus-acceptance" {found=1} END {exit !found}'
@@ -57,14 +57,14 @@ case_sendfile_metadata_and_conditional() {
 	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="etag" && $2=="\"fixture-etag\"" {found=1} END {exit !found}'
 	printf '%s' "$clean" | awk -F': ' 'tolower($1)=="cache-control" && $2=="private, no-store" {found=1} END {exit !found}'
 	eq "$(curl -sS -o /dev/null -w '%{http_code}' -H 'If-None-Match: "fixture-etag"' \
-		--max-time 5 https://sendfile.ripdev.io/custom)" "304"
+		--max-time 5 https://sendfile.janus.localhost/custom)" "304"
 }
 
 case_sendfile_failure_strips_instruction() {
 	local headers code
 	headers="$TEST_RUN_DIR/sendfile/missing-headers"
 	code="$(curl -sS -o /dev/null -D "$headers" -w '%{http_code}' --max-time 5 \
-		https://sendfile.ripdev.io/missing)"
+		https://sendfile.janus.localhost/missing)"
 	eq "$code" "502"
 	local clean
 	clean="$(tr -d '\r' <"$headers")"

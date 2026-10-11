@@ -224,6 +224,13 @@ func (h *appHub) removeConn(c *hubConn) {
 	c.channels = map[string]struct{}{}
 }
 
+// liveLocked reports whether c is the registered connection under its id
+// and has not begun closing (a kick's queued final frame counts as
+// closing). Caller holds h.mu; the lock order is h.mu before c.qmu.
+func (h *appHub) liveLocked(c *hubConn) bool {
+	return c != nil && h.conns[c.id] == c && !c.closing()
+}
+
 func (h *appHub) joinLocked(c *hubConn, ch string) {
 	if _, ok := c.channels[ch]; ok {
 		return // idempotent
@@ -284,6 +291,16 @@ type hubDispatch struct {
 func (h *appHub) execute(objs []hubObject, plane hubPlane, origin *hubConn) (hubExecOutcome, *hubViolation) {
 	var out hubExecOutcome
 	h.mu.Lock()
+
+	// A client frame executes only from a connection that is still
+	// registered and not closing. The reader can hold a frame read before
+	// a close (slow consumer, kick, teardown, host removal) began; that
+	// frame is dropped, so a closed connection never rejoins a channel,
+	// never mints a phantom one, and never publishes.
+	if plane == hubPlaneClient && !h.liveLocked(origin) {
+		h.mu.Unlock()
+		return out, nil
+	}
 
 	// Stage 1 (stateful): validate before any effect.
 	subjects, verr := h.validateMembershipLocked(objs, plane, origin)

@@ -230,6 +230,14 @@ func TestValidateUpstreamsDoorbellSoleEntry(t *testing.T) {
 		{[]Upstream{{Path: "/run/bell.sock", Doorbell: true, Concurrency: 1}}, false},                       // cap on a doorbell
 		{[]Upstream{{Path: ""}}, false},                                                                     // empty path
 		{[]Upstream{{Path: "/run/a.sock"}, {Path: "/run/a.sock"}}, false},                                   // duplicate path
+		{[]Upstream{{Path: "run/a.sock"}}, false},                                                           // relative
+		{[]Upstream{{Path: "./a.sock"}}, false},                                                             // relative
+		{[]Upstream{{Path: "@abstract"}}, false},                                                            // not a filesystem path
+		{[]Upstream{{Path: "/run//a.sock"}}, false},                                                         // unclean
+		{[]Upstream{{Path: "/run/x/../a.sock"}}, false},                                                     // unclean
+		{[]Upstream{{Path: "/run/./a.sock"}}, false},                                                        // unclean
+		{[]Upstream{{Path: "/run/a.sock/"}}, false},                                                         // unclean
+		{[]Upstream{{Path: "/run/bell.sock/.", Doorbell: true}}, false},                                     // unclean doorbell
 	}
 	for i, tt := range cases {
 		err := validateUpstreams(tt.ups)
@@ -546,5 +554,41 @@ func TestControlJSONRejectsDuplicateKeysBeforeMutation(t *testing.T) {
 		if req.Name != "" {
 			t.Fatal("rejected document partially decoded")
 		}
+	}
+}
+
+// TestUpstreamPathBelongsToOneApp pins the cross-app socket rule: a path one
+// app publishes is refused to every other app (409), on PUT and on POST,
+// while the owner may republish it and a released path is free again.
+func TestUpstreamPathBelongsToOneApp(t *testing.T) {
+	r := newAppRegistry()
+	shop, err := r.create("shop", []string{"shop.example.com"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rival, err := r.create("rival", []string{"rival.example.com"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := []Upstream{{Path: "/run/shop/w1.sock"}}
+	if _, err := r.setUpstreams(shop.ID, sock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.setUpstreams(shop.ID, sock); err != nil {
+		t.Fatalf("owner republish: %v", err)
+	}
+	_, err = r.setUpstreams(rival.ID, sock)
+	if ae, ok := err.(*apiError); !ok || ae.Status != 409 || !strings.Contains(ae.Msg, shop.ID) {
+		t.Fatalf("rival PUT: want 409 naming %s, got %v", shop.ID, err)
+	}
+	_, err = r.createWithLease("third", []string{"third.example.com"}, nil, nil, "", sock, "heartbeat")
+	if ae, ok := err.(*apiError); !ok || ae.Status != 409 {
+		t.Fatalf("POST with a held path: want 409, got %v", err)
+	}
+	if _, err := r.setUpstreams(shop.ID, []Upstream{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.setUpstreams(rival.ID, sock); err != nil {
+		t.Fatalf("released path: %v", err)
 	}
 }
