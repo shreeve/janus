@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // controlSocketPool owns every unix control socket for the whole process.
@@ -72,7 +74,8 @@ func splitSocketPerms(addr string) (string, fs.FileMode, error) {
 
 // acquire returns a listener for the unix socket at addr. The first
 // acquire for a path binds the canonical (removing a stale file left by
-// an unclean previous process); every acquire returns a fresh dup whose
+// an unclean previous process, and refusing a socket another process still
+// serves); every acquire returns a fresh dup whose
 // Close releases exactly one reference.
 func (p *controlSocketPool) acquire(addr string) (net.Listener, error) {
 	path, mode, err := splitSocketPerms(addr)
@@ -93,10 +96,8 @@ func (p *controlSocketPool) acquire(addr string) (net.Listener, error) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return nil, fmt.Errorf("control socket %s: %w", path, err)
 			}
-			// A previous process that died without cleanup leaves its
-			// socket file behind; a live file cannot be rebound.
-			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("control socket %s: removing stale file: %w", path, err)
+			if err := removeStaleSocket(path); err != nil {
+				return nil, fmt.Errorf("control socket %s: %w", path, err)
 			}
 		}
 		ln, err := net.Listen("unix", path)
@@ -132,6 +133,42 @@ func (p *controlSocketPool) acquire(addr string) (net.Listener, error) {
 	}
 	e.refs++
 	return &pooledControlListener{Listener: dup, pool: p, path: path}, nil
+}
+
+// staleSocketProbeTimeout bounds the dial that tells a live socket from one
+// a dead process left behind.
+const staleSocketProbeTimeout = time.Second
+
+// removeStaleSocket clears the way for the first bind of path. A process
+// that died without cleanup leaves its socket file behind, and a bound file
+// cannot be rebound — but a file another process is still serving must
+// never be unlinked out from under it. So the existing file is probed
+// first: a socket that answers belongs to someone (refuse, loudly); one
+// that refuses connections is stale (unlink it); anything that is not a
+// socket is never removed.
+func removeStaleSocket(path string) error {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Type() != fs.ModeSocket {
+		return fmt.Errorf("%s exists and is not a unix socket; refusing to remove it", path)
+	}
+	conn, err := net.DialTimeout("unix", path, staleSocketProbeTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("another process is serving %s", path)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("probing existing socket %s: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing stale socket: %w", err)
+	}
+	return nil
 }
 
 // dupUnixListener copies the canonical's descriptor into an independent

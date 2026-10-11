@@ -162,6 +162,7 @@ Port **7601** for public avoids clashing with local **7600**.
 - `cert:…` without `key:…` (or the reverse), an empty `cert:`/`key:` value, or a duplicate of either on one line
 - `cert:…`/`key:…` on a non-TLS listener (`internal`, or `local` over plain `http://`)
 - Site-level `janus { control … }` (control is global only)
+- At Start, an `internal` socket path that another process is serving (`another process is serving <path>`), or that holds anything but a unix socket; a stale socket file nobody answers on is removed and rebound
 
 ## API surface (served today)
 
