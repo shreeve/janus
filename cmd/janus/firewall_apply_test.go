@@ -20,6 +20,19 @@ type fakeHost struct {
 	fail      map[string]string // command prefix -> error text
 	out       map[string]string // command prefix -> stdout
 	failWrite map[string]bool
+	loaded    *string // the main ruleset pf last loaded; nil: pf.conf as booted
+}
+
+// pfMainRules is the main-ruleset listing (pfctl -sr) of a pf.conf: its
+// filter anchors, in order.
+func pfMainRules(conf string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(conf, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, `anchor "`) {
+			b.WriteString(line + " all\n")
+		}
+	}
+	return b.String()
 }
 
 func newFakeHost(goos string) (*fakeHost, fwOps) {
@@ -41,6 +54,17 @@ func newFakeHost(goos string) (*fakeHost, fwOps) {
 				}
 				if _, ok := h.files[pfAnchorPath]; strings.HasSuffix(line, pfConfPath) && pfWired(h.files[pfConfPath]) && !ok {
 					return nil, errors.New("pf.conf loads an anchor file that is not there")
+				}
+				if strings.HasPrefix(line, "pfctl -f ") {
+					conf := h.files[args[len(args)-1]]
+					h.loaded = &conf
+				}
+			case line == "pfctl -sr":
+				if _, ok := h.out[line]; !ok {
+					if h.loaded != nil {
+						return []byte(pfMainRules(*h.loaded)), nil
+					}
+					return []byte(pfMainRules(h.files[pfConfPath])), nil
 				}
 			case strings.HasPrefix(line, "pfctl -a janus -nvf ") || strings.HasPrefix(line, "pfctl -a janus -nf ") || strings.HasPrefix(line, "pfctl -a janus -f "):
 				body, ok := h.files[args[len(args)-1]]
@@ -327,6 +351,33 @@ func TestApplyPfReloadsAnchorOnly(t *testing.T) {
 	}
 }
 
+// With pf.conf wired but the main ruleset flushed (pfctl -F all, or a
+// pfctl -f of another file), a re-apply reloads pf.conf, parse-checked,
+// and leaves pf.conf itself as it was; the result is verified.
+func TestApplyPfRestoresTheReference(t *testing.T) {
+	h, ops := newFakeHost("darwin")
+	wired, _ := pfConfWithAnchor(applePfConf, true)
+	h.files[pfConfPath] = wired
+	h.files[pfAnchorPath], _ = PfAnchor(ScopeLAN, lanState().onlink())
+	h.files[pfDaemonPlist] = pfDaemonPlistBody()
+	h.inForce()
+	flushed := applePfConf
+	h.loaded = &flushed
+	if v := checkFirewall(ops, lanState()); v.verified || !strings.Contains(v.detail, "does not evaluate the janus anchor") {
+		t.Fatalf("a flushed main ruleset verified: %+v", v)
+	}
+	v, err := applyFirewall(ops, lanState())
+	if err != nil || !v.verified {
+		t.Fatalf("apply: %+v %v\ncmds: %v", v, err, h.cmds)
+	}
+	if h.index("pfctl -nf /etc/pf.conf") < 0 || h.index("pfctl -nf /etc/pf.conf") > h.index("pfctl -f /etc/pf.conf") {
+		t.Errorf("pf.conf not parse-checked before reloading: %v", h.cmds)
+	}
+	if h.files[pfConfPath] != wired {
+		t.Errorf("pf.conf rewritten:\n%s", h.files[pfConfPath])
+	}
+}
+
 // A parse failure leaves the host exactly as found.
 func TestApplyPfParseFailureRestores(t *testing.T) {
 	h, ops := newFakeHost("darwin")
@@ -442,6 +493,15 @@ func TestCheckPfVerdicts(t *testing.T) {
 	h.out["pfctl -s info"] = "Status: Disabled\n"
 	expect("pf is disabled")
 	h.out["pfctl -s info"] = "Status: Enabled for 0 days\n"
+	// pfctl -F all leaves the anchor's rules loaded and unreferenced; a
+	// reference behind Apple's anchor is not ahead of it.
+	h.out["pfctl -sr"] = ""
+	expect("does not evaluate the janus anchor")
+	h.out["pfctl -sr"] = pfMainRules(applePfConf) + `anchor "janus" all` + "\n"
+	expect("does not evaluate the janus anchor")
+	h.out["pfctl -sr"] = `anchor "janus/sub" all` + "\n" + pfMainRules(applePfConf)
+	expect("does not evaluate the janus anchor")
+	delete(h.out, "pfctl -sr")
 	h.out["pfctl -a janus -sr"] = ""
 	expect("not the anchor file's")
 	loaded := normalizedPf(want)

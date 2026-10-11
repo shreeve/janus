@@ -41,6 +41,11 @@ A hardening round. What an upgrading operator notices first:
 - **Under the service edge a dedicated mdns `listen` is refused:** it
   would serve the status page on a port the exposure mode does not
   govern. The front door shares the HTTP port, as the seed configures it.
+- **macOS firewall verdict:** `verified` now also requires pf's main
+  ruleset to evaluate the janus anchor ahead of Apple's. After `pfctl -F
+  all`, or a `pfctl -f` of a file without it, the anchor's rules stay
+  loaded but unread, and status no longer says `verified`; `sudo janus
+  firewall` reloads `/etc/pf.conf` to put the reference back.
 - **Caddy 2.11.7**, current quic-go, webtransport-go, and `x/` modules,
   built with Go 1.27.2; `govulncheck` gates every pull request.
 

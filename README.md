@@ -537,7 +537,8 @@ What enforces a mode differs by platform, and `status` says which:
 `janus status` never claims more than it verified. On macOS without root
 the firewall shows as `missing` when the anchor files are not in place and
 otherwise `unverified (run: sudo janus status)`; with root it verifies
-that pf is enabled and holds exactly the anchor's rules. Each address says
+that pf is enabled, its main ruleset evaluates the janus anchor ahead of
+Apple's, and the anchor holds exactly its rules. Each address says
 what enforces its reach: the loopbacks are `host-enforced (loopback)`, a
 private address `host-enforced (RFC1918)` by addressing alone, and `wan`
 is `network-gated (wildcard)`.
