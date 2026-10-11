@@ -28,9 +28,6 @@ export JANUS_TEST_ACCESS_LOG="$TEST_RUN_DIR/access.log"
 # that signs every site certificate lands here (see start_caddy).
 export XDG_DATA_HOME="$TEST_RUN_DIR/caddy-data"
 CADDY_LOCAL_ROOT="$XDG_DATA_HOME/caddy/pki/authorities/local/root.crt"
-# testkit's WebSocket and WebTransport clients verify the edge against the
-# same root (their -cacert default).
-export SSL_CERT_FILE="$CADDY_LOCAL_ROOT"
 mkdir -p "$TEST_RUN_DIR/run"
 CADDY_BIN="${CADDY_BIN:-$ROOT/bin/janus}"
 CADDY_LOG="${CADDY_LOG:-$TEST_RUN_DIR/caddy.log}"
@@ -365,6 +362,11 @@ fi
 
 printf '%s\n' "$(paint "$DIM" "building testkit …")"
 build_testkit || exit 1
+
+# testkit's WebSocket and WebTransport clients verify the edge against the
+# same root (their -cacert default). Exported only after the builds: go
+# reads SSL_CERT_FILE too, and must still trust the module proxy.
+export SSL_CERT_FILE="$CADDY_LOCAL_ROOT"
 
 printf '%s\n' "$(paint "$DIM" "starting caddy …")"
 start_caddy || exit 1
