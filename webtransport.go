@@ -562,7 +562,9 @@ func (r *wtRelay) leafHash(host string) (string, error) {
 			return "", err
 		}
 	}
-	if time.Until(leaf.NotAfter) > wtHashMaxValidity {
+	// Browsers judge the leaf's whole validity period, not what is left of
+	// it: a 90-day leaf in its final two weeks is still refused as a hash.
+	if leaf.NotAfter.Sub(leaf.NotBefore) > wtHashMaxValidity {
 		return "", nil // too long-lived to pin; CA validation is the path
 	}
 	// serverCertificateHashes requires an ECDSA P-256 leaf. A non-conforming

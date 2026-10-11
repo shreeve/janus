@@ -270,7 +270,9 @@ pins the leaf's SHA-256 and skips CA/CT entirely.
 
 **Certificate hashes in the descriptor.** The relay's on-demand internal leaf
 is ECDSA P-256 with a short validity, which already satisfies the
-`serverCertificateHashes` constraints (P-256, validity ≤14 days). So the
+`serverCertificateHashes` constraints (P-256, a total validity period
+`NotAfter − NotBefore` of at most 14 days; the time left is not what a
+browser judges, so a 90-day leaf in its final two weeks never qualifies). So the
 descriptor publishes the current leaf's SHA-256 (standard base64 of the DER)
 in `certificate_hashes` whenever the leaf qualifies, and a page dials with
 `serverCertificateHashes` set from it. When the served leaf is long-lived (a

@@ -723,17 +723,20 @@ func TestWebtransportTLSHookCallsThrough(t *testing.T) {
 // a short-lived leaf and declines for a long-lived one (a public cert that
 // should be validated by CA instead).
 func TestWebtransportLeafHash(t *testing.T) {
-	mk := func(validity time.Duration) *tls.Config {
+	mkSpan := func(notBefore, notAfter time.Time) *tls.Config {
 		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		tmpl := &x509.Certificate{
 			SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: wtTestHost}, DNSNames: []string{wtTestHost},
-			NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(validity),
+			NotBefore: notBefore, NotAfter: notAfter,
 			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		}
 		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 		leaf, _ := x509.ParseCertificate(der)
 		cert := &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
 		return &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return cert, nil }}
+	}
+	mk := func(validity time.Duration) *tls.Config {
+		return mkSpan(time.Now().Add(-time.Minute), time.Now().Add(validity))
 	}
 
 	r := newWtRelay(zap.NewNop())
@@ -757,6 +760,18 @@ func TestWebtransportLeafHash(t *testing.T) {
 	r.tlsConf.Store(mk(90 * 24 * time.Hour))
 	if got, err := r.leafHash(wtTestHost); err != nil || got != "" {
 		t.Fatalf("long-lived leaf: want no hash, got %q %v", got, err)
+	}
+	// A 90-day leaf in its final 10 days has under 14 days left, but its
+	// total validity is what a browser judges: still no hash.
+	now := time.Now()
+	r.tlsConf.Store(mkSpan(now.Add(-80*24*time.Hour), now.Add(10*24*time.Hour)))
+	if got, err := r.leafHash(wtTestHost); err != nil || got != "" {
+		t.Fatalf("long-lived leaf near expiry: want no hash, got %q %v", got, err)
+	}
+	// A leaf whose whole validity is exactly 14 days qualifies.
+	r.tlsConf.Store(mkSpan(now.Add(-time.Hour), now.Add(-time.Hour+wtHashMaxValidity)))
+	if got, err := r.leafHash(wtTestHost); err != nil || got == "" {
+		t.Fatalf("14-day leaf: want a hash, got %q %v", got, err)
 	}
 }
 
