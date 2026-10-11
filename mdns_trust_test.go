@@ -90,7 +90,7 @@ func TestTrustFrontDoor(t *testing.T) {
 		{"/trust/ca.mobileconfig", "janus.local", false, 200, "com.apple.security.root"},
 		{"/", "janus.local", true, 200, "status"},
 		{"/trust/check", "janus.local", true, 204, ""},
-		{"/trust", "janus-2.local", true, 200, "One-time setup"},       // effective name
+		{"/trust", "janus-2.local", true, 200, "One-time setup"},         // effective name
 		{"/trust", "janus.lan.example.com", true, 200, "One-time setup"}, // canonical
 	} {
 		rr, nextCalled, err := serve(tc.path, tc.host, tc.secure)

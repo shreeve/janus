@@ -205,7 +205,7 @@ func TestMdnsAdvertisableClassifier(t *testing.T) {
 		"x.local":        true,
 		"shop.local":     true,
 		"x.y.local":      false,
-		"x.example.com":    false,
+		"x.example.com":  false,
 		"local":          false,
 		"a.b.c.local":    false,
 		"deep.dev.local": false,
@@ -216,10 +216,10 @@ func TestMdnsAdvertisableClassifier(t *testing.T) {
 		}
 	}
 	skipped := map[string]bool{
-		"x.y.local":   true,
-		"x.local":     false,
+		"x.y.local":     true,
+		"x.local":       false,
 		"x.example.com": false,
-		"local":       false,
+		"local":         false,
 	}
 	for host, want := range skipped {
 		if got := mdnsSkippedHost(host); got != want {
@@ -1386,9 +1386,9 @@ func TestMdnsSharedDecider(t *testing.T) {
 		{"GET", "/", "janus.local", 200},
 		{"GET", "/status.json", "janus.local", 200},
 		{"HEAD", "/status.json", "janus.local", 200},
-		{"GET", "/", "janus-2.local", 200},       // renamed-mine
+		{"GET", "/", "janus-2.local", 200},         // renamed-mine
 		{"GET", "/", "janus.lan.example.com", 200}, // canonical-mine
-		{"GET", "/", "janus.local:80", 200},      // port stripped before the check
+		{"GET", "/", "janus.local:80", 200},        // port stripped before the check
 		{"POST", "/status.json", "janus.local", 405},
 		{"PUT", "/", "janus.local", 405},
 		{"GET", "/anything-else", "janus.local", 404},
