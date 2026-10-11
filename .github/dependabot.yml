@@ -1,0 +1,14 @@
+# Weekly update pull requests for the Go modules and for the SHA-pinned
+# GitHub Actions (Dependabot moves the pin and its version comment
+# together). Each lands through the same Checks as any change, govulncheck
+# included.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

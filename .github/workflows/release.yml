@@ -33,19 +33,29 @@ jobs:
     steps:
       # Full fetch so the Go toolchain sees the pushed tag and VCS-stamps the
       # module version that the smoke test asserts via build-info.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v6
+          persist-credentials: false
+      # No build cache: a release compiles from the module proxy's verified
+      # sources alone, never from a cache another workflow run could have
+      # written.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       # Tagged builds compile the checked-out tag directly: the ldflags stamp
       # drives `janus version`, and the Go toolchain VCS-stamps the module
       # version into build-info. workflow_dispatch builds carry v0.0.0-dev.
+      # CGO_ENABLED=0: a Linux binary built on the runner would otherwise
+      # link the runner's glibc and refuse to start on an older one. Nothing
+      # in Janus needs cgo (on macOS, os/user and net call libSystem without
+      # it), and code signing is indifferent.
       - name: Build Janus
         shell: bash
+        env:
+          CGO_ENABLED: '0'
         run: |
           stamp="$GITHUB_REF_NAME"
           if [[ "$GITHUB_REF" != refs/tags/* ]]; then
@@ -143,7 +153,7 @@ jobs:
             [[ "$("$exe" version)" == "janus 0.0.0-dev (caddy ${caddy_version#v})" ]]
           fi
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: janus-${{ github.ref_name }}-${{ matrix.plat }}
           path: |
@@ -151,15 +161,37 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
-  release:
+  # Signed build provenance for every archive (Sigstore, stored with the
+  # repository's attestations): `gh attestation verify <archive> -R
+  # shreeve/janus` checks one. The only job that may mint an OIDC token.
+  attest:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { merge-multiple: true }
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            janus-*.tar.gz
+            janus-*.zip
+
+  release:
+    needs: [build, attest]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { merge-multiple: true }
 
       - name: Publish GitHub Release

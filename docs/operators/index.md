@@ -178,6 +178,28 @@ a device cannot necessarily validate the local CA before installing it.
 Future public redirect/HSTS changes must preserve that bootstrap and the
 exposure-mode contract.
 
+## Verifying a release
+
+Each release publishes `janus-<tag>-checksums.txt` (sha256) and, for every
+archive, a signed build provenance attestation made by the release
+workflow (Sigstore, stored with the repository's attestations). `install.sh`
+checks the sha256 always; when the GitHub CLI is installed and signed in it
+also verifies the attestation, and prints what it verified or why it could
+not (a failed attestation check is reported, never fatal). To verify a
+downloaded archive by hand:
+
+```bash
+gh attestation verify janus-<tag>-linux-amd64.tar.gz -R shreeve/janus
+```
+
+`--signer-workflow shreeve/janus/.github/workflows/release.yml` and
+`--source-ref refs/tags/<tag>` narrow it to the release workflow and the
+tag, as `install.sh` does. Releases are built with `CGO_ENABLED=0`, so the
+Linux binaries are static and run on any glibc or musl distribution, from
+a clean module download (no build cache), with every workflow action pinned
+to a commit. `govulncheck` gates every change and every release on
+vulnerabilities reachable from the code, for Linux and macOS.
+
 ## macOS pf after an OS update or a Janus upgrade
 
 On macOS the `localhost` and `lan` modes are held by the pf anchor
