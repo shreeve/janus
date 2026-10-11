@@ -15,7 +15,7 @@ RIP_ROOT="${RIP_ROOT:-$(cd "$ROOT/.." && pwd)/rip}"
 TENANT_DIR_FILE="$TEST_RUN_DIR/tenant-dir"
 TENANT_PID_FILE="$TEST_RUN_DIR/tenant-pid"
 TENANT_LOG="$TEST_RUN_DIR/tenant-manager.log"
-TENANT_HOST="e2e.ripdev.io"
+TENANT_HOST="e2e.janus.localhost"
 
 tenant_dir() { cat "$TENANT_DIR_FILE"; }
 tenant_pid() { cat "$TENANT_PID_FILE"; }

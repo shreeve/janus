@@ -20,7 +20,7 @@ func TestParseHubDirectiveGlobal(t *testing.T) {
 			max_conns 16384
 			max_frame 128kb
 			max_channels 64
-			origin same chat-admin.ripdev.io
+			origin same chat-admin.example.com
 		}
 	}`)
 	app := new(App)
@@ -37,7 +37,7 @@ func TestParseHubDirectiveGlobal(t *testing.T) {
 	if *hs.Path != "/realtime" || *hs.MaxConns != 16384 || *hs.MaxFrame != 128_000 || *hs.MaxChannels != 64 {
 		t.Fatalf("knob parse: %+v", hs)
 	}
-	if len(hs.Origin) != 2 || hs.Origin[0] != "same" || hs.Origin[1] != "chat-admin.ripdev.io" {
+	if len(hs.Origin) != 2 || hs.Origin[0] != "same" || hs.Origin[1] != "chat-admin.example.com" {
 		t.Fatalf("origin parse: %v", hs.Origin)
 	}
 }
@@ -213,11 +213,11 @@ func TestHostMatchesPattern(t *testing.T) {
 		pattern, host string
 		want          bool
 	}{
-		{"chat.ripdev.io", "chat.ripdev.io", true},
-		{"chat.ripdev.io", "other.ripdev.io", false},
-		{"*.ripdev.io", "chat.ripdev.io", true},
-		{"*.ripdev.io", "a.b.ripdev.io", false}, // one label per *
-		{"*.ripdev.io", "ripdev.io", false},
+		{"chat.example.com", "chat.example.com", true},
+		{"chat.example.com", "other.example.com", false},
+		{"*.example.com", "chat.example.com", true},
+		{"*.example.com", "a.b.example.com", false}, // one label per *
+		{"*.example.com", "example.com", false},
 		{"*", "anything", true},
 	}
 	for _, tt := range cases {

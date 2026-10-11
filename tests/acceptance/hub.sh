@@ -9,11 +9,11 @@
 # testkit ws driver runs sockets. The group runs under the heartbeat
 # caddy (TTL 2s), so the fixture heartbeats its apps every 500ms.
 #
-# Hosts (root Caddyfile): hub1/hub2/hubdel/hubrace.ripdev.io inherit
+# Hosts (root Caddyfile): hub1/hub2/hubdel/hubrace.janus.localhost inherit
 # global hub on (origin same — the driver sends a browser-shaped Origin);
-# hubany.ripdev.io is origin any; hubdirect.ripdev.io is direct with
+# hubany.janus.localhost is origin any; hubdirect.janus.localhost is direct with
 # origin any; hubten/hubtwenty cap max_conns 10/20;
-# api.ripdev.io is hub off.
+# api.janus.localhost is hub off.
 
 HUB_SOCK="$TEST_RUN_DIR/run/hub-tenant.sock"
 HUB_BRIDGE_LOG="$TEST_RUN_DIR/hub-bridge.jsonl"
@@ -157,16 +157,16 @@ case_hub_setup() {
 	hub_playbook ''
 
 	# Register the three apps FIRST (ids feed the fixture's heartbeater).
-	capi POST /1.0/apps '{"name":"hubapp","hosts":["hub1.ripdev.io","hubany.ripdev.io","hubdel.ripdev.io","hubrace.ripdev.io","api.ripdev.io"],"bridge":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubapp","hosts":["hub1.janus.localhost","hubany.janus.localhost","hubdel.janus.localhost","hubrace.janus.localhost","api.janus.localhost"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_APP_FILE"
-	capi POST /1.0/apps '{"name":"hubiso","hosts":["hub2.ripdev.io"],"bridge":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubiso","hosts":["hub2.janus.localhost"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_ISO_FILE"
-	capi POST /1.0/apps '{"name":"hubcap","hosts":["hubten.ripdev.io","hubtwenty.ripdev.io"],"bridge":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubcap","hosts":["hubten.janus.localhost","hubtwenty.janus.localhost"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_CAP_FILE"
-	capi POST /1.0/apps '{"name":"hubdirect","hosts":["hubdirect.ripdev.io"],"upstreams":[]}'
+	capi POST /1.0/apps '{"name":"hubdirect","hosts":["hubdirect.janus.localhost"],"upstreams":[]}'
 	eq "$REPLY_CODE" "201"
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_DIRECT_FILE"
 
@@ -188,7 +188,7 @@ case_hub_setup() {
 case_hub_direct_no_bridge() {
 	local before after
 	before="$(wc -l <"$HUB_BRIDGE_LOG" | tr -d ' ')"
-	hub_ws hubdirect.ripdev.io - - \
+	hub_ws hubdirect.janus.localhost - - \
 		'send={"+":["/direct"],"echo!":{"ok":true}}' expect=echo close
 	after="$(wc -l <"$HUB_BRIDGE_LOG" | tr -d ' ')"
 	eq "$after" "$before"
@@ -206,7 +206,7 @@ case_hub_open_full_path() {
 	hub_playbook '{"open":{"status":200,"body":"{\"+\":[\"/room\"]}"}}'
 	local b0
 	b0="$(hub_bridge_count open)"
-	hub_ws hubany.ripdev.io - "sid=42" id pause=200 close
+	hub_ws hubany.janus.localhost - "sid=42" id pause=200 close
 	hub_playbook ''
 	ok "$(hub_bridge_count open) -gt $b0" "no open bridge recorded"
 	local rec
@@ -228,7 +228,7 @@ case_hub_open_rejected_by_tenant() {
 	c0="$(hub_stat conns)"
 	resp="$(curl -sS --max-time 5 --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
 		-H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-		-w $'\n%{http_code}' "https://hubany.ripdev.io/hub")"
+		-w $'\n%{http_code}' "https://hubany.janus.localhost/hub")"
 	hub_playbook ''
 	code="${resp##*$'\n'}"
 	eq "$code" "403"
@@ -242,7 +242,7 @@ case_hub_open_tenant_down() {
 	local hdrs
 	hdrs="$(curl -sSI --max-time 5 --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
 		-H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-		-X GET "https://hubany.ripdev.io/hub" 2>/dev/null | tr -d '\r')"
+		-X GET "https://hubany.janus.localhost/hub" 2>/dev/null | tr -d '\r')"
 	capi PUT "/1.0/apps/$(hub_app_id)/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_SOCK\"}]}"
 	json_has "$hdrs" '503'
 	json_has "$hdrs" 'Retry-After'
@@ -251,7 +251,7 @@ case_hub_open_tenant_down() {
 case_hub_no_bridge() {
 	capi PATCH "/1.0/apps/$(hub_app_id)" '{"bridge":null}'
 	eq "$REPLY_CODE" "200"
-	eq "$(hub_upgrade_code hubany.ripdev.io -)" "503"
+	eq "$(hub_upgrade_code hubany.janus.localhost -)" "503"
 	capi PATCH "/1.0/apps/$(hub_app_id)" '{"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "200"
 }
@@ -261,13 +261,13 @@ case_hub_exclusion_rules() {
 	# same user's other tab still receives); ! includes the sender and the
 	# suffix is stripped on delivery.
 	rm -f "$TEST_RUN_DIR"/hub-flag-* "$TEST_RUN_DIR"/hub-out-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-a2" hubany.ripdev.io - "user=A" \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-a2" hubany.janus.localhost - "user=A" \
 		'send={"+":["/room"]}' touch="$TEST_RUN_DIR/hub-flag-a2" expect=chat expect=fin close
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-b" hubany.ripdev.io - "user=B" \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-b" hubany.janus.localhost - "user=B" \
 		'send={"+":["/room"]}' touch="$TEST_RUN_DIR/hub-flag-b" expect=chat expect=fin close
 	wait_file "$TEST_RUN_DIR/hub-flag-a2"
 	wait_file "$TEST_RUN_DIR/hub-flag-b"
-	hub_ws hubany.ripdev.io - "user=A" \
+	hub_ws hubany.janus.localhost - "user=A" \
 		'send={"+":["/room"]}' \
 		'send={"@":["/room"],"chat":{"m":1}}' \
 		noframe=300 \
@@ -288,7 +288,7 @@ case_hub_exclusion_rules() {
 case_hub_publish_ignores_exclusion() {
 	# ! rule 3: no originating connection on the publish plane.
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-pub" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-pub" hubany.janus.localhost - - \
 		'send={"+":["/pubroom"]}' touch="$TEST_RUN_DIR/hub-flag-pub" expect=news expect=news close
 	wait_file "$TEST_RUN_DIR/hub-flag-pub"
 	hub_publish "$(hub_app_id)" '{"@":["/pubroom"],"news":{"n":1}}'
@@ -306,7 +306,7 @@ case_hub_pong_at_edge() {
 	# answers the pong (the fixture only records).
 	local t0
 	t0="$(hub_bridge_count text)"
-	hub_ws hubany.ripdev.io - - 'send={"?":"t-12345"}' 'expect={"!":"t-12345"}' close
+	hub_ws hubany.janus.localhost - - 'send={"?":"t-12345"}' 'expect={"!":"t-12345"}' close
 	json_has "$REPLY_WS" 'RECV {"!":"t-12345"}'
 	waitfor_bridge_texts $((t0 + 1))
 	local rec
@@ -329,10 +329,10 @@ waitfor_bridge_texts() {
 
 case_hub_provenance_stamped() {
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-prov" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-prov" hubany.janus.localhost - - \
 		'send={"+":["/prov"]}' touch="$TEST_RUN_DIR/hub-flag-prov" expect=whisper close
 	wait_file "$TEST_RUN_DIR/hub-flag-prov"
-	hub_ws hubany.ripdev.io - - id 'send={"@":["/prov"],"whisper":{"w":1}}' close
+	hub_ws hubany.janus.localhost - - id 'send={"@":["/prov"],"whisper":{"w":1}}' close
 	local aid
 	aid="$(printf '%s' "$REPLY_WS" | sed -n 's/^ID //p')"
 	ok "-n \"$aid\"" "no sender id: $REPLY_WS"
@@ -344,7 +344,7 @@ case_hub_provenance_stamped() {
 case_hub_spoof_rejected() {
 	local r0
 	r0="$(hub_stat rejected_frames)"
-	hub_ws hubany.ripdev.io - - 'send={"<":["fake"],"chat":{}}' 'expectclose=1008,stamped by janus'
+	hub_ws hubany.janus.localhost - - 'send={"<":["fake"],"chat":{}}' 'expectclose=1008,stamped by janus'
 	json_has "$REPLY_WS" 'CLOSE 1008'
 	ok "$(hub_stat rejected_frames) -gt $r0" "rejected_frames not counted"
 	# The close is reported to the tenant with the 1008 code (async).
@@ -360,13 +360,13 @@ case_hub_spoof_rejected() {
 }
 
 case_hub_reserved_sigils_reject() {
-	hub_ws hubany.ripdev.io - - 'send={">":["x"],"chat":{}}' 'expectclose=1008,reserved'
+	hub_ws hubany.janus.localhost - - 'send={">":["x"],"chat":{}}' 'expectclose=1008,reserved'
 	json_has "$REPLY_WS" 'CLOSE 1008'
-	hub_ws hubany.ripdev.io - - 'send={"!":"t"}' 'expectclose=1008,janus-to-client'
+	hub_ws hubany.janus.localhost - - 'send={"!":"t"}' 'expectclose=1008,janus-to-client'
 	json_has "$REPLY_WS" 'CLOSE 1008'
-	hub_ws hubany.ripdev.io - - 'send={"*":"bye"}' 'expectclose=1008,delivery-direction'
+	hub_ws hubany.janus.localhost - - 'send={"*":"bye"}' 'expectclose=1008,delivery-direction'
 	json_has "$REPLY_WS" 'CLOSE 1008'
-	hub_ws hubany.ripdev.io - - binary 'expectclose=1003,binary'
+	hub_ws hubany.janus.localhost - - binary 'expectclose=1003,binary'
 	json_has "$REPLY_WS" 'CLOSE 1003'
 }
 
@@ -375,7 +375,7 @@ case_hub_join_leave_snapshot() {
 	# oracle): default target is the sender (no @ on the joins), the
 	# emptied channel disappears.
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-jl" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-jl" hubany.janus.localhost - - \
 		'send={"+":["/jl/a","/jl/b"]}' touch="$TEST_RUN_DIR/hub-flag-jl1" \
 		waitfile="$TEST_RUN_DIR/hub-flag-go1" 'send={"-":["/jl/b"]}' \
 		touch="$TEST_RUN_DIR/hub-flag-jl2" waitfile="$TEST_RUN_DIR/hub-flag-go2" close
@@ -401,7 +401,7 @@ case_hub_sender_only_membership() {
 	# A client @-ing another connection with + closes 1008 and nothing
 	# joins; the trusted publish plane CAN enroll it.
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-victim" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-victim" hubany.janus.localhost - - \
 		id touch="$TEST_RUN_DIR/hub-flag-victim" \
 		waitfile="$TEST_RUN_DIR/hub-flag-victim-go" expect=enrolled close
 	wait_file "$TEST_RUN_DIR/hub-flag-victim"
@@ -412,7 +412,7 @@ case_hub_sender_only_membership() {
 		sleep 0.1
 	done
 	ok "-n \"$vid\"" "victim id never appeared"
-	hub_ws hubany.ripdev.io - - "send={\"@\":[\"$vid\"],\"+\":[\"/vip\"]}" \
+	hub_ws hubany.janus.localhost - - "send={\"@\":[\"$vid\"],\"+\":[\"/vip\"]}" \
 		'expectclose=1008,only the sending connection'
 	json_has "$REPLY_WS" 'CLOSE 1008'
 	hub_snapshot "$(hub_app_id)"
@@ -431,13 +431,13 @@ case_hub_sender_only_membership() {
 }
 
 case_hub_channel_grammar_rejects() {
-	hub_ws hubany.ripdev.io - - 'send={"+":["room"]}' 'expectclose=1008,want /-prefix'
+	hub_ws hubany.janus.localhost - - 'send={"+":["room"]}' 'expectclose=1008,want /-prefix'
 	json_has "$REPLY_WS" 'CLOSE 1008'
 }
 
 case_hub_naming_only_hierarchy() {
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-hier" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-hier" hubany.janus.localhost - - \
 		'send={"+":["/h/sub"]}' touch="$TEST_RUN_DIR/hub-flag-hier" \
 		waitfile="$TEST_RUN_DIR/hub-flag-hier-go" close
 	wait_file "$TEST_RUN_DIR/hub-flag-hier"
@@ -452,9 +452,9 @@ case_hub_naming_only_hierarchy() {
 case_hub_per_app_isolation() {
 	# Same channel name in two apps: publish into ISO reaches only ISO.
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-iso1" hub1.ripdev.io https://hub1.ripdev.io - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-iso1" hub1.janus.localhost https://hub1.janus.localhost - \
 		'send={"+":["/shared"]}' touch="$TEST_RUN_DIR/hub-flag-iso1" noframe=800 close
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-iso2" hub2.ripdev.io https://hub2.ripdev.io - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-iso2" hub2.janus.localhost https://hub2.janus.localhost - \
 		'send={"+":["/shared"]}' touch="$TEST_RUN_DIR/hub-flag-iso2" expect=only close
 	wait_file "$TEST_RUN_DIR/hub-flag-iso1"
 	wait_file "$TEST_RUN_DIR/hub-flag-iso2"
@@ -472,7 +472,7 @@ case_hub_text_bridge_observation() {
 	local t0
 	t0="$(hub_bridge_count text)"
 	rm -f "$TEST_RUN_DIR/hub-flag-obs-go"
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-obs" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-obs" hubany.janus.localhost - - \
 		'send={"obs1!":{"a": 1}}' expect=obs1 \
 		'send={"obs2!":{"b" :2}}' expect=obs2 \
 		'send={"obs3!":{"c":3}}' expect=obs3 \
@@ -500,10 +500,10 @@ case_hub_bridge_response_directives() {
 	# of /room receive.
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
 	hub_playbook '{"text":{"status":200,"body":"{\"@\":[\"/brt\"],\"note\":{\"from\":\"tenant\"}}"}}'
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-brt" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-brt" hubany.janus.localhost - - \
 		'send={"+":["/brt"]}' touch="$TEST_RUN_DIR/hub-flag-brt" expect=note close
 	wait_file "$TEST_RUN_DIR/hub-flag-brt"
-	hub_ws hubany.ripdev.io - - 'send={"+":["/brt"]}' 'send={"trigger!":1}' expect=trigger noframe=700 close
+	hub_ws hubany.janus.localhost - - 'send={"+":["/brt"]}' 'send={"trigger!":1}' expect=trigger noframe=700 close
 	hub_playbook ''
 	json_has "$REPLY_WS" 'DONE'
 	wait
@@ -514,7 +514,7 @@ case_hub_bridge_garbage() {
 	local g0
 	g0="$(hub_stat bridge_garbage)"
 	hub_playbook '{"text":{"status":200,"body":"this is not json"}}'
-	hub_ws hubany.ripdev.io - - 'send={"garb!":1}' expect=garb 'send={"?":"alive"}' 'expect={"!":"alive"}' close
+	hub_ws hubany.janus.localhost - - 'send={"garb!":1}' expect=garb 'send={"?":"alive"}' 'expect={"!":"alive"}' close
 	hub_playbook ''
 	json_has "$REPLY_WS" 'DONE'
 	local i
@@ -529,7 +529,7 @@ case_hub_bridge_garbage() {
 case_hub_atomic_rejection() {
 	# A frame with a bare/suffixed collision rejects WHOLE: the join in
 	# its first object never applies.
-	hub_ws hubany.ripdev.io - - \
+	hub_ws hubany.janus.localhost - - \
 		'send=[{"+":["/atomic"]},{"@":["/atomic"],"chat":{},"chat!":{}}]' \
 		'expectclose=1008,appears as both'
 	json_has "$REPLY_WS" 'CLOSE 1008'
@@ -547,10 +547,10 @@ case_hub_text_failure_invisible() {
 	f0="$(hub_stat bridge_failed)"
 	hub_playbook '{"text":{"status":500,"body":"boom"}}'
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-tf" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-tf" hubany.janus.localhost - - \
 		'send={"+":["/tf"]}' touch="$TEST_RUN_DIR/hub-flag-tf" expect=still close
 	wait_file "$TEST_RUN_DIR/hub-flag-tf"
-	hub_ws hubany.ripdev.io - - 'send={"@":["/tf"],"still":{"up":1}}' 'send={"?":"ok"}' 'expect={"!":"ok"}' close
+	hub_ws hubany.janus.localhost - - 'send={"@":["/tf"],"still":{"up":1}}' 'send={"?":"ok"}' 'expect={"!":"ok"}' close
 	hub_playbook ''
 	json_has "$REPLY_WS" 'DONE'
 	wait
@@ -569,7 +569,7 @@ case_hub_reload_invisibility() {
 	# membership stays, fan-out works mid-window; the held text bridge
 	# completes once the pool publishes.
 	rm -f "$TEST_RUN_DIR"/hub-flag-* "$TEST_RUN_DIR/hub-ring"
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-rl" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-rl" hubany.janus.localhost - - \
 		'send={"+":["/rl"]}' touch="$TEST_RUN_DIR/hub-flag-rl" \
 		expect=midwindow 'send={"heldtext!":1}' expect=heldtext \
 		'send={"?":"post-reload"}' 'expect={"!":"post-reload"}' \
@@ -601,13 +601,13 @@ case_hub_reload_invisibility() {
 case_hub_teardown_on_delete() {
 	# DELETE tears the hub down: sockets close 1001 "app deregistered";
 	# the snapshot 404s once the registration is gone.
-	capi POST /1.0/apps '{"name":"hubdel","hosts":["hubdel2.ripdev.io"],"bridge":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubdel","hosts":["hubdel2.janus.localhost"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	local del_id
 	del_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
 	capi PUT "/1.0/apps/$del_id/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_SOCK\"}]}"
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-del" hubdel2.ripdev.io https://hubdel2.ripdev.io - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-del" hubdel2.janus.localhost https://hubdel2.janus.localhost - \
 		'send={"+":["/dying"]}' touch="$TEST_RUN_DIR/hub-flag-del" \
 		'expectclose=1001,app deregistered'
 	wait_file "$TEST_RUN_DIR/hub-flag-del"
@@ -626,7 +626,7 @@ case_hub_slow_consumer() {
 	local s0 o0
 	s0="$(hub_stat slow_closes)"
 	o0="$(hub_bridge_count open)"
-	start_hub_wedge hubany.ripdev.io
+	start_hub_wedge hubany.janus.localhost
 	local i wid=""
 	for i in $(seq 1 50); do
 		if [[ "$(hub_bridge_count open)" -gt "$o0" ]]; then
@@ -667,7 +667,7 @@ case_hub_slow_consumer() {
 }
 
 case_hub_oversize_frame() {
-	hub_ws hubany.ripdev.io - - sendbig=70000 'expectclose=1009'
+	hub_ws hubany.janus.localhost - - sendbig=70000 'expectclose=1009'
 	json_has "$REPLY_WS" 'CLOSE 1009'
 }
 
@@ -680,7 +680,7 @@ case_hub_cap_floor_and_reservation() {
 	opens0="$(hub_bridge_count open)"
 	hub_playbook "{\"open\":{\"status\":204,\"wait_file\":\"$release\"}}"
 	for i in $(seq 1 10); do
-		hub_ws_bg "$TEST_RUN_DIR/hub-out-cap-$i" hubtwenty.ripdev.io - - \
+		hub_ws_bg "$TEST_RUN_DIR/hub-out-cap-$i" hubtwenty.janus.localhost - - \
 			"touch=$TEST_RUN_DIR/hub-flag-cap-open-$i"
 		pids="$pids $HUB_WS_PID"
 	done
@@ -692,7 +692,7 @@ case_hub_cap_floor_and_reservation() {
 	done
 	eq "$(hub_bridge_count open)" "$((opens0 + 10))"
 	# All ten slots reserved: the 11th rejects 503 immediately.
-	eq "$(hub_upgrade_code hubtwenty.ripdev.io -)" "503"
+	eq "$(hub_upgrade_code hubtwenty.janus.localhost -)" "503"
 	touch "$release"
 	for pid in $pids; do wait "$pid"; done
 	hub_playbook ''
@@ -713,7 +713,7 @@ case_hub_cap_floor_and_reservation() {
 case_hub_open_teardown_race() {
 	# DELETE while an open bridge is pending: the returning 2xx sees the
 	# tombstone — no 101, no zombie connection.
-	capi POST /1.0/apps '{"name":"hubrace","hosts":["hubrace2.ripdev.io"],"bridge":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"hubrace","hosts":["hubrace2.janus.localhost"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	local race_id
 	race_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -721,7 +721,7 @@ case_hub_open_teardown_race() {
 	hub_playbook '{"open":{"status":204,"delay_ms":1500}}'
 	local code_file="$TEST_RUN_DIR/hub-flag-racecode"
 	rm -f "$code_file"
-	(hub_upgrade_code hubrace2.ripdev.io https://hubrace2.ripdev.io >"$code_file") &
+	(hub_upgrade_code hubrace2.janus.localhost https://hubrace2.janus.localhost >"$code_file") &
 	sleep 0.4
 	capi DELETE "/1.0/apps/$race_id"
 	eq "$REPLY_CODE" "204"
@@ -740,24 +740,24 @@ case_hub_origin_policy() {
 	# wrong-Origin fail 403 BEFORE any bridge; matching Origin admits.
 	local o0
 	o0="$(hub_bridge_count open)"
-	eq "$(hub_upgrade_code hub1.ripdev.io -)" "403"
-	eq "$(hub_upgrade_code hub1.ripdev.io https://evil.example.com)" "403"
+	eq "$(hub_upgrade_code hub1.janus.localhost -)" "403"
+	eq "$(hub_upgrade_code hub1.janus.localhost https://evil.example.com)" "403"
 	eq "$(hub_bridge_count open)" "$o0"
-	eq "$(hub_upgrade_code hub1.ripdev.io https://hub1.ripdev.io)" "101"
+	eq "$(hub_upgrade_code hub1.janus.localhost https://hub1.janus.localhost)" "101"
 	# origin any admits an Origin-less client (proven throughout by the
 	# driver, pinned here).
-	eq "$(hub_upgrade_code hubany.ripdev.io -)" "101"
+	eq "$(hub_upgrade_code hubany.janus.localhost -)" "101"
 }
 
 case_hub_interception_scope() {
 	# The hub claims upgrades only: a plain GET to the hub path flows
 	# through the data plane to the tenant; an upgrade on a hub-off site
-	# (api.ripdev.io) is never intercepted.
-	eq "$(http_body https://hubany.ripdev.io/hub)" "plain:/hub"
+	# (api.janus.localhost) is never intercepted.
+	eq "$(http_body https://hubany.janus.localhost/hub)" "plain:/hub"
 	local body
 	body="$(curl -sS --max-time 5 --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
 		-H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-		"https://api.ripdev.io/hub")"
+		"https://api.janus.localhost/hub")"
 	eq "$body" "plain:/hub"
 }
 
@@ -784,7 +784,7 @@ case_hub_publish_plane_errors() {
 
 case_hub_publish_kick() {
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-kick" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-kick" hubany.janus.localhost - - \
 		id touch="$TEST_RUN_DIR/hub-flag-kick" 'expect={"*":"kicked"}' 'expectclose=1000,kicked'
 	wait_file "$TEST_RUN_DIR/hub-flag-kick"
 	local kid i
@@ -817,7 +817,7 @@ case_hub_caddy_reload_persistence() {
 	# A cold config reload: the socket, its id, its membership, and
 	# fan-out all survive through the pooled registry/hub state.
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-crl" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-crl" hubany.janus.localhost - - \
 		'send={"+":["/keep"]}' touch="$TEST_RUN_DIR/hub-flag-crl" \
 		expect=survived 'send={"?":"post"}' 'expect={"!":"post"}' close
 	wait_file "$TEST_RUN_DIR/hub-flag-crl"
@@ -846,13 +846,13 @@ case_hub_bridge_snapshot_cap() {
 	# >32 KiB of filtered handshake headers → 431, never truncated.
 	local big
 	big="c=$("$TESTKIT" repeat x 33000)"
-	eq "$(hub_upgrade_code hubany.ripdev.io - "Cookie: $big")" "431"
+	eq "$(hub_upgrade_code hubany.janus.localhost - "Cookie: $big")" "431"
 }
 
 case_hub_snapshot_opacity() {
 	# Snapshot handles are opaque (conn-N), never raw connection ids.
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
-	hub_ws_bg "$TEST_RUN_DIR/hub-out-op" hubany.ripdev.io - - \
+	hub_ws_bg "$TEST_RUN_DIR/hub-out-op" hubany.janus.localhost - - \
 		id touch="$TEST_RUN_DIR/hub-flag-op" waitfile="$TEST_RUN_DIR/hub-flag-op-go" close
 	wait_file "$TEST_RUN_DIR/hub-flag-op"
 	local oid i

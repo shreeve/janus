@@ -50,9 +50,8 @@ Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` +
 
 - **local** host must be loopback (`127.0.0.1`, `::1`, or `localhost`).
 - **public** must be `https://` (never bare `http://`).
-- TLS listeners (public, or an `https://` local) serve `cert:…`/`key:…`
-  when given, else the committed dev pair `certs/ripdev.io.{crt,key}`
-  (same material as the data-plane demo; see `certs/README.md`).
+- TLS listeners (public, or an `https://` local) require `cert:…`/`key:…`
+  and serve that pair.
 
 ## Syntax
 
@@ -72,8 +71,7 @@ Same `/1.0` API on every listener. Multiple modes are allowed (e.g. `internal` +
 	}
 }
 
-*.ripdev.io {
-	tls certs/ripdev.io.crt certs/ripdev.io.key
+*.janus.localhost {
 	janus
 }
 ```
@@ -111,7 +109,7 @@ Prefer env names without `$` (avoids clashing with Caddy `{$VAR}` expansion). Au
 | `cert:<path>` | TLS certificate file for this listener |
 | `key:<path>` | TLS private key file for this listener |
 
-Both or neither — one without the other is a hard parse error. Only meaningful on a TLS listener (`public`, or a `local` with an `https://` listen); a plain-HTTP or unix listener rejects them loudly. Unset, a TLS listener uses the committed dev pair `certs/ripdev.io.{crt,key}` (see `certs/README.md`). The pair loads at Start — a missing or unreadable file refuses the config.
+Both or neither — one without the other is a hard parse error. Only meaningful on a TLS listener (`public`, or a `local` with an `https://` listen); a plain-HTTP or unix listener rejects them loudly. A TLS listener without them is a hard error: Janus ships no certificate of its own. The pair loads at Start — a missing or unreadable file refuses the config.
 
 ### Defaults
 

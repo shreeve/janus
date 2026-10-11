@@ -192,8 +192,7 @@ Every Caddy site that routes requests through a Janus handler enables an
 access log and selects the Janus encoder:
 
 ```caddyfile
-*.ripdev.io {
-	tls certs/ripdev.io.crt certs/ripdev.io.key
+*.example.com {
 
 	log {
 		output file var/access.json
@@ -717,7 +716,7 @@ hello without a gap.
 Normal events follow:
 
 ```json
-{"v":1,"type":"access","sequence":"43","timestamp":"2026-08-01T14:16:01.100Z","request_id":"10d21165-2701-4c37-b948-c93d891da3b1","app_id":"cart-a1b2c3","app_name":"cart","tenant_site":null,"request_host":"cart.ripdev.io","client_ip":"127.0.0.1","method":"GET","path":"/","status":200,"duration_seconds":0.0021,"response_bytes":"918","mime_type":"text/html; charset=utf-8","response_class":"file","selected_upstream":null,"retry_count":0,"outcome":"complete","mark":null}
+{"v":1,"type":"access","sequence":"43","timestamp":"2026-08-01T14:16:01.100Z","request_id":"10d21165-2701-4c37-b948-c93d891da3b1","app_id":"cart-a1b2c3","app_name":"cart","tenant_site":null,"request_host":"cart.example.com","client_ip":"127.0.0.1","method":"GET","path":"/","status":200,"duration_seconds":0.0021,"response_bytes":"918","mime_type":"text/html; charset=utf-8","response_class":"file","selected_upstream":null,"retry_count":0,"outcome":"complete","mark":null}
 ```
 
 Each subscriber tracks `accounted` and `droppedThrough`. Publication changes

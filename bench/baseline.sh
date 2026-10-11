@@ -16,6 +16,7 @@
 #   CONTROL        control plane base    (default: http://127.0.0.1:7600)
 #   DUR            leg seconds           (default: 15 — the canonical length)
 #   BENCH_SECTIONS sections to run       (default: "A B C")
+#   BENCH_CA       TLS root to trust     (default: Caddy's internal CA root under XDG_DATA_HOME)
 set -u
 
 BENCH=${0:A:h}
@@ -27,6 +28,8 @@ RAW=${RAW:-$BENCH_SCRATCH/raw.txt}
 CONTROL=${CONTROL:-http://127.0.0.1:7600}
 DUR=${DUR:-15}
 BENCH_SECTIONS=${BENCH_SECTIONS:-"A B C"}
+# The root Caddyfile's sites take certificates from Caddy's internal CA.
+CA=${BENCH_CA:-${XDG_DATA_HOME:-$HOME/.local/share}/caddy/pki/authorities/local/root.crt}
 
 die() { echo "FATAL: $@" >&2; exit 1 }
 wants() { [[ " $BENCH_SECTIONS " == *" $1 "* ]] }
@@ -63,28 +66,28 @@ cd $BENCH_SCRATCH
 # Direct bun invocation (no rip wrapper) so $MGR is the real manager pid —
 # killing the rip-server bin wrapper would orphan a live manager + workers.
 BIN=(bun --preload=$RIP_DIR/src/loader.js $RIP_DIR/src/run.js $RIP_DIR/node_modules/.bin/rip-server)
-PING=https://bench.ripdev.io/
-IO=https://bench.ripdev.io/io
+PING=https://bench.janus.localhost/
+IO=https://bench.janus.localhost/io
 MGR=
 
 say() { echo "$@" | tee -a $RAW }
 
 leg() { # label url conc [secs]
   local secs=${4:-$DUR}
-  env -u NO_COLOR oha -z ${secs}s -c $3 --no-tui --output-format json "$2" 2>/dev/null \
+  env -u NO_COLOR oha -z ${secs}s -c $3 --cacert $CA --no-tui --output-format json "$2" 2>/dev/null \
     | $RIP_BIN $BENCH/parse.rip "$1" $secs | tee -a $RAW
 }
 
 warmup() { # url conc secs
-  env -u NO_COLOR oha -z ${3}s -c $2 --no-tui --output-format quiet "$1" >/dev/null 2>&1
+  env -u NO_COLOR oha -z ${3}s -c $2 --cacert $CA --no-tui --output-format quiet "$1" >/dev/null 2>&1
 }
 
 start_mgr() { # w c
-  RIP_ENV=production $BIN[@] app.rip --name bench --host bench.ripdev.io \
+  RIP_ENV=production $BIN[@] app.rip --name bench --host bench.janus.localhost \
     -w $1 -c $2 --control $CONTROL >> $BENCH_SCRATCH/mgr.log 2>&1 &
   MGR=$!
   local i=0
-  until curl -sf --max-time 2 $PING >/dev/null 2>&1; do
+  until curl -sf --cacert $CA --max-time 2 $PING >/dev/null 2>&1; do
     sleep 0.25; i=$((i+1))
     if [[ $i -gt 240 ]]; then say "FATAL: manager w:$1 c:$2 never became ready"; exit 1; fi
   done

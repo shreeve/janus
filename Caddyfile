@@ -1,18 +1,20 @@
-# Janus — capability order: (1) ping, (2) control, (3) hub, (4) mdns, (5) auth, (6) files, (7) sendfile, (8) browse, (9) access log
+# Janus — capability order: (1) ping, (2) control, (3) hub, (4) mdns, (5) auth, (6) files, (7) sendfile, (8) browse, (9) access log, (10) webtransport
 #
-# *.ripdev.io → 127.0.0.1; trusted wildcard in ./certs/ (committed on purpose)
+# *.janus.localhost resolves to the loopback with no DNS; Caddy's internal CA
+# issues every site certificate (skip_install_trust: run `./bin/janus trust`
+# once, or pass curl --cacert <data>/caddy/pki/authorities/local/root.crt).
 #
 #   ./bin/janus run
 #
 # 1) ping — primordial; needs nothing else
 #   Global ping ON.
-#   catchall  *.ripdev.io     → inherit on  → pong
-#   on.ripdev.io              → explicit on → pong
-#   off.ripdev.io             → explicit off → 404
+#   catchall  *.janus.localhost     → inherit on  → pong
+#   on.janus.localhost              → explicit on → pong
+#   off.janus.localhost             → explicit off → 404
 #
-#   curl -s https://foo.ripdev.io/ping                                   → pong
-#   curl -s https://on.ripdev.io/ping                                    → pong
-#   curl -s https://off.ripdev.io/ping -o /dev/null -w '%{http_code}\n'  → 404
+#   curl -s https://foo.janus.localhost/ping                                   → pong
+#   curl -s https://on.janus.localhost/ping                                    → pong
+#   curl -s https://off.janus.localhost/ping -o /dev/null -w '%{http_code}\n'  → 404
 #
 # 2) control — process-wide /1.0 (after ping chassis)
 #   internal → unix  run/janus.sock
@@ -37,10 +39,10 @@
 #   terminate at Janus; frames fan out at the edge; the tenant observes
 #   through its hot-registered bridge and steers via
 #   POST /1.0/apps/{id}/hub/publish.
-#   catchall   *.ripdev.io   → inherit on (default tuning, origin same)
-#   api.ripdev.io            → explicit off (plain HTTP API site)
-#   hubany.ripdev.io         → origin any (token-authenticated non-browser clients)
-#   hubdirect.ripdev.io      → direct mode: no worker bridge, empty upstreams legal
+#   catchall   *.janus.localhost   → inherit on (default tuning, origin same)
+#   api.janus.localhost            → explicit off (plain HTTP API site)
+#   hubany.janus.localhost         → origin any (token-authenticated non-browser clients)
+#   hubdirect.janus.localhost      → direct mode: no worker bridge, empty upstreams legal
 #   hubten/hubtwenty         → max_conns 10 / 20 (per-app floor = 10 when
 #                              one app claims both)
 #
@@ -64,12 +66,12 @@
 #   Global auth ON with fixture users + gates (passwords in the block
 #   below; mint with `./bin/janus passhash`). Every site EXCEPT
 #   authwall/authcarol opts out with `auth off`. Cascade:
-#   authwall.ripdev.io   → inherits global users + gates
-#   authcarol.ripdev.io  → site auth { … } replaces global (carol only)
+#   authwall.janus.localhost   → inherits global users + gates
+#   authcarol.janus.localhost  → site auth { … } replaces global (carol only)
 #   everything else      → explicit off beats inherited on
 #
-#   curl -s https://authwall.ripdev.io/auth                 → gate / login
-#   curl -s https://authwall.ripdev.io/one/auth             → gate /one/ login
+#   curl -s https://authwall.janus.localhost/auth                 → gate / login
+#   curl -s https://authwall.janus.localhost/one/auth             → gate /one/ login
 #   curl -s http://127.0.0.1:7600/1.0/auth                  → counters + sessions
 #
 {
@@ -96,7 +98,7 @@
 			listen :7680 # dedicated dev/test listener; default (no listen) shares the :80 HTTP server
 		}
 		auth {
-			# 5) site-scoped default: on — fixture credentials (committed on purpose, like certs/)
+			# 5) site-scoped default: on — fixture credentials (committed on purpose)
 			users {
 				alice aZoyWD0mfNZH7GZCh3DH9Te1FwAxA0yc # password: sesame-alice
 				bob aI9eoj7z2M0oTFWY3ai7uQzblQR2spHF # password: sesame-bob
@@ -144,11 +146,6 @@
 	}
 }
 
-(ripdev_tls) {
-	tls certs/ripdev.io.crt certs/ripdev.io.key
-	import janus_access
-}
-
 (janus_access) {
 	log {
 		output file {$JANUS_TEST_ACCESS_LOG:.test-access.log}
@@ -159,19 +156,19 @@
 	}
 }
 
-# Catchall — any other *.ripdev.io name inherits global ping on
+# Catchall — any other *.janus.localhost name inherits global ping on
 # (auth off: the acceptance suite drives open sites through this block;
 # authwall/authcarol below are the guarded ones)
-*.ripdev.io {
-	import ripdev_tls
+*.janus.localhost {
+	import janus_access
 	janus {
 		auth off
 	}
 }
 
 # Explicit on (same effective result as catchall; proves site-level on)
-on.ripdev.io {
-	import ripdev_tls
+on.janus.localhost {
+	import janus_access
 	janus {
 		ping on
 		auth off
@@ -179,8 +176,8 @@ on.ripdev.io {
 }
 
 # Explicit off
-off.ripdev.io {
-	import ripdev_tls
+off.janus.localhost {
+	import janus_access
 	janus {
 		ping off
 		auth off
@@ -188,8 +185,8 @@ off.ripdev.io {
 }
 
 # Hub: explicit off beats inherited on for this plain HTTP API site.
-api.ripdev.io {
-	import ripdev_tls
+api.janus.localhost {
+	import janus_access
 	janus {
 		hub off
 		auth off
@@ -199,8 +196,8 @@ api.ripdev.io {
 }
 
 # Files: explicit off beats the inherited global on.
-filesoff.ripdev.io {
-	import ripdev_tls
+filesoff.janus.localhost {
+	import janus_access
 	janus {
 		auth off
 		files off
@@ -211,8 +208,8 @@ filesoff.ripdev.io {
 # Files: Caddy's dynamic encode wrapper is deliberately present too. A
 # selected precompressed representation already carries Content-Encoding,
 # so the wrapper must never compress it a second time.
-filesencode.ripdev.io {
-	import ripdev_tls
+filesencode.janus.localhost {
+	import janus_access
 	encode {
 		gzip
 		minimum_length 1
@@ -223,8 +220,8 @@ filesencode.ripdev.io {
 }
 
 # Browse: explicit off beats the inherited global default while files stay on.
-browseoff.ripdev.io {
-	import ripdev_tls
+browseoff.janus.localhost {
+	import janus_access
 	janus {
 		auth off
 		browse off
@@ -232,8 +229,8 @@ browseoff.ripdev.io {
 }
 
 # Browse: persistent exact-host root, outside the hot app registry.
-coldbrowse.ripdev.io {
-	import ripdev_tls
+coldbrowse.janus.localhost {
+	import janus_access
 	janus {
 		auth off
 		browse {
@@ -244,8 +241,8 @@ coldbrowse.ripdev.io {
 
 # Hub: origin any — token-authenticated non-browser clients (and test
 # drivers) that send no Origin header
-hubany.ripdev.io {
-	import ripdev_tls
+hubany.janus.localhost {
+	import janus_access
 	janus {
 		hub {
 			origin any
@@ -255,8 +252,8 @@ hubany.ripdev.io {
 }
 
 # Hub: direct edge transport — origin/auth/caps stay active; no worker bridge.
-hubdirect.ripdev.io {
-	import ripdev_tls
+hubdirect.janus.localhost {
+	import janus_access
 	janus {
 		hub {
 			mode direct
@@ -267,8 +264,8 @@ hubdirect.ripdev.io {
 }
 
 # Hub: tightly capped sites — one app claiming both is floored at 10
-hubten.ripdev.io {
-	import ripdev_tls
+hubten.janus.localhost {
+	import janus_access
 	janus {
 		hub {
 			max_conns 10
@@ -278,8 +275,8 @@ hubten.ripdev.io {
 	}
 }
 
-hubtwenty.ripdev.io {
-	import ripdev_tls
+hubtwenty.janus.localhost {
+	import janus_access
 	janus {
 		hub {
 			max_conns 20
@@ -292,18 +289,18 @@ hubtwenty.ripdev.io {
 # Auth: inherits global users + gates (replace-not-merge only when the
 # site writes its own auth { … } block). Bare janus → whole-site gate /
 # plus /one/; login doors /auth and /one/auth.
-authwall.ripdev.io {
-	import ripdev_tls
+authwall.janus.localhost {
+	import janus_access
 	# Nested host matchers intersect the exact site's admission.
-	@nested host *.ripdev.io
+	@nested host *.janus.localhost
 	handle @nested {
 		janus
 	}
 }
 
 # Auth: site auth { … } replaces global (carol only, gate /, ttl 30m).
-authcarol.ripdev.io {
-	import ripdev_tls
+authcarol.janus.localhost {
+	import janus_access
 	janus {
 		auth {
 			users {
@@ -337,18 +334,18 @@ https://:8443 {
 
 # 10) webtransport: a relay route on an exact-host site; the suite's UDP
 # echo fixture stands in for a UDP application.
-wt.ripdev.io {
-	import ripdev_tls
+wt.janus.localhost {
+	import janus_access
 	janus {
-		auth off # the plain relay; wtgate.ripdev.io below keeps the cascaded gate
+		auth off # the plain relay; wtgate.janus.localhost below keeps the cascaded gate
 		webtransport /relay udp/127.0.0.1:7690
 	}
 }
 
 # The same route behind the cascaded auth gate: the descriptor is served
 # to a signed-in user with a ticket the relay requires.
-wtgate.ripdev.io {
-	import ripdev_tls
+wtgate.janus.localhost {
+	import janus_access
 	janus {
 		webtransport /relay udp/127.0.0.1:7690
 	}

@@ -405,7 +405,7 @@ func entryMatchesHost(e hubSiteEntry, host string) bool {
 
 // hostMatchesPattern mirrors caddyhttp.MatchHost's semantics for the
 // pattern shapes Janus configs use: exact hostnames and per-label "*"
-// wildcards ("*.ripdev.io" matches one label).
+// wildcards ("*.example.com" matches one label).
 func hostMatchesPattern(pattern, host string) bool {
 	if pattern == host {
 		return true

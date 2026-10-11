@@ -34,7 +34,7 @@ func TestMdnsSharedAuth(t *testing.T) {
 		}
 		return w
 	}
-	for _, host := range []string{"janus.local", "janus-2.local", "janus.lan.ripdev.io"} {
+	for _, host := range []string{"janus.local", "janus-2.local", "janus.lan.example.com"} {
 		for _, target := range []string{"/", "/status.json", "/trustworthy", "/trust/../status.json", "/trust%2f..%2fstatus.json"} {
 			for _, method := range []string{"GET", "HEAD", "POST"} {
 				w := serve(authReq(method, host, target, nil))

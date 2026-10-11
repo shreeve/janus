@@ -7,7 +7,7 @@ ACCESS_STREAM_FILE="$TEST_RUN_DIR/access-stream.ndjson"
 case_access_setup_and_status() {
 	rm -f "$ACCESS_STREAM_FILE"
 	capi POST /1.0/apps \
-		"{\"name\":\"access\",\"hosts\":[\"access.ripdev.io\"],\"lease\":\"process\",\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
+		"{\"name\":\"access\",\"hosts\":[\"access.janus.localhost\"],\"lease\":\"process\",\"files\":{\"roots\":[{\"path\":\"$BROWSE_ROOT\",\"browse\":true}]}}"
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -32,7 +32,7 @@ case_access_stream_and_durable_json() {
 		sleep 0.05
 	done
 	json_has "$(cat "$ACCESS_STREAM_FILE")" '"type":"hello"'
-	eq "$(http_body 'https://access.ripdev.io/page.md?raw')" '# rendered'
+	eq "$(http_body 'https://access.janus.localhost/page.md?raw')" '# rendered'
 	for i in $(seq 1 50); do
 		if [[ "$(cat "$ACCESS_STREAM_FILE")" == *'"type":"access"'* ]]; then
 			break
@@ -44,7 +44,7 @@ case_access_stream_and_durable_json() {
 	local stream
 	stream="$(cat "$ACCESS_STREAM_FILE")"
 	json_has "$stream" '"sequence":"1"'
-	json_has "$stream" '"request_host":"access.ripdev.io"'
+	json_has "$stream" '"request_host":"access.janus.localhost"'
 	json_has "$stream" '"response_class":"file"'
 	json_has "$(cat "$TEST_RUN_DIR/access.log")" '"request":{"remote_ip":'
 }

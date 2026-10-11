@@ -89,7 +89,7 @@ func TestTrustFrontDoor(t *testing.T) {
 		{"/", "janus.local", true, 200, "status"},
 		{"/trust/check", "janus.local", true, 204, ""},
 		{"/trust", "janus-2.local", true, 200, "One-time setup"},       // effective name
-		{"/trust", "janus.lan.ripdev.io", true, 200, "One-time setup"}, // canonical
+		{"/trust", "janus.lan.example.com", true, 200, "One-time setup"}, // canonical
 	} {
 		rr, nextCalled, err := serve(tc.path, tc.host, tc.secure)
 		if err != nil || nextCalled {
@@ -158,7 +158,7 @@ func TestTrustAutomaticCheckRequiresLocalName(t *testing.T) {
 func TestMdnsFrontDoorName(t *testing.T) {
 	app := newTestSharedMdnsApp(t)
 	for host, want := range map[string]bool{
-		"janus.local": true, "janus-2.local": true, "janus.lan.ripdev.io": true,
+		"janus.local": true, "janus-2.local": true, "janus.lan.example.com": true,
 		"shop.local": false, "other.local": false, "127.0.0.1": false,
 	} {
 		if got := app.mdnsFrontDoorName(host); got != want {

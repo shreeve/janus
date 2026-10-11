@@ -5,14 +5,14 @@
 # (docs/20260728-160734-capability-auth.md). The instruments: the authup
 # fixture upstream records every request's Remote-User and Cookie
 # (tenant-side truth) and answers hub bridge POSTs 204; /1.0/auth is the
-# Janus-side truth. Root-Caddyfile sites: authwall.ripdev.io inherits
-# global users + gates (`gate /` + `gate /one/`); authcarol.ripdev.io
+# Janus-side truth. Root-Caddyfile sites: authwall.janus.localhost inherits
+# global users + gates (`gate /` + `gate /one/`); authcarol.janus.localhost
 # replaces with carol-only `gate /`; every other site carries `auth off`.
 # Passwords are the fixture ones beside the blobs. The group runs under
 # the heartbeat caddy (TTL 2s).
 
-AUTH_WALL="https://authwall.ripdev.io"
-AUTH_CAROL="https://authcarol.ripdev.io"
+AUTH_WALL="https://authwall.janus.localhost"
+AUTH_CAROL="https://authcarol.janus.localhost"
 AUTH_SOCK="$TEST_RUN_DIR/run/auth-up.sock"
 AUTH_HITS="$TEST_RUN_DIR/auth-hits"
 AUTH_PIDS_FILE="$TEST_RUN_DIR/auth-pids"
@@ -109,7 +109,7 @@ auth_login() {
 case_auth_setup() {
 	: >"$AUTH_HITS"
 	: >"$AUTH_PIDS_FILE"
-	capi POST /1.0/apps '{"name":"authapp","hosts":["authwall.ripdev.io","authcarol.ripdev.io"],"bridge":"/rt/bridge"}'
+	capi POST /1.0/apps '{"name":"authapp","hosts":["authwall.janus.localhost","authcarol.janus.localhost"],"bridge":"/rt/bridge"}'
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -128,8 +128,8 @@ case_auth_setup() {
 	capi GET /1.0/auth
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"enabled":true'
-	json_has "$REPLY_BODY" '"authwall.ripdev.io"'
-	json_has "$REPLY_BODY" '"authcarol.ripdev.io"'
+	json_has "$REPLY_BODY" '"authwall.janus.localhost"'
+	json_has "$REPLY_BODY" '"authcarol.janus.localhost"'
 	json_has "$REPLY_BODY" '"sessions"'
 	json_has "$REPLY_BODY" '"logins"'
 }
@@ -394,7 +394,7 @@ case_auth_ws() {
 	auth_login "$AUTH_WALL" alice sesame-alice
 	local b0
 	b0="$(grep -c '^BRIDGE open ' "$AUTH_HITS" 2>/dev/null || true)"
-	hub_ws authwall.ripdev.io https://authwall.ripdev.io "__Host-janus=$AUTH_SESSION" id close
+	hub_ws authwall.janus.localhost https://authwall.janus.localhost "__Host-janus=$AUTH_SESSION" id close
 	local rec
 	rec="$(grep '^BRIDGE open ' "$AUTH_HITS" | tail -1)"
 	ok "-n \"$rec\"" "no open bridge recorded: $REPLY_WS"
@@ -490,7 +490,7 @@ case_auth_hot_revoke() {
 	capi GET /1.0/auth/sessions
 	eq "$REPLY_CODE" "200"
 	json_has "$REPLY_BODY" '"user":"alice"'
-	json_has "$REPLY_BODY" '"host":"authwall.ripdev.io"'
+	json_has "$REPLY_BODY" '"host":"authwall.janus.localhost"'
 	json_has "$REPLY_BODY" '"gates"'
 	json_has "$REPLY_BODY" '"/"'
 	json_has "$REPLY_BODY" '"/one/"'
@@ -543,8 +543,8 @@ case_auth_minter_and_dead_wall() {
 	}
 }
 
-https://mint.ripdev.io:8444 {
-	tls $ROOT/certs/ripdev.io.crt $ROOT/certs/ripdev.io.key
+https://mint.janus.localhost:8444 {
+	tls internal
 	janus {
 		auth {
 			user mint $blob
@@ -555,7 +555,7 @@ https://mint.ripdev.io:8444 {
 	}
 }
 
-http://authdead.ripdev.io:8081 {
+http://authdead.janus.localhost:8081 {
 	janus {
 		auth {
 			user mint $blob
@@ -589,15 +589,15 @@ EOF
 	local rc=0
 	{
 		# The wall stands…
-		auth_req GET "https://mint.ripdev.io:8444/" -H 'Accept: text/html'
+		auth_req GET "https://mint.janus.localhost:8444/" -H 'Accept: text/html'
 		eq "$REPLY_CODE" "302"
 		# …and the minted credential opens it: 303, then an authenticated
 		# request reaches the (empty) data plane — 404, not the wall.
-		auth_login "https://mint.ripdev.io:8444" mint mint-pass
-		auth_req GET "https://mint.ripdev.io:8444/" -H "Cookie: __Host-janus=$AUTH_SESSION"
+		auth_login "https://mint.janus.localhost:8444" mint mint-pass
+		auth_req GET "https://mint.janus.localhost:8444/" -H "Cookie: __Host-janus=$AUTH_SESSION"
 		eq "$REPLY_CODE" "404"
 		# The plain-HTTP guarded site is a dead wall: loud 421, named remedy.
-		auth_req GET "http://authdead.ripdev.io:8081/anything"
+		auth_req GET "http://authdead.janus.localhost:8081/anything"
 		eq "$REPLY_CODE" "421"
 		json_has "$REPLY_BODY" 'auth requires HTTPS'
 		json_has "$(cat "$log")" 'site with auth reached over plain HTTP'
@@ -761,17 +761,18 @@ EOF
 # A separate Caddy process exercises the shared front door with real TLS
 # and no registered app. High ports keep it independent of the main fixture.
 case_auth_dashboard() {
-	local dir door="https://status.ripdev.io:7683" csrf session target
+	local dir door="https://status.janus.localhost:7683" csrf session target
 	dir="$(mktemp -d "$TEST_RUN_DIR/janus-auth-dashboard.XXXXXX")"
 	cat >"$dir/Caddyfile" <<EOF_CONFIG
 {
 	admin off
+	skip_install_trust
 	http_port 7682
 	https_port 7683
 	janus {
 		mdns {
 			name authdashboard.local
-			canonical https://status.ripdev.io
+			canonical https://status.janus.localhost
 			apps off
 		}
 		auth {
@@ -782,11 +783,11 @@ case_auth_dashboard() {
 		}
 	}
 }
-http://*.local, http://status.ripdev.io {
+http://*.local, http://status.janus.localhost {
 	janus
 }
-https://*.local, https://status.ripdev.io {
-	tls $ROOT/certs/ripdev.io.crt $ROOT/certs/ripdev.io.key
+https://*.local, https://status.janus.localhost {
+	tls internal
 	janus
 }
 EOF_CONFIG
@@ -806,11 +807,11 @@ EOF_CONFIG
 		return 1
 	fi
 	for target in / /status.json /auth; do
-		auth_req GET "http://127.0.0.1:7682$target" -H 'Host: status.ripdev.io:7682'
+		auth_req GET "http://127.0.0.1:7682$target" -H 'Host: status.janus.localhost:7682'
 		eq "$REPLY_CODE" "308"
-		eq "$(auth_hdr Location)" "https://status.ripdev.io$target"
+		eq "$(auth_hdr Location)" "https://status.janus.localhost$target"
 	done
-	auth_req POST "http://127.0.0.1:7682/auth" -H 'Host: status.ripdev.io:7682' -d 'user=alice&password=sesame-alice'
+	auth_req POST "http://127.0.0.1:7682/auth" -H 'Host: status.janus.localhost:7682' -d 'user=alice&password=sesame-alice'
 	eq "$REPLY_CODE" "421"
 	for target in / /status.json; do
 		auth_req GET "$door$target"

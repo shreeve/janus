@@ -23,8 +23,8 @@
 //	        connection-ceiling / idle-RSS instrument)
 //
 // TLS: the client dials 127.0.0.1:443 with InsecureSkipVerify — acceptable
-// for the bench client ONLY; real trust in the committed *.ripdev.io chain
-// is proven by the acceptance suite (test.sh, no curl -k anywhere).
+// for the bench client ONLY; real trust in the internal CA's chain is
+// proven by the acceptance suite (test.sh, no curl -k anywhere).
 package main
 
 import (
@@ -47,7 +47,7 @@ import (
 
 var (
 	mode      = flag.String("mode", "", "tenant | subs | pub | send | ramp")
-	host      = flag.String("host", "hubany.ripdev.io", "hub site (SNI + Host); dialed at 127.0.0.1:443")
+	host      = flag.String("host", "hubany.janus.localhost", "hub site (SNI + Host); dialed at 127.0.0.1:443")
 	channel   = flag.String("channel", "/bench", "hub channel")
 	n         = flag.Int("n", 1, "connections (subs/send/ramp)")
 	dur       = flag.Duration("dur", 15*time.Second, "measurement window (starts after READY for subs)")

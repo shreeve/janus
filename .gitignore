@@ -7,8 +7,6 @@
 .DS_Store
 /testdata/fuzz/
 
-# certs/: ignore everything except the intentional ripdev.io wildcard pair (+ README)
-/certs/*
-!/certs/README.md
-!/certs/ripdev.io.crt
-!/certs/ripdev.io.key
+# TLS material never enters the repository.
+/certs/
+*.key

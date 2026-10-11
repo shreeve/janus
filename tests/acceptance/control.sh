@@ -27,10 +27,10 @@ case_config_environment() {
 }
 
 case_control_duplicate_json() {
-	capi POST /1.0/apps '{"name":"first","name":"second","hosts":["duplicate.ripdev.io"]}'
+	capi POST /1.0/apps '{"name":"first","name":"second","hosts":["duplicate.janus.localhost"]}'
 	eq "$REPLY_CODE" "400"
 	json_has "$REPLY_BODY" 'appears twice'
-	capi POST /1.0/apps '{"name":"nested","hosts":["duplicate.ripdev.io"],"files":{"roots":[{"path":"/one","path":"/two"}]}}'
+	capi POST /1.0/apps '{"name":"nested","hosts":["duplicate.janus.localhost"],"files":{"roots":[{"path":"/one","path":"/two"}]}}'
 	eq "$REPLY_CODE" "400"
 	json_has "$REPLY_BODY" 'appears twice'
 }

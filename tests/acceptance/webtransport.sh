@@ -2,7 +2,7 @@
 # --- cases: webtransport ----------------------------------------------------
 
 WT_ECHO_PORT=7690
-WT_HOST=wt.ripdev.io
+WT_HOST=wt.janus.localhost
 WT_URL="https://$WT_HOST/relay"
 
 case_webtransport_setup() {
@@ -22,10 +22,15 @@ case_webtransport_setup() {
 }
 
 case_webtransport_descriptor() {
-	local headers body
+	local headers body leaf
 	headers="$TEST_RUN_DIR/wt-headers"
 	body="$(curl -sS -D "$headers" --max-time 5 "$WT_URL")"
-	eq "$body" "{\"url\":\"$WT_URL\",\"max_datagram\":1200,\"certificate_hashes\":[]}"
+	# The internal CA issues short-lived leaves, so the descriptor pins the
+	# leaf the edge serves for this host by hash (serverCertificateHashes).
+	leaf="$(openssl s_client -connect 127.0.0.1:443 -servername "$WT_HOST" </dev/null 2>/dev/null \
+		| openssl x509 -outform DER | openssl dgst -sha256 -binary | openssl base64 -A)"
+	ok "-n \"$leaf\"" "no leaf certificate served for $WT_HOST"
+	eq "$body" "{\"url\":\"$WT_URL\",\"max_datagram\":1200,\"certificate_hashes\":[{\"algorithm\":\"sha-256\",\"value\":\"$leaf\"}]}"
 	tr -d '\r' <"$headers" | grep -qi '^cache-control: no-store'
 	tr -d '\r' <"$headers" | grep -qi '^content-type: application/json'
 	eq "$(curl -sS -o /dev/null -w '%{http_code}' -I --max-time 5 "$WT_URL")" "200"
@@ -34,10 +39,10 @@ case_webtransport_descriptor() {
 
 case_webtransport_echo() {
 	local report
-	report="$("$TESTKIT" wt --url "$WT_URL" --origin "https://$WT_HOST" --n 200 --size 1152)"
+	report="$("$TESTKIT" wt --ca "$CADDY_LOCAL_ROOT" --url "$WT_URL" --origin "https://$WT_HOST" --n 200 --size 1152)"
 	json_has "$report" '"status":200'
 	json_has "$report" '"sent":200,"received":200,"mismatched":0,"bytes":230400'
-	report="$("$TESTKIT" wt --url "$WT_URL" --origin "https://$WT_HOST" --n 20 --size 1200)"
+	report="$("$TESTKIT" wt --ca "$CADDY_LOCAL_ROOT" --url "$WT_URL" --origin "https://$WT_HOST" --n 20 --size 1200)"
 	json_has "$report" '"sent":20,"received":20,"mismatched":0'
 	capi GET /1.0/webtransport
 	json_has "$REPLY_BODY" '"accepted":2'
@@ -47,11 +52,11 @@ case_webtransport_echo() {
 
 case_webtransport_refusals() {
 	local report
-	report="$("$TESTKIT" wt --url "$WT_URL" --n 1 || true)"
+	report="$("$TESTKIT" wt --ca "$CADDY_LOCAL_ROOT" --url "$WT_URL" --n 1 || true)"
 	json_has "$report" '"status":403'
-	report="$("$TESTKIT" wt --url "$WT_URL" --origin "https://evil.ripdev.io" --n 1 || true)"
+	report="$("$TESTKIT" wt --ca "$CADDY_LOCAL_ROOT" --url "$WT_URL" --origin "https://evil.janus.localhost" --n 1 || true)"
 	json_has "$report" '"status":403'
-	report="$("$TESTKIT" wt --url "https://$WT_HOST/nope" --origin "https://$WT_HOST" --n 1 || true)"
+	report="$("$TESTKIT" wt --ca "$CADDY_LOCAL_ROOT" --url "https://$WT_HOST/nope" --origin "https://$WT_HOST" --n 1 || true)"
 	json_has "$report" '"status":404'
 	capi GET /1.0/webtransport
 	json_has "$REPLY_BODY" '"refused_origin":2'
@@ -60,7 +65,7 @@ case_webtransport_refusals() {
 }
 
 case_webtransport_ticket() {
-	local url="https://wtgate.ripdev.io" report ticketurl
+	local url="https://wtgate.janus.localhost" report ticketurl
 	# Anonymous: the auth wall answers, not the descriptor.
 	auth_req GET "$url/relay"
 	ok "\"$REPLY_CODE\" == 401 || \"$REPLY_CODE\" == 302" "anonymous descriptor answered $REPLY_CODE"
@@ -76,15 +81,15 @@ case_webtransport_ticket() {
 		;;
 	esac
 	# Without the ticket the relay refuses; with it, it admits; replayed, it refuses.
-	report="$("$TESTKIT" wt --url "$url/relay" --origin "$url" --n 1 || true)"
+	report="$("$TESTKIT" wt --ca "$CADDY_LOCAL_ROOT" --url "$url/relay" --origin "$url" --n 1 || true)"
 	json_has "$report" '"status":403'
-	report="$("$TESTKIT" wt --url "$ticketurl" --origin "$url" --n 50 --size 1152)"
+	report="$("$TESTKIT" wt --ca "$CADDY_LOCAL_ROOT" --url "$ticketurl" --origin "$url" --n 50 --size 1152)"
 	json_has "$report" '"status":200'
 	json_has "$report" '"sent":50,"received":50,"mismatched":0'
-	report="$("$TESTKIT" wt --url "$ticketurl" --origin "$url" --n 1 || true)"
+	report="$("$TESTKIT" wt --ca "$CADDY_LOCAL_ROOT" --url "$ticketurl" --origin "$url" --n 1 || true)"
 	json_has "$report" '"status":403'
 	capi GET /1.0/webtransport
-	json_has "$REPLY_BODY" '"wtgate.ripdev.io/relay":{"target":"udp/127.0.0.1:7690","origin":["same"],'
+	json_has "$REPLY_BODY" '"wtgate.janus.localhost/relay":{"target":"udp/127.0.0.1:7690","origin":["same"],'
 	json_has "$REPLY_BODY" '"gated":true,"accepted":1'
 	json_has "$REPLY_BODY" '"refused_ticket":2'
 }

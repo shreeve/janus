@@ -6,7 +6,7 @@
 # why each site below opts in or out. Take what applies; delete freely.
 #
 # Operator-facing companion to the root Caddyfile (the working dev config
-# on *.ripdev.io). Domains here are example.com placeholders; substitute
+# on *.janus.localhost). Domains here are example.com placeholders; substitute
 # your own. Check it without serving anything:
 #
 #   ./bin/janus validate --config Caddyfile.example --adapter caddyfile
@@ -26,9 +26,8 @@
 #
 # TLS: sites below carry no tls directive on purpose — Caddy manages
 # certificates (ACME) for every named host, which is the production
-# default. Local development uses the committed trusted wildcard instead:
-#
-#   tls certs/ripdev.io.crt certs/ripdev.io.key
+# default. Local names (*.localhost, *.local) get certificates from
+# Caddy's internal CA instead, with no tls directive either.
 {
 	# A stop, restart, or reload gives open connections this long to
 	# finish, then closes them. Caddy's default is no bound at all: it
@@ -70,13 +69,11 @@
 		# literal, never legal on public. public requires https:// and
 		# token:…, and the secret resolves at provision — export or
 		# create it before starting, or the config refuses to load.
-		# TLS material, per listener: cert:<path> key:<path> (both or
-		# neither; TLS listeners only) — unset, the committed dev pair
-		# certs/ripdev.io.{crt,key} serves (see certs/README.md):
+		# TLS material, per listener: cert:<path> key:<path>, both
+		# required on every TLS listener (public, or an https:// listen):
 		#
-		#	control public token:JANUS_TOKEN
-		#	control public https://0.0.0.0:7601/ token:/etc/janus/control.token
 		#	control public token:JANUS_TOKEN cert:/etc/janus/tls.crt key:/etc/janus/tls.key
+		#	control public https://0.0.0.0:7601/ token:/etc/janus/control.token cert:/etc/janus/tls.crt key:/etc/janus/tls.key
 		#	control local http://127.0.0.1:7600/ token:JANUS_TOKEN
 
 		# 3) hub — per-app WebSocket fan-out. Site-scoped, cascades like

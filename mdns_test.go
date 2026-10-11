@@ -33,19 +33,19 @@ func TestParseMdnsDirectiveLegal(t *testing.T) {
 		{"empty block", "janus {\n mdns {\n} \n}", func(ms *MdnsSettings) bool { return ms != nil }},
 		{"name lowercased", "janus {\n mdns {\n name JANUS.Local \n} \n}",
 			func(ms *MdnsSettings) bool { return ms.Name == "janus.local" }},
-		{"canonical with port", "janus {\n mdns {\n canonical https://janus.lan.ripdev.io:8443 \n} \n}",
-			func(ms *MdnsSettings) bool { return ms.Canonical == "https://janus.lan.ripdev.io:8443" }},
-		{"canonical trailing slash normalized", "janus {\n mdns {\n canonical https://janus.lan.ripdev.io/ \n} \n}",
-			func(ms *MdnsSettings) bool { return ms.Canonical == "https://janus.lan.ripdev.io" }},
+		{"canonical with port", "janus {\n mdns {\n canonical https://janus.lan.example.com:8443 \n} \n}",
+			func(ms *MdnsSettings) bool { return ms.Canonical == "https://janus.lan.example.com:8443" }},
+		{"canonical trailing slash normalized", "janus {\n mdns {\n canonical https://janus.lan.example.com/ \n} \n}",
+			func(ms *MdnsSettings) bool { return ms.Canonical == "https://janus.lan.example.com" }},
 		{"interfaces", "janus {\n mdns {\n interface en0 en1 \n} \n}",
 			func(ms *MdnsSettings) bool { return len(ms.Interfaces) == 2 }},
 		{"apps off", "janus {\n mdns {\n apps off \n} \n}",
 			func(ms *MdnsSettings) bool { return ms.Apps != nil && !*ms.Apps }},
 		{"listen", "janus {\n mdns {\n listen :7680 \n} \n}",
 			func(ms *MdnsSettings) bool { return ms.Listen == ":7680" }},
-		{"everything", "janus {\n mdns {\n name edge.local\n canonical https://janus.lan.ripdev.io\n interface en0\n apps on\n listen :7680 \n} \n}",
+		{"everything", "janus {\n mdns {\n name edge.local\n canonical https://janus.lan.example.com\n interface en0\n apps on\n listen :7680 \n} \n}",
 			func(ms *MdnsSettings) bool {
-				return ms.Name == "edge.local" && ms.Canonical == "https://janus.lan.ripdev.io" &&
+				return ms.Name == "edge.local" && ms.Canonical == "https://janus.lan.example.com" &&
 					len(ms.Interfaces) == 1 && ms.Apps != nil && *ms.Apps && ms.Listen == ":7680"
 			}},
 	}
@@ -189,11 +189,11 @@ func TestProvisionMdnsDefaultsAndJSONPath(t *testing.T) {
 		}
 	}
 	// Canonical host derived for the allowlist.
-	app = &App{Mdns: &MdnsSettings{Canonical: "https://janus.lan.ripdev.io:8443"}}
+	app = &App{Mdns: &MdnsSettings{Canonical: "https://janus.lan.example.com:8443"}}
 	if err := app.provisionMdns(); err != nil {
 		t.Fatal(err)
 	}
-	if app.Mdns.canonicalHost != "janus.lan.ripdev.io" {
+	if app.Mdns.canonicalHost != "janus.lan.example.com" {
 		t.Fatalf("canonicalHost: %q", app.Mdns.canonicalHost)
 	}
 }
@@ -205,7 +205,7 @@ func TestMdnsAdvertisableClassifier(t *testing.T) {
 		"x.local":        true,
 		"shop.local":     true,
 		"x.y.local":      false,
-		"x.ripdev.io":    false,
+		"x.example.com":    false,
 		"local":          false,
 		"a.b.c.local":    false,
 		"deep.dev.local": false,
@@ -218,7 +218,7 @@ func TestMdnsAdvertisableClassifier(t *testing.T) {
 	skipped := map[string]bool{
 		"x.y.local":   true,
 		"x.local":     false,
-		"x.ripdev.io": false,
+		"x.example.com": false,
 		"local":       false,
 	}
 	for host, want := range skipped {
@@ -231,7 +231,7 @@ func TestMdnsAdvertisableClassifier(t *testing.T) {
 func TestMdnsDesiredSet(t *testing.T) {
 	reg := newAppRegistry()
 	adv := newMdnsAdvertiser(reg, nil)
-	rec, err := reg.create("shop", []string{"shop.local", "shop.ripdev.io", "a.b.local"}, "")
+	rec, err := reg.create("shop", []string{"shop.local", "shop.example.com", "a.b.local"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestMdnsReconcileTransitions(t *testing.T) {
 	}
 
 	// Create advertises.
-	rec, err := reg.create("shop", []string{"shop.local", "shop.ripdev.io"}, "")
+	rec, err := reg.create("shop", []string{"shop.local", "shop.example.com"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +801,7 @@ func TestMdnsNotifyNeverBlocks(t *testing.T) {
 func TestMdnsAbortedReloadRollback(t *testing.T) {
 	cfgA := &mdnsConfig{name: "janus.local", port: 80, apps: true, listen: ":80"}
 	cfgB := &mdnsConfig{name: "edge.local", port: 7680, apps: false, listen: ":7680",
-		canonical: "https://janus.lan.ripdev.io"}
+		canonical: "https://janus.lan.example.com"}
 	newAdvertiser := func() *mdnsAdvertiser {
 		adv := newMdnsAdvertiser(newAppRegistry(), zap.NewNop())
 		adv.newResponder = func() (dnssd.Responder, error) { return &fakeResponder{}, nil }
@@ -1060,7 +1060,7 @@ func newTestMdnsApp(t *testing.T, ms *MdnsSettings) *App {
 // set): its own listener, the strict Host allowlist with 421 for
 // everything not mine, and the 404/405 route discipline.
 func TestMdnsFrontDoorRouting(t *testing.T) {
-	app := newTestMdnsApp(t, &MdnsSettings{Canonical: "https://janus.lan.ripdev.io", Listen: ":7680"})
+	app := newTestMdnsApp(t, &MdnsSettings{Canonical: "https://janus.lan.example.com", Listen: ":7680"})
 	h := app.mdnsFrontDoor()
 	cases := []struct {
 		method, path, host string
@@ -1072,7 +1072,7 @@ func TestMdnsFrontDoorRouting(t *testing.T) {
 		{"HEAD", "/status.json", "janus.local", 200},
 		{"GET", "/", "127.0.0.1", 200},
 		{"GET", "/", "[::1]", 200},
-		{"GET", "/", "janus.lan.ripdev.io", 200},
+		{"GET", "/", "janus.lan.example.com", 200},
 		{"GET", "/", "janus.local:8080", 200}, // port stripped before the check
 		{"POST", "/", "janus.local", 405},
 		{"POST", "/status.json", "janus.local", 405},
@@ -1334,7 +1334,7 @@ func TestMdnsPageSelfContainedAndTextOnly(t *testing.T) {
 // is the app's, not the door's.
 func newTestSharedMdnsApp(t *testing.T) *App {
 	t.Helper()
-	app := newTestMdnsApp(t, &MdnsSettings{Canonical: "https://janus.lan.ripdev.io"})
+	app := newTestMdnsApp(t, &MdnsSettings{Canonical: "https://janus.lan.example.com"})
 	if !app.Mdns.shared() {
 		t.Fatal("no listen must mean shared mode")
 	}
@@ -1387,7 +1387,7 @@ func TestMdnsSharedDecider(t *testing.T) {
 		{"GET", "/status.json", "janus.local", 200},
 		{"HEAD", "/status.json", "janus.local", 200},
 		{"GET", "/", "janus-2.local", 200},       // renamed-mine
-		{"GET", "/", "janus.lan.ripdev.io", 200}, // canonical-mine
+		{"GET", "/", "janus.lan.example.com", 200}, // canonical-mine
 		{"GET", "/", "janus.local:80", 200},      // port stripped before the check
 		{"POST", "/status.json", "janus.local", 405},
 		{"PUT", "/", "janus.local", 405},
@@ -1422,7 +1422,7 @@ func TestMdnsSharedDecider(t *testing.T) {
 	}{
 		{"shop.local", "/", "https://shop.local/"},
 		{"shop.local:80", "/cart?item=3", "https://shop.local/cart?item=3"},
-		{"other.ripdev.io", "/", "https://other.ripdev.io/"},
+		{"other.example.com", "/", "https://other.example.com/"},
 		{"evil.example.com", "/", "https://evil.example.com/"},
 		{"a.b.local", "/", "https://a.b.local/"},
 		{"127.0.0.1", "/", "https://127.0.0.1/"},

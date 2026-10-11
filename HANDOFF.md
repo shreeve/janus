@@ -73,7 +73,6 @@ test.sh             the acceptance driver: one foreground owner, capability orde
 bench/              the measurement harness (measures, never gates); raw results go to docs/
 docs/               timestamped contracts, measurements, reviews; docs/counter/ and
                     docs/operators/ are the two living tutorials
-certs/              the intentional public *.ripdev.io wildcard pair (127.0.0.1) for tests
 Caddyfile           working multi-site cascade config; Caddyfile.minimal (operator start),
                     Caddyfile.example (every knob) both validate standalone
 install.sh          curl | bash installer for the prebuilt archives; scripts/ packages them

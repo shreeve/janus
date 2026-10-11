@@ -77,8 +77,8 @@ func TestNormalizeControlsRejectsEffectiveBindCollision(t *testing.T) {
 		"https://localhost:17601/public",
 	} {
 		controls := []Control{
-			{Mode: "local", Listen: "https://127.0.0.1:17601/local"},
-			{Mode: "public", Listen: publicListen, TokenKind: tokenEnv, Token: "JANUS_TEST_TOKEN"},
+			{Mode: "local", Listen: "https://127.0.0.1:17601/local", CertFile: "/x.crt", KeyFile: "/x.key"},
+			{Mode: "public", Listen: publicListen, TokenKind: tokenEnv, Token: "JANUS_TEST_TOKEN", CertFile: "/x.crt", KeyFile: "/x.key"},
 		}
 		err := normalizeControls(controls)
 		if err == nil || !strings.Contains(err.Error(), "overlapping tcp addresses") {
@@ -199,6 +199,11 @@ func TestControlNormalizeDefaults(t *testing.T) {
 func TestControlNormalizePublic(t *testing.T) {
 	t.Setenv("JANUS_PUB", "secret")
 	c := Control{Mode: "public", TokenKind: tokenEnv, Token: "JANUS_PUB"}
+	if err := c.normalize(); err == nil || !strings.Contains(err.Error(), "requires cert") {
+		t.Fatalf("public without cert/key: want a requires-cert error, got %v", err)
+	}
+
+	c = Control{Mode: "public", TokenKind: tokenEnv, Token: "JANUS_PUB", CertFile: "/x.crt", KeyFile: "/x.key"}
 	if err := c.normalize(); err != nil {
 		t.Fatal(err)
 	}
@@ -259,6 +264,11 @@ func TestControlNormalizeCertKey(t *testing.T) {
 	c = Control{Mode: "local", Listen: "https://127.0.0.1:7600/", CertFile: "/x.crt", KeyFile: "/x.key"}
 	if err := c.normalize(); err != nil {
 		t.Fatalf("cert/key on https local: %v", err)
+	}
+	// ... and required: Janus ships no certificate of its own.
+	c = Control{Mode: "local", Listen: "https://127.0.0.1:7600/"}
+	if err := c.normalize(); err == nil || !strings.Contains(err.Error(), "requires cert") {
+		t.Fatalf("https local without cert/key: want a requires-cert error, got %v", err)
 	}
 }
 

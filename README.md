@@ -139,7 +139,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 make janus   # go build ./cmd/janus -> bin/janus
 
 go test ./...
-./test.sh    # capability-ordered acceptance groups, ending with access
+./test.sh    # capability-ordered acceptance groups, ending with webtransport
 ```
 
 `cmd/janus` is the binary's main package: stock Caddy, the Janus module,
@@ -157,16 +157,16 @@ Janus to change its compiled modules.
 
 ### 1. ping (data plane)
 
-Trusted wildcard cert in [`certs/`](certs/); DNS → `127.0.0.1`; SNI picks the site. No control plane required.
+`*.janus.localhost` names resolve to the loopback with no DNS; Caddy's internal CA issues each site's certificate (`./bin/janus trust` installs its root here, or pass curl `--cacert`); SNI picks the site. No control plane required.
 
 ```bash
 ./bin/janus run
 ```
 
 ```bash
-curl -s https://foo.ripdev.io/ping          # catchall → pong
-curl -s https://on.ripdev.io/ping           # explicit on → pong
-curl -s -o /dev/null -w '%{http_code}\n' https://off.ripdev.io/ping
+curl -s https://foo.janus.localhost/ping    # catchall → pong
+curl -s https://on.janus.localhost/ping     # explicit on → pong
+curl -s -o /dev/null -w '%{http_code}\n' https://off.janus.localhost/ping
 # → 404
 ```
 

@@ -63,9 +63,9 @@ implement → pin in tests → measure**.
    with its measurement in the performance ledger, raw provenance as
    `docs/*-bench-raw-*.txt` (never edited).
 
-9. **Plain git.** Commits carry no AI attribution. Do not commit
-   secrets outside the intentional `certs/ripdev.io.*` pair (see
-   certs/README.md and `.github/secret_scanning.yml`).
+9. **Plain git.** Commits carry no AI attribution. Never commit
+   secrets, private keys, or certificates; tests mint their TLS material
+   at run time.
 
 10. **Go, Rip, and shell — nothing else.** Implementation languages
     are Go, Rip, and shell, everywhere in the repo: module code, test
@@ -124,8 +124,11 @@ close affected WebSockets. Memory-only across restarts — tenants re-register.
 
 ## Local HTTPS
 
-Use committed `certs/ripdev.io.{crt,key}` (`*.ripdev.io` → `127.0.0.1`);
-SNI picks the site (`off.ripdev.io`, `on.ripdev.io`, …). No `curl -k`.
+Sites use `*.janus.localhost` names, which resolve to the loopback with
+no DNS; SNI picks the site (`off.janus.localhost`, `on.janus.localhost`,
+…). Caddy's internal CA issues every certificate, and `test.sh` pins
+Caddy storage under its run directory and passes that root to every
+client (`curl --cacert`, `testkit --ca`). No `curl -k`.
 
 ## Commands
 
@@ -168,5 +171,3 @@ Benchmarks: [`bench/README.md`](bench/README.md) — measures, never gates.
 - [HANDOFF.md](HANDOFF.md) — the newcomer's entry point: reading order, tree
   map, how work moves, what trips a newcomer, and a dated state snapshot
   to refresh when an area changes.
-- [certs/README.md](certs/README.md) — the intentional public
-  `*.ripdev.io` TLS material.

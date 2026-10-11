@@ -74,7 +74,7 @@ stop_data_fixtures() {
 
 case_data_register_with_upstream() {
 	start_data_upstream "$TEST_RUN_DIR/run/u1.sock" u1 "$TEST_RUN_DIR/u1.hits" || return 1
-	capi POST /1.0/apps '{"name":"web","hosts":["app.ripdev.io"]}'
+	capi POST /1.0/apps '{"name":"web","hosts":["app.janus.localhost"]}'
 	eq "$REPLY_CODE" "201"
 	local id
 	id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -85,27 +85,27 @@ case_data_register_with_upstream() {
 }
 
 case_data_proxy_get() {
-	eq "$(http_code https://app.ripdev.io/)" "200"
-	eq "$(http_body https://app.ripdev.io/)" "upstream:u1"
+	eq "$(http_code https://app.janus.localhost/)" "200"
+	eq "$(http_body https://app.janus.localhost/)" "upstream:u1"
 }
 
 case_data_proxy_post_body() {
 	local body
-	body="$(curl -sS --max-time 5 -X POST --data 'alpha' https://app.ripdev.io/submit)"
+	body="$(curl -sS --max-time 5 -X POST --data 'alpha' https://app.janus.localhost/submit)"
 	eq "$body" "received:alpha"
 	eq "$(wc -l <"$TEST_RUN_DIR/u1.hits" | tr -d ' ')" "1"
 }
 
 case_data_unknown_host() {
-	eq "$(http_code https://nowhere.ripdev.io/)" "404"
+	eq "$(http_code https://nowhere.janus.localhost/)" "404"
 }
 
 case_data_empty_upstreams_503() {
 	capi PUT "/1.0/apps/$(data_app_id)/upstreams" '{"upstreams":[]}'
 	eq "$REPLY_CODE" "200"
-	eq "$(http_code https://app.ripdev.io/)" "503"
+	eq "$(http_code https://app.janus.localhost/)" "503"
 	local ra
-	ra="$(curl -sS -o /dev/null -D - --max-time 5 https://app.ripdev.io/ |
+	ra="$(curl -sS -o /dev/null -D - --max-time 5 https://app.janus.localhost/ |
 		tr -d '\r' | awk -F': ' 'tolower($1)=="retry-after" {print $2}')"
 	eq "$ra" "1"
 }
@@ -122,7 +122,7 @@ case_data_doorbell_ring() {
 	# with no visible redirect.
 	local resp code body
 	resp="$(curl -sS --max-time 20 -X POST --data 'door-payload' \
-		-w $'\n%{http_code} %{num_redirects}' https://app.ripdev.io/submit)"
+		-w $'\n%{http_code} %{num_redirects}' https://app.janus.localhost/submit)"
 	code="${resp##*$'\n'}"
 	body="${resp%$'\n'*}"
 	eq "$code" "200 0"
@@ -135,11 +135,11 @@ case_data_doorbell_ring() {
 
 case_data_after_ring_steady_state() {
 	# The doorbell is retired; traffic flows to u2 without ringing again.
-	eq "$(http_body https://app.ripdev.io/)" "upstream:u2"
+	eq "$(http_body https://app.janus.localhost/)" "upstream:u2"
 	eq "$(wc -l <"$TEST_RUN_DIR/bell.rings" | tr -d ' ')" "1"
 }
 
 case_data_ping_still_answers() {
 	# Site-scoped ping (global on) answers ahead of routing for this host.
-	eq "$(http_body https://app.ripdev.io/ping)" "pong"
+	eq "$(http_body https://app.janus.localhost/ping)" "pong"
 }

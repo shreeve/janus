@@ -39,8 +39,8 @@ type Control struct {
 
 	// CertFile and KeyFile are the TLS certificate/key paths from the
 	// cert:… and key:… arguments. Both or neither; only meaningful on a
-	// TLS listener (public mode or an https:// listen). Unset, a TLS
-	// listener uses the committed dev pair certs/ripdev.io.{crt,key}.
+	// TLS listener (public mode or an https:// listen), and required there:
+	// Janus ships no certificate of its own.
 	CertFile string `json:"cert_file,omitempty"`
 	KeyFile  string `json:"key_file,omitempty"`
 
@@ -164,6 +164,9 @@ func (c *Control) normalize() error {
 	}
 	if c.CertFile != "" && !c.useTLS {
 		return fmt.Errorf("control %s: cert:…/key:… are only meaningful on a TLS listener (public mode or an https:// listen)", c.Mode)
+	}
+	if c.useTLS && c.CertFile == "" {
+		return fmt.Errorf("control %s: a TLS listener requires cert:… and key:… on the same line", c.Mode)
 	}
 
 	if c.TokenKind != "" {

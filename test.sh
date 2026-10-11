@@ -4,7 +4,10 @@
 # For operators/users: prove cold capabilities behave end-to-end.
 # Developers still use idiomatic `go test ./...` while building.
 #
-# Groups run in capability order: ping (1), control (2), …, access (9) last.
+# Groups run in capability order: ping (1), control (2), …, webtransport (10) last.
+#
+# HTTPS uses Caddy's internal CA for *.janus.localhost names (which resolve
+# to the loopback without DNS); every curl trusts exactly that root.
 #
 #   ./test.sh
 #   NO_COLOR=1 ./test.sh
@@ -21,6 +24,10 @@ export XDG_CONFIG_HOME="$TEST_RUN_DIR/config"
 export XDG_STATE_HOME="$TEST_RUN_DIR/state"
 export JANUS_TEST_CONTROL="$TEST_RUN_DIR/run/janus.sock"
 export JANUS_TEST_ACCESS_LOG="$TEST_RUN_DIR/access.log"
+# Caddy storage is pinned under the run directory, so the internal CA root
+# that signs every site certificate lands here (see start_caddy).
+export XDG_DATA_HOME="$TEST_RUN_DIR/caddy-data"
+CADDY_LOCAL_ROOT="$XDG_DATA_HOME/caddy/pki/authorities/local/root.crt"
 mkdir -p "$TEST_RUN_DIR/run"
 CADDY_BIN="${CADDY_BIN:-$ROOT/bin/janus}"
 CADDY_LOG="${CADDY_LOG:-$TEST_RUN_DIR/caddy.log}"
@@ -123,6 +130,12 @@ ne() {
 
 # --- HTTP helpers ---------------------------------------------------------
 
+# Every HTTPS request trusts the edge's own internal CA and nothing else
+# (never -k). The root exists once Caddy has issued its first certificate.
+curl() {
+	command curl --cacert "$CADDY_LOCAL_ROOT" "$@"
+}
+
 http_code() {
 	curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$1"
 }
@@ -198,10 +211,6 @@ report() {
 
 # --- lifecycle ------------------------------------------------------------
 
-need_certs() {
-	[[ -f certs/ripdev.io.crt && -f certs/ripdev.io.key ]]
-}
-
 need_caddy() {
 	[[ -x "$CADDY_BIN" ]]
 }
@@ -273,7 +282,7 @@ start_caddy() {
 			rm -f "$CADDY_PID_FILE"
 			return 1
 		fi
-		if curl -sS -o /dev/null --max-time 1 https://on.ripdev.io/ping 2>/dev/null \
+		if curl -sS -o /dev/null --max-time 1 https://on.janus.localhost/ping 2>/dev/null \
 			&& curl -sS -o /dev/null --max-time 1 http://127.0.0.1:7600/1.0/health 2>/dev/null; then
 			return 0
 		fi
@@ -346,11 +355,6 @@ SUITE_START_NS=$(now_ns)
 
 printf '%s\n' "$(paint "$BOLD" "Janus acceptance")"
 
-if ! need_certs; then
-	echo "missing certs/ripdev.io.{crt,key}" >&2
-	exit 1
-fi
-
 if ! need_caddy; then
 	printf '%s\n' "$(paint "$DIM" "building $CADDY_BIN …")"
 	build_caddy || exit 1
@@ -363,10 +367,10 @@ printf '%s\n' "$(paint "$DIM" "starting caddy …")"
 start_caddy || exit 1
 
 group "ping"
-test "catchall foo.ripdev.io → pong" case_ping_catchall_foo
-test "catchall bar.ripdev.io → pong" case_ping_catchall_bar
-test "on.ripdev.io explicit on → pong" case_ping_on_explicit
-test "off.ripdev.io explicit off → 404" case_ping_off_explicit
+test "catchall foo.janus.localhost → pong" case_ping_catchall_foo
+test "catchall bar.janus.localhost → pong" case_ping_catchall_bar
+test "on.janus.localhost explicit on → pong" case_ping_on_explicit
+test "off.janus.localhost explicit off → 404" case_ping_off_explicit
 test "TLS verify trusted (no -k)" case_ping_tls_trusted
 
 group "control"
