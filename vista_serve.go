@@ -355,6 +355,16 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 	rs.c.requests.Add(1)
 
 	o := newVistaResponder(w)
+	draining := false
+	o.onGone = func() {
+		draining = true
+		rs.c.draining.Add(1)
+	}
+	defer func() {
+		if draining {
+			rs.c.draining.Add(-1)
+		}
+	}()
 	judge := ""
 	if msg.RPC == "XUS AV CODE" || msg.RPC == "XUS CVC" {
 		judge = msg.RPC

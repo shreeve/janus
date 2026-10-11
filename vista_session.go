@@ -27,6 +27,21 @@ const (
 	vistaCauseRejected = "rejected"
 )
 
+// vistaChunkPool recycles the reader's buffers: a read passes to the
+// running request, which returns it once its bytes are written or copied.
+var vistaChunkPool = sync.Pool{New: func() any {
+	b := make([]byte, vistaReadChunk)
+	return &b
+}}
+
+type vistaChunk struct {
+	p *[]byte
+	n int
+}
+
+func (c vistaChunk) bytes() []byte { return (*c.p)[:c.n] }
+func (c vistaChunk) release()      { vistaChunkPool.Put(c.p) }
+
 type vistaSession struct {
 	id        string
 	route     *vistaRouteState
@@ -37,10 +52,10 @@ type vistaSession struct {
 	started   time.Time
 	mac       string // guarded by route.mu
 
-	chunks chan []byte   // reader → the running request
-	eof    chan struct{} // closed when the stream reads EOF or an error
-	done   chan struct{} // closed when the session ends
-	turn   chan struct{} // holds one token while no request runs
+	chunks chan vistaChunk // reader → the running request
+	eof    chan struct{}   // closed when the stream reads EOF or an error
+	done   chan struct{}   // closed when the session ends
+	turn   chan struct{}   // holds one token while no request runs
 
 	pending  atomic.Int32 // requests queued or running
 	runSince atomic.Int64 // unix nanoseconds the running request began; 0 when idle
@@ -66,7 +81,7 @@ func newVistaSession(rs *vistaRouteState, conn net.Conn, key netip.Prefix, clien
 	s := &vistaSession{
 		id: vistaSessionID(), route: rs, logger: logger, conn: conn,
 		clientKey: key, client: client, started: time.Now(),
-		chunks: make(chan []byte, 1), eof: make(chan struct{}), done: make(chan struct{}),
+		chunks: make(chan vistaChunk, 1), eof: make(chan struct{}), done: make(chan struct{}),
 		turn: make(chan struct{}, 1), starting: true,
 	}
 	go s.readLoop()
@@ -77,14 +92,18 @@ func newVistaSession(rs *vistaRouteState, conn net.Conn, key netip.Prefix, clien
 // each read to it; a read while idle is a protocol violation, and EOF or
 // an error while idle ends the session.
 func (s *vistaSession) readLoop() {
-	buf := make([]byte, vistaReadChunk)
 	for {
-		n, err := s.conn.Read(buf)
+		p := vistaChunkPool.Get().(*[]byte)
+		n, err := s.conn.Read(*p)
+		if n == 0 {
+			vistaChunkPool.Put(p)
+		}
 		if n > 0 {
-			chunk := append([]byte(nil), buf[:n]...)
+			chunk := vistaChunk{p: p, n: n}
 			s.mu.Lock()
 			if !s.active {
 				s.mu.Unlock()
+				chunk.release()
 				s.end(vistaEndProtocol)
 				return
 			}
@@ -96,6 +115,7 @@ func (s *vistaSession) readLoop() {
 				select {
 				case s.chunks <- chunk:
 				case <-s.done:
+					chunk.release()
 					return
 				}
 			}
@@ -227,6 +247,8 @@ type vistaResponder struct {
 	headersOut bool
 	gone       bool
 	setCookie  string
+	// onGone runs once when the client goes: the reply drains from then.
+	onGone func()
 }
 
 func newVistaResponder(w http.ResponseWriter) *vistaResponder {
@@ -265,11 +287,11 @@ func (o *vistaResponder) send(b []byte) {
 	o.writeHeaders()
 	_ = o.rc.SetWriteDeadline(time.Now().Add(vistaWriteTimeout))
 	if _, err := o.w.Write(b); err != nil {
-		o.gone = true
+		o.goneNow()
 		return
 	}
 	if err := o.rc.Flush(); err != nil {
-		o.gone = true
+		o.goneNow()
 	}
 }
 
@@ -303,7 +325,8 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 		return vistaExchange{cause: c}
 	}
 	select {
-	case <-s.chunks:
+	case c := <-s.chunks:
+		c.release()
 		// Bytes left from an earlier reply would become this one's.
 		s.mu.Unlock()
 		s.end(vistaEndProtocol)
@@ -359,8 +382,9 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 	}
 	for {
 		select {
-		case chunk := <-s.chunks:
-			done, cause := feed(chunk)
+		case c := <-s.chunks:
+			done, cause := feed(c.bytes())
+			c.release()
 			if cause != "" {
 				s.end(cause)
 				return vistaExchange{cause: cause}
@@ -372,8 +396,9 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 			// The reader hands over its last read before it closes eof.
 			for {
 				select {
-				case chunk := <-s.chunks:
-					done, cause := feed(chunk)
+				case c := <-s.chunks:
+					done, cause := feed(c.bytes())
+					c.release()
 					if cause != "" {
 						s.end(cause)
 						return vistaExchange{cause: cause}
@@ -414,12 +439,18 @@ func (s *vistaSession) finish(sc xwbReplyScanner, judge string, judged, leftover
 	}
 	s.mu.Lock()
 	select {
-	case <-s.chunks:
+	case c := <-s.chunks:
+		c.release()
 		leftover = true
 	default:
 	}
 	s.active = false
 	endAfter := s.endAfter
+	if endAfter == vistaEndSignonTimeout && s.signed {
+		// The deadline fell during the reply that signed the session on.
+		endAfter = ""
+	}
+	s.endAfter = ""
 	starting := s.starting
 	s.mu.Unlock()
 	s.requests.Add(1)
@@ -456,3 +487,13 @@ func vistaSetCookie(token string) string {
 }
 
 const vistaClearCookie = vistaCookieName + "=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+
+func (o *vistaResponder) goneNow() {
+	if o.gone {
+		return
+	}
+	o.gone = true
+	if o.onGone != nil {
+		o.onGone()
+	}
+}

@@ -21,6 +21,12 @@ func (a *App) startVista() error {
 	if err != nil || ha == nil {
 		return err
 	}
+	return a.collectVista(ha)
+}
+
+// collectVista walks the HTTP app's servers for vista routes and records
+// the keys this generation declares.
+func (a *App) collectVista(ha *caddyhttp.App) error {
 	for name, srv := range ha.Servers {
 		err := walkHostRoutes(srv.Routes, nil, func(handler caddyhttp.MiddlewareHandler, alternatives [][]string) error {
 			h, ok := handler.(*Handler)

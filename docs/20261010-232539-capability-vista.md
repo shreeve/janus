@@ -88,8 +88,8 @@ vista.example.org {
 endpoint clients post to (`/rpc` in RPC-HTTPS); it is absolute,
 exact, unique within the site, and canonical (no empty, `.`, or `..`
 segment, no trailing `/`, no percent escape). The target is a Caddy
-network address with network `unix` (`unix//run/openvista/rpc.sock`), an
-absolute, clean path, no port. Each option appears at most once and an
+network address with network `unix` (`unix//run/openvista/rpc.sock`) and
+an absolute, clean socket path. Each option appears at most once and an
 empty block takes every default.
 
 A **client key** is the client address (below) as a /32 for IPv4 and a
@@ -315,7 +315,7 @@ Running a request:
 | --- | --- |
 | The reply ends by the framing rule | 200 and the reply |
 | `rpc_timeout` passes before the first reply byte | 504; the session ends |
-| The stream closes, or a write fails, before the first reply byte | 502; the session ends |
+| Any other failure that ends the session before the first reply byte: the stream closing, a write failing, `max_reply` passed within the first read, `route-removed` | 502 with `OV-Session-Ended`; the session ends |
 | After the first reply byte: `rpc_timeout`, `max_reply`, the stream closing, or `route-removed` | the response is aborted (HTTP/2 `RST_STREAM`; HTTP/1.1 connection closed), since its 200 is out; the session ends |
 
 Janus never retries a request: an RPC may have changed data.
@@ -363,8 +363,8 @@ Parse time:
 - `vista` in the global `janus` block.
 - A route without a path and target; a path not absolute, not canonical,
   or repeated within the site.
-- A target whose network is not `unix`, whose path is not absolute and
-  clean, or that carries a port.
+- A target whose network is not `unix`, or whose socket path is not
+  absolute and clean.
 - An unknown or repeated option; a value outside its range; a `per_client*` above its route cap; `max_unsigned`
   above `max_sessions`; a `per_client_exempt` entry that is not a CIDR.
 - `origin any`, an empty `origin`, `null`, or an entry that is not an

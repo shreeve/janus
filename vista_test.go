@@ -574,6 +574,29 @@ func TestVistaSignonTimeout(t *testing.T) {
 	}
 }
 
+// A deadline that falls during the reply that signs the session on ends
+// nothing: the session is signed on, its token rotated.
+func TestVistaSignonAcrossTheDeadline(t *testing.T) {
+	g := newVistaRig(t, nil, func(l *vistaLimits) { l.signonTimeout = 300 * time.Millisecond })
+	g.em.Script(func(c *fakeEmConn, m fakeEmMsg) []fakeEmAction {
+		if m.RPC == "XUS AV CODE" {
+			return append([]fakeEmAction{{Delay: 600 * time.Millisecond}}, fakeEmDefault(c, m)...)
+		}
+		return fakeEmDefault(c, m)
+	})
+	tok := g.connect()
+	r := g.do(xwbRPCMsg("XUS AV CODE", " GOOD;CODE "), bearer(tok)...)
+	wantReply(t, "sign-on across the deadline", r, emReplyAVGood)
+	fresh := vistaSetToken(r.h)
+	if fresh == "" || fresh == tok {
+		t.Fatalf("no rotated token: %q", fresh)
+	}
+	wantReply(t, "after the deadline", g.do(imHereMsg, bearer(fresh)...), emReplyIMHere)
+	if st := g.status(); st.Sessions != 1 || st.SignedOn != 1 || st.Ended["signon_timeout"] != 0 {
+		t.Fatalf("status: %+v", st)
+	}
+}
+
 // --- 6. caps ----------------------------------------------------------------------
 
 func TestVistaCaps(t *testing.T) {
