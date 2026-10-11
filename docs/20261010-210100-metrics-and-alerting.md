@@ -351,6 +351,7 @@ Raw provenance as `docs/*-bench-raw-metrics.txt`; results in the ledger.
 | 2 | Per-app label cap | 128, overflow into `_other` |
 | 3 | Not-running signal | `health.json` + `status --check` + documented dead-man's switch; no shipped timer |
 | 4 | Should `janus autostart` install the periodic check job | No in this contract; revisit after the recipes are used |
+| 5 | A scrape-only door for a containerized Prometheus | Open. The owner's intended deployment runs Prometheus in an Incus container on the edge host, its UI behind a Janus auth gate (registered through an Incus proxy device that exposes the container's port as a host unix socket). Such a scraper must reach Janus metrics without control-plane rights: `GET /1.0/metrics` on a control listener grants the whole `/1.0` surface to whoever holds that socket or token, and Caddy's admin `/metrics` sits beside an API that rewrites config. Decide whether to add a metrics-only listener (a unix socket an Incus proxy device can expose, serving `/metrics` and nothing else) before choosing door 1 |
 
 ## Adversarial review
 
