@@ -384,6 +384,7 @@ downloads.example.com {
 vista.example.com {
 	import janus_access
 	janus {
+		# The socket path holds at most 103 bytes (macOS's sun_path).
 		vista /rpc unix//run/openvista/rpc.sock {
 			auth exempt
 			# max_sessions 256 · max_unsigned 32 · per_client 64 · per_client_unsigned 8

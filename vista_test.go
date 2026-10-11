@@ -1310,6 +1310,7 @@ func TestVistaParseErrors(t *testing.T) {
 		{"bare host target", "vista /rpc 127.0.0.1:9430", "want a unix socket"},
 		{"relative socket", "vista /rpc unix/run/em.sock", "absolute and clean"},
 		{"unclean socket", "vista /rpc unix//run/../em.sock", "absolute and clean"},
+		{"socket path too long", "vista /rpc unix//" + strings.Repeat("s", 104) + ".sock", "at most 103"},
 		{"max_sessions 0", block("max_sessions 0"), "want 1 through 65535"},
 		{"max_sessions 65536", block("max_sessions 65536"), "want 1 through 65535"},
 		{"max_sessions word", block("max_sessions many"), "want 1 through 65535"},

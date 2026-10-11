@@ -38,6 +38,9 @@ const (
 	vistaMaxRequest         = 16 << 20
 	vistaMinReply           = 1 << 20
 	vistaMaxReply           = 1 << 30
+	// vistaMaxSocketPath is the shorter of the platforms' sun_path limits,
+	// less the terminating NUL: a longer path cannot be dialed.
+	vistaMaxSocketPath = 103
 )
 
 // VistaRoute is one site's route: a path clients post to and the Unix
@@ -313,6 +316,9 @@ func parseVistaTarget(s string) (string, error) {
 	}
 	if !strings.HasPrefix(na.Host, "/") || path.Clean(na.Host) != na.Host {
 		return "", fmt.Errorf("the socket path must be absolute and clean: %q", s)
+	}
+	if len(na.Host) > vistaMaxSocketPath {
+		return "", fmt.Errorf("the socket path is %d bytes; a Unix socket path holds at most %d (macOS's sun_path, less its NUL): %q", len(na.Host), vistaMaxSocketPath, s)
 	}
 	return na.Host, nil
 }

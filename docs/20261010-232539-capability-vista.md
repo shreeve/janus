@@ -364,7 +364,8 @@ Parse time:
 - A route without a path and target; a path not absolute, not canonical,
   or repeated within the site.
 - A target whose network is not `unix`, or whose socket path is not
-  absolute and clean.
+  absolute and clean, or is longer than 103 bytes (the platforms'
+  shortest `sun_path`, macOS's, less its NUL).
 - An unknown or repeated option; a value outside its range; a `per_client*` above its route cap; `max_unsigned`
   above `max_sessions`; a `per_client_exempt` entry that is not a CIDR.
 - `origin any`, an empty `origin`, `null`, or an entry that is not an
@@ -575,8 +576,12 @@ success, a security refusal, an M error with its second `\x04`, `#BYE#`).
 - `/RPC` under the suite's `gate /` gets the gate's answer.
 - The access log holds no token: a grep for each minted token finds none.
 
-End to end against real em (Em provides the environment): the CPRS relay
-signs on through Janus to VistA, as `test/relay`'s mini-Janus does today.
+End to end against real em: OpenVista's `TestCPRSSignsOnThroughJanus`
+(relay/relay_test.go; `OV_JANUS_URL`, `OV_JANUS_CA`, `OV_JANUS_CONTROL`,
+`OV_CODES`) signs CPRS's relay on through a running Janus to VistA on em.
+Passed 2026-10-11 against this capability: accept, sign-on with rotation,
+context, an M error mid-session, and the relay's `#BYE#` ending the session
+as `bye`.
 
 ## Measurement
 
