@@ -66,6 +66,20 @@ func serviceLabel(def string) string {
 // is none); a variable so tests can stand in a fake.
 var itemFor = newServiceItem
 
+// writeItemFile puts an item's file (plist or unit) in place when its
+// content differs, through the atomic writer: the manager reads either
+// the previous file or the new one whole, even across a crash. Reports
+// whether it wrote.
+func writeItemFile(path string, body []byte) (bool, error) {
+	if prev, err := os.ReadFile(path); err == nil && bytes.Equal(prev, body) {
+		return false, nil
+	}
+	if err := writeFileAtomic(path, body, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func startEdge(orig runFunc, cmd *cobra.Command, args []string, p servicePaths) error {
 	out := cmd.OutOrStdout()
 	if item := itemFor(p); item != nil && item.registered() {

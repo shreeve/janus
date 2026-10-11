@@ -4,7 +4,6 @@ package main
 // and a LaunchDaemon for root (the system domain, no session needed).
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -67,16 +66,9 @@ func parseLaunchdPID(out []byte) int {
 }
 
 func (l *launchdItem) register(p servicePaths, exe string) (bool, error) {
-	if err := os.MkdirAll(filepath.Dir(l.plist), 0o755); err != nil {
+	changed, err := writeItemFile(l.plist, []byte(launchdPlist(l.label, p, exe)))
+	if err != nil {
 		return false, err
-	}
-	body := []byte(launchdPlist(l.label, p, exe))
-	prev, _ := os.ReadFile(l.plist)
-	changed := !bytes.Equal(prev, body)
-	if changed {
-		if err := os.WriteFile(l.plist, body, 0o644); err != nil {
-			return false, err
-		}
 	}
 	// A previous `disable` outlives the plist; clear it so bootstrap and
 	// the next login both take.

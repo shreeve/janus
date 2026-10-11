@@ -4,7 +4,6 @@ package main
 // or at boot once the account lingers) and a system unit for root.
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -83,21 +82,14 @@ func parseSystemdShow(out []byte) (state string, pid int) {
 }
 
 func (s *systemdItem) register(p servicePaths, exe string) (bool, error) {
-	if err := os.MkdirAll(filepath.Dir(s.unit), 0o755); err != nil {
+	changed, err := writeItemFile(s.unit, []byte(systemdUnitFile(p, exe)))
+	if err != nil {
 		return false, err
-	}
-	body := []byte(systemdUnitFile(p, exe))
-	prev, _ := os.ReadFile(s.unit)
-	changed := !bytes.Equal(prev, body)
-	if changed {
-		if err := os.WriteFile(s.unit, body, 0o644); err != nil {
-			return false, err
-		}
 	}
 	if _, err := s.systemctl("daemon-reload"); err != nil {
 		return false, err
 	}
-	_, err := s.systemctl("enable", s.service())
+	_, err = s.systemctl("enable", s.service())
 	return changed, err
 }
 
