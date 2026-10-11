@@ -115,7 +115,8 @@ func (r *wtRelay) serveHTTP(sock *wtSocket, w http.ResponseWriter, req *http.Req
 		return
 	}
 	route.counters.accepted.Add(1)
-	s := newWtSession(r, route, sess, udp, sock.addr, claim.user, table.maxDatagram)
+	wc, _ := req.Context().Value(wtConnKey{}).(*wtConn)
+	s := newWtSession(r, route, sess, wc, udp, sock.addr, claim.user, table.maxDatagram)
 	s.run()
 }
 

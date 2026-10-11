@@ -242,9 +242,36 @@ source-address validation:
 - Each accepted connection goes to `webtransport.Server.ServeQUICConn`
   over an `http3.Server` whose handler is the relay's admission handler,
   prepared with `ConfigureHTTP3Server`, `IdleTimeout` left at zero (the
-  QUIC idle timeout governs), and `CheckOrigin` set to a function that
-  returns true, because Janus judges Origin itself before calling
-  `Upgrade` so the 403 and its counter are Janus's.
+  three connection rules below bound a connection's life, and HTTP/3
+  idleness would not: an open request stream stops its clock), and
+  `CheckOrigin` set to a function that returns true, because Janus judges
+  Origin itself before calling `Upgrade` so the 403 and its counter are
+  Janus's.
+
+The keep-alive keeps a quiet session's NAT binding open, and it also
+answers for a connection whose peer is alive, so QUIC's own idle timeout
+alone would let a connection live forever. Three fixed rules, with no
+directive of their own, bound every QUIC connection the relay accepts:
+
+- **Connection cap.** At most `max_sessions + 64` QUIC connections are
+  open at once, process-wide. The 64 is headroom for connections still
+  handshaking or between their handshake and their CONNECT. A connection
+  accepted over the cap is closed at once with the application error
+  `H3_EXCESSIVE_LOAD` (0x107, reason `connection cap reached`; a client
+  whose handshake is not yet confirmed sees QUIC's `APPLICATION_ERROR`
+  instead, per RFC 9000 §10.2.3), counted as `refused_connections`, and
+  logged at warn at most once a second with the running count.
+- **Session wait.** A connection that has no WebTransport session 10 s
+  after it is accepted is closed with `H3_NO_ERROR` (reason `no
+  webtransport session`) and counted as `sessionless_closes`. A CONNECT
+  still being admitted at that moment goes with it; the client retries.
+- **Session end.** When a connection's last session ends, for any reason
+  (the browser closing it, route removal, shutdown, a panic, a UDP
+  failure), the relay closes the connection with `H3_NO_ERROR` (reason
+  `webtransport session ended`) once the session's close capsule is out.
+  The library admits one session per connection without WebTransport flow
+  control, which the relay does not configure, so a connection carries at
+  most one session and never outlives it.
 
 ## TLS and trust
 
@@ -375,8 +402,12 @@ open; the target may be restarting. The idle timeout bounds the wait.
 
 **Idle and keep-alive.** The QUIC connection's max idle timeout is
 `idle_timeout`, with quic-go's keep-alive at a quarter of it, so a quiet
-but healthy session lives, and a dead peer closes after `idle_timeout`. A
-relay-level idle rule stricter than QUIC's is a non-goal.
+but healthy session lives and keeps its NAT binding, and a dead peer (one
+that stops acknowledging) closes after `idle_timeout`. `idle_timeout`
+governs dead peers; the connection rules under Transport govern live
+ones, so a connection with no session lives at most 10 s and a connection
+whose session ended is closed. A relay-level idle rule for a live session
+stricter than QUIC's is a non-goal.
 
 ## Session lifecycle
 
@@ -385,8 +416,10 @@ the route is removed by a committed reload, the process stops, or one of
 the session's goroutines panics. On every end the UDP socket is closed
 first, then the counters are folded into the route, then one info line is
 logged with route, duration, datagrams and bytes each way, and drops, and
-last the session is closed from its own goroutine (`CloseWithError`
-blocks until the session context ends, so no shared goroutine calls it).
+the session is closed from its own goroutine (`CloseWithError`
+blocks until the session context ends, so no shared goroutine calls it),
+and last the QUIC connection under it is closed (Transport, "Session
+end").
 
 Session close codes, sent as the WebTransport close-session capsule:
 
@@ -511,7 +544,11 @@ otherwise:
   "refused_path": 0,
   "refused_fronting": 0,
   "refused_method": 0,
-  "retries_sent": 0
+  "retries_sent": 0,
+  "connections": 1,
+  "max_connections": 320,
+  "refused_connections": 0,
+  "sessionless_closes": 0
 }
 ```
 
@@ -626,6 +663,14 @@ loopback:
   A valid ticket refused 503 at the route cap is not spent and admits once
   a slot frees; verify never spends, and of two consumes of one ticket
   only the first succeeds.
+- Connections: with the cap at max_sessions plus a shortened headroom, a
+  connection over it is closed (`H3_EXCESSIVE_LOAD`, or QUIC's
+  `APPLICATION_ERROR` before handshake confirmation) and counted, those
+  under it stay open, and the count falls as they close; with a shortened
+  session wait, a bare QUIC connection is closed `no webtransport
+  session` and counted while one carrying a session stays and relays;
+  whether the browser closes its session or the relay ends it, the relay
+  then closes the connection `webtransport session ended`.
 
 `./test.sh`, group `webtransport` after `access`: the root `Caddyfile`
 gains `servers { protocols h1 h2 }`, the global block, and a route site;

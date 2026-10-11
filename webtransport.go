@@ -38,6 +38,17 @@ import (
 // reply: Caddy's own HTTP/3 listener uses the same figure.
 const wtHandshakeRate = 1000
 
+// wtConnHeadroom is how many QUIC connections the relay holds beyond
+// max_sessions: room for connections still handshaking or between their
+// handshake and their CONNECT. A connection accepted over max_sessions +
+// wtConnHeadroom is closed at once with H3_EXCESSIVE_LOAD.
+const wtConnHeadroom = 64
+
+// wtConnSessionWait is how long an accepted QUIC connection may live
+// without a WebTransport session; at its end a sessionless connection is
+// closed, even one whose CONNECT is still being admitted.
+const wtConnSessionWait = 10 * time.Second
+
 // wtRelay is the pooled relay. Sockets bind once and live until the
 // address leaves the plan or the process ends; the table is replaced
 // atomically at each generation's commit.
@@ -60,13 +71,45 @@ type wtRelay struct {
 	sessions map[*wtSession]struct{}
 	sessionN atomic.Int64
 
+	// Accepted QUIC connections, keyed for the HTTP/3 ConnContext hook,
+	// and the bounds on them. headroom and sessionWait hold the fixed
+	// wtConnHeadroom and wtConnSessionWait; tests shorten them.
+	connMu      sync.Mutex
+	conns       map[*quic.Conn]*wtConn
+	connN       atomic.Int64
+	headroom    atomic.Int64
+	sessionWait atomic.Int64 // nanoseconds
+	refuseLog   *wtRateLimiter
+
 	// Process-wide counters the routes do not own.
-	refusedHost     atomic.Int64
-	refusedPath     atomic.Int64
-	refusedFronting atomic.Int64
-	refusedMethod   atomic.Int64
-	retriesSent     atomic.Int64
+	refusedHost       atomic.Int64
+	refusedPath       atomic.Int64
+	refusedFronting   atomic.Int64
+	refusedMethod     atomic.Int64
+	retriesSent       atomic.Int64
+	refusedConns      atomic.Int64
+	sessionlessCloses atomic.Int64
 }
+
+// wtConn is one accepted QUIC connection: how many sessions it carries,
+// whether one ever started, and the timer that closes it when none does.
+type wtConn struct {
+	qc       *quic.Conn
+	mu       sync.Mutex
+	sessions int
+	started  bool
+	timer    *time.Timer
+}
+
+// wtConnKey carries a request's *wtConn in its context.
+type wtConnKey struct{}
+
+// Application close reasons on the relay's QUIC connections.
+const (
+	wtConnClosedCap         = "connection cap reached"
+	wtConnClosedSessionless = "no webtransport session"
+	wtConnClosedEnded       = "webtransport session ended"
+)
 
 // wtSocket is one bound UDP socket with its QUIC transport and the
 // servers that speak HTTP/3 and WebTransport over it.
@@ -158,8 +201,14 @@ func newWtRelay(logger *zap.Logger) *wtRelay {
 		logger:   logger,
 		sockets:  map[netip.AddrPort]*wtSocket{},
 		sessions: map[*wtSession]struct{}{},
+		conns:    map[*quic.Conn]*wtConn{},
 		tickets:  newWtTicketSet(),
+		// One cap-refusal warning per second at most, carrying the running
+		// count: a connection flood is visible without flooding the log.
+		refuseLog: newWtRateLimiter(1),
 	}
+	r.headroom.Store(wtConnHeadroom)
+	r.sessionWait.Store(int64(wtConnSessionWait))
 	// An empty live table refuses everything until the first commit, and
 	// a handshake before then has no certificate to present.
 	r.live.Store(&wtTable{routes: map[string]*wtRoute{}, hosts: map[string]bool{}})
@@ -382,7 +431,21 @@ func (r *wtRelay) bind(addr netip.AddrPort, idleTimeout time.Duration) (*wtSocke
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var sock *wtSocket
-	h3 := &http3.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serveHTTP(sock, w, req) }), EnableDatagrams: true}
+	h3 := &http3.Server{
+		Handler:         http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serveHTTP(sock, w, req) }),
+		EnableDatagrams: true,
+		// Each request carries its connection's record, so admission can
+		// tie the session it starts to the QUIC connection under it.
+		ConnContext: func(ctx context.Context, qc *quic.Conn) context.Context {
+			r.connMu.Lock()
+			wc := r.conns[qc]
+			r.connMu.Unlock()
+			if wc != nil {
+				ctx = context.WithValue(ctx, wtConnKey{}, wc)
+			}
+			return ctx
+		},
+	}
 	webtransport.ConfigureHTTP3Server(h3)
 	wt := &webtransport.Server{
 		H3: h3,
@@ -396,13 +459,17 @@ func (r *wtRelay) bind(addr netip.AddrPort, idleTimeout time.Duration) (*wtSocke
 	return sock, nil
 }
 
-// accept hands each QUIC connection to the WebTransport server, which
-// demultiplexes HTTP/3 requests from WebTransport streams and datagrams.
+// accept admits each QUIC connection under the process-wide connection
+// cap and hands it to the WebTransport server, which demultiplexes HTTP/3
+// requests from WebTransport streams and datagrams.
 func (r *wtRelay) accept(ctx context.Context, sock *wtSocket) {
 	for {
 		conn, err := sock.ln.Accept(ctx)
 		if err != nil {
 			return
+		}
+		if r.admitConn(conn) == nil {
+			continue
 		}
 		go func() {
 			defer wtRecover(r.logger, "connection", nil)
@@ -410,6 +477,83 @@ func (r *wtRelay) accept(ctx context.Context, sock *wtSocket) {
 				r.logger.Debug("janus webtransport connection ended", zap.Error(err))
 			}
 		}()
+	}
+}
+
+// connLimit is the process-wide cap on concurrent QUIC connections:
+// the committed max_sessions plus the fixed headroom.
+func (r *wtRelay) connLimit() int64 {
+	return int64(r.live.Load().maxSessions) + r.headroom.Load()
+}
+
+// admitConn counts a newly accepted connection against connLimit. Over
+// the cap it closes the connection with H3_EXCESSIVE_LOAD and returns nil.
+// Otherwise it records the connection, arms the timer that closes it if
+// no session starts within the session wait, and releases both when the
+// connection ends, however it ends.
+func (r *wtRelay) admitConn(qc *quic.Conn) *wtConn {
+	limit := r.connLimit()
+	if r.connN.Add(1) > limit {
+		r.connN.Add(-1)
+		n := r.refusedConns.Add(1)
+		_ = qc.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeExcessiveLoad), wtConnClosedCap)
+		if !r.refuseLog.exceeded(time.Now()) {
+			r.logger.Warn("janus webtransport refused a connection: connection cap reached",
+				zap.String("remote", qc.RemoteAddr().String()), zap.Int64("max_connections", limit), zap.Int64("refused_connections", n))
+		}
+		return nil
+	}
+	wc := &wtConn{qc: qc}
+	r.connMu.Lock()
+	r.conns[qc] = wc
+	r.connMu.Unlock()
+	wc.timer = time.AfterFunc(time.Duration(r.sessionWait.Load()), func() {
+		if wc.closeIfSessionless() {
+			r.sessionlessCloses.Add(1)
+		}
+	})
+	context.AfterFunc(qc.Context(), func() {
+		wc.timer.Stop()
+		r.connMu.Lock()
+		delete(r.conns, qc)
+		r.connMu.Unlock()
+		r.connN.Add(-1)
+	})
+	return wc
+}
+
+// closeIfSessionless closes the connection when no session ever started
+// on it, and reports whether it did.
+func (wc *wtConn) closeIfSessionless() bool {
+	wc.mu.Lock()
+	started := wc.started
+	wc.mu.Unlock()
+	if started {
+		return false
+	}
+	_ = wc.qc.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), wtConnClosedSessionless)
+	return true
+}
+
+// sessionStarted records a session on the connection.
+func (wc *wtConn) sessionStarted() {
+	wc.mu.Lock()
+	wc.started = true
+	wc.sessions++
+	wc.mu.Unlock()
+	wc.timer.Stop()
+}
+
+// sessionEnded records a session's end; the end of the connection's last
+// session closes the connection, so a QUIC connection never outlives the
+// sessions it carried.
+func (wc *wtConn) sessionEnded() {
+	wc.mu.Lock()
+	wc.sessions--
+	last := wc.sessions <= 0
+	wc.mu.Unlock()
+	if last {
+		_ = wc.qc.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), wtConnClosedEnded)
 	}
 }
 

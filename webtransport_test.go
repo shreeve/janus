@@ -517,6 +517,178 @@ func TestWebtransportTicketGate(t *testing.T) {
 	}
 }
 
+// dialQUIC opens a bare QUIC connection to the relay, no session on it.
+func (f *wtFixture) dialQUIC(t *testing.T) *quic.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	qc, err := quic.DialAddr(ctx, f.listen.String(),
+		&tls.Config{RootCAs: f.pool, ServerName: wtTestHost, NextProtos: []string{http3.NextProtoH3}},
+		&quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true, DisablePathMTUDiscovery: true})
+	if err != nil {
+		t.Fatalf("quic dial: %v", err)
+	}
+	t.Cleanup(func() { _ = qc.CloseWithError(0, "") })
+	return qc
+}
+
+// dialOn opens a session over a QUIC connection the test owns, so the
+// test can watch that connection after the session ends.
+func (f *wtFixture) dialOn(t *testing.T, qc *quic.Conn, path string) *webtransport.Session {
+	t.Helper()
+	cc, err := (&webtransport.Transport{}).NewClientConn(qc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, sess, err := cc.Dial(ctx, "https://"+wtTestHost+path, sameOrigin())
+	if err != nil || res.StatusCode != http.StatusOK {
+		t.Fatalf("session dial: %v %v", res, err)
+	}
+	return sess
+}
+
+// wtClosedBy waits for the relay to close qc and returns its application
+// close.
+func wtClosedBy(t *testing.T, qc *quic.Conn) *quic.ApplicationError {
+	t.Helper()
+	select {
+	case <-qc.Context().Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("the relay did not close the connection")
+	}
+	var appErr *quic.ApplicationError
+	if !errors.As(context.Cause(qc.Context()), &appErr) || !appErr.Remote {
+		t.Fatalf("want a remote application close, got %v", context.Cause(qc.Context()))
+	}
+	return appErr
+}
+
+// TestWebtransportConnectionCap pins the process-wide QUIC connection cap
+// (max_sessions plus headroom): a connection over it is closed at once
+// with H3_EXCESSIVE_LOAD and counted, and the count falls as connections
+// end.
+func TestWebtransportConnectionCap(t *testing.T) {
+	f := newWtFixture(t, nil, func(tb *wtTable) { tb.maxSessions = 1 })
+	f.relay.headroom.Store(1)
+	if got := f.relay.connLimit(); got != 2 {
+		t.Fatalf("connLimit = %d, want max_sessions + headroom = 2", got)
+	}
+	a := f.dialQUIC(t)
+	b := f.dialQUIC(t)
+	wtWaitFor(t, "two connections counted", func() bool { return f.relay.connN.Load() == 2 })
+	// The relay closes the over-cap connection as soon as it is accepted,
+	// which can be before the client's dial returns.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	over, cause := quic.DialAddr(ctx, f.listen.String(),
+		&tls.Config{RootCAs: f.pool, ServerName: wtTestHost, NextProtos: []string{http3.NextProtoH3}},
+		&quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true})
+	if cause == nil {
+		select {
+		case <-over.Context().Done():
+		case <-time.After(3 * time.Second):
+			t.Fatal("the relay did not close the over-cap connection")
+		}
+		cause = context.Cause(over.Context())
+	}
+	// The relay closes before the handshake is confirmed, where QUIC
+	// (RFC 9000 §10.2.3) carries an application close as the transport
+	// error APPLICATION_ERROR without its code; after confirmation the
+	// client sees H3_EXCESSIVE_LOAD itself.
+	var appErr *quic.ApplicationError
+	var trErr *quic.TransportError
+	switch {
+	case errors.As(cause, &appErr):
+		if !appErr.Remote || appErr.ErrorCode != quic.ApplicationErrorCode(http3.ErrCodeExcessiveLoad) {
+			t.Fatalf("over-cap close = %v", cause)
+		}
+	case errors.As(cause, &trErr):
+		if !trErr.Remote || trErr.ErrorCode != quic.ApplicationErrorErrorCode {
+			t.Fatalf("over-cap close = %v", cause)
+		}
+	default:
+		t.Fatalf("over-cap close = %v", cause)
+	}
+	if n := f.relay.refusedConns.Load(); n != 1 {
+		t.Fatalf("refused_connections = %d", n)
+	}
+	if a.Context().Err() != nil || b.Context().Err() != nil {
+		t.Fatal("a connection under the cap was closed")
+	}
+	_ = a.CloseWithError(0, "")
+	_ = b.CloseWithError(0, "")
+	wtWaitFor(t, "connections released", func() bool { return f.relay.connN.Load() == 0 })
+	st := f.relay.status()
+	if st.MaxConnections != 2 || st.RefusedConns != 1 || st.Connections != 0 {
+		t.Fatalf("status: %+v", st)
+	}
+}
+
+// TestWebtransportSessionlessConnectionCloses pins the session wait: a
+// QUIC connection that starts no session is closed when the wait ends,
+// and one that starts a session is not.
+func TestWebtransportSessionlessConnectionCloses(t *testing.T) {
+	f := newWtFixture(t, nil, nil)
+	f.relay.sessionWait.Store(int64(200 * time.Millisecond))
+	idle := f.dialQUIC(t)
+	live := f.dialQUIC(t)
+	sess := f.dialOn(t, live, "/r")
+
+	appErr := wtClosedBy(t, idle)
+	if appErr.ErrorCode != quic.ApplicationErrorCode(http3.ErrCodeNoError) || appErr.ErrorMessage != wtConnClosedSessionless {
+		t.Fatalf("sessionless close = %#x %q", uint64(appErr.ErrorCode), appErr.ErrorMessage)
+	}
+	if n := f.relay.sessionlessCloses.Load(); n != 1 {
+		t.Fatalf("sessionless_closes = %d", n)
+	}
+	time.Sleep(300 * time.Millisecond) // past the wait for the live connection too
+	if live.Context().Err() != nil {
+		t.Fatal("a connection with a session was closed by the session wait")
+	}
+	if err := sess.SendDatagram([]byte("alive")); err != nil {
+		t.Fatal(err)
+	}
+	if got := recvWithin(t, sess, 2*time.Second); string(got) != "alive" {
+		t.Fatalf("echo %q", got)
+	}
+}
+
+// TestWebtransportSessionEndClosesConnection pins that a QUIC connection
+// never outlives its session: whether the browser or the relay ends the
+// session, the relay then closes the connection.
+func TestWebtransportSessionEndClosesConnection(t *testing.T) {
+	f := newWtFixture(t, nil, nil)
+
+	// The browser closes its session and leaves the connection open; the
+	// relay closes the connection.
+	qc := f.dialQUIC(t)
+	first := f.dialOn(t, qc, "/r")
+	wtWaitFor(t, "session counted", func() bool { return f.relay.sessionN.Load() == 1 })
+	_ = first.CloseWithError(0, "bye")
+	appErr := wtClosedBy(t, qc)
+	if appErr.ErrorCode != quic.ApplicationErrorCode(http3.ErrCodeNoError) || appErr.ErrorMessage != wtConnClosedEnded {
+		t.Fatalf("session-end close = %#x %q", uint64(appErr.ErrorCode), appErr.ErrorMessage)
+	}
+
+	// The relay ends the session (here: as a route removal would); the
+	// session closes and then the connection.
+	raw := f.dialQUIC(t)
+	sess := f.dialOn(t, raw, "/r")
+	wtWaitFor(t, "session counted", func() bool { return f.relay.sessionN.Load() == 1 })
+	f.relay.sessMu.Lock()
+	for s := range f.relay.sessions {
+		s.end(wtCloseNormal, "route removed")
+	}
+	f.relay.sessMu.Unlock()
+	wtWaitFor(t, "session closed", func() bool { return sess.Context().Err() != nil })
+	if appErr := wtClosedBy(t, raw); appErr.ErrorMessage != wtConnClosedEnded {
+		t.Fatalf("relay-ended session: connection close %q", appErr.ErrorMessage)
+	}
+	wtWaitFor(t, "connections released", func() bool { return f.relay.connN.Load() == 0 })
+}
+
 // TestWebtransportCapRefusalKeepsTicket pins that a ticket refused for
 // capacity (503) is not spent: it admits once a slot frees.
 func TestWebtransportCapRefusalKeepsTicket(t *testing.T) {
