@@ -476,12 +476,21 @@ func gatePrefixMatch(prefix, form string) bool {
 // canonical form exists for matching only; the path handed upstream is
 // never rewritten.
 //
-// Every fold only shortens a segment or removes an empty one, and a
-// normalized gate prefix is already canonical (it carries no //, ;, \,
-// or uppercase that matters), so a raw path under a prefix stays under
-// it after folding: canonical matching can only gate more paths, never
-// fewer.
+// A normalized gate prefix is already canonical (it carries no //, ;, \,
+// uppercase that matters, or segment ending in a dot), and no fold
+// changes a segment that equals or extends one of the prefix's: a raw
+// path under a prefix stays under it after folding, so canonical
+// matching can only gate more paths, never fewer.
 func authCanonicalPath(p string) string {
+	return authFoldPath(p, false)
+}
+
+// authFoldPath is authCanonicalPath, choosing how a segment of dots and
+// spaces holding .. (".. ", "...", " ..") reads once it folds away: dropped
+// as empty, or, with dotRuns, as .. itself (a backend that trims before
+// it resolves dot segments climbs a level there). authGatePaths matches
+// both readings.
+func authFoldPath(p string, dotRuns bool) string {
 	p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
 	var b strings.Builder
 	b.Grow(len(p) + 1)
@@ -494,7 +503,11 @@ func authCanonicalPath(p string) string {
 		// /admin./ and /admin%20/ as /admin/); the dot segments . and ..
 		// stay, for the resolved form.
 		if seg != "." && seg != ".." {
-			seg = strings.TrimRight(seg, ". ")
+			trimmed := strings.TrimRight(seg, ". ")
+			if trimmed == "" && dotRuns && strings.Contains(seg, "..") {
+				trimmed = ".."
+			}
+			seg = trimmed
 		}
 		if seg == "" {
 			trailing = true
@@ -514,7 +527,8 @@ func authCanonicalPath(p string) string {
 // canonical path; the canonical path with dot segments resolved (an
 // upstream that resolves /x/../one/ must not reach /one/ unguarded); and
 // the canonical form of one further percent-decoding (an upstream that
-// decodes twice must not turn %2F or %6F into a gated path). Each form's
+// decodes twice must not turn %2F or %6F into a gated path); and each of
+// those with a folded-away dot run read as .. (authFoldPath). Each form's
 // winning gate must authorize the request (matchGates), so an extra form
 // can only add a gate to satisfy, never replace one.
 func authGatePaths(p string) []string {
@@ -537,10 +551,16 @@ func authGatePaths(p string) []string {
 			add(cleaned)
 		}
 	}
-	addWithDots(authCanonicalPath(p))
+	addFolds := func(p string) {
+		addWithDots(authCanonicalPath(p))
+		if strings.Contains(p, "..") {
+			addWithDots(authFoldPath(p, true))
+		}
+	}
+	addFolds(p)
 	if strings.IndexByte(p, '%') >= 0 {
 		if decoded, err := url.PathUnescape(p); err == nil {
-			addWithDots(authCanonicalPath(decoded))
+			addFolds(decoded)
 		}
 	}
 	return forms
