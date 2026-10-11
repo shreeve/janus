@@ -58,7 +58,8 @@ drives most decisions; MedLabs is the application behind them.
                     mdns*.go + mdns_trust.go (LAN presence, status front door, /trust),
                     auth*.go, files_*.go, sendfile*.go, browse_*.go, access*.go,
                     exposure.go (wan refusals), tls_permission.go (on-demand TLS gate),
-                    control*.go (/1.0 listeners and surfaces)
+                    control*.go (/1.0 listeners and surfaces),
+                    webtransport*.go (UDP 443 datagram relay, tickets, admission)
 *.html              embedded pages: mdns.html (status dashboard), trust.html,
                     trust_safari.html, auth.html — self-contained, no external resources
 cmd/janus/          the binary: main.go (verb table), service_*.go (autostart/start/stop/
@@ -96,8 +97,9 @@ Capabilities, in landing order (the order never changes in docs or
 | 7 | sendfile | always on, no config | [capability-sendfile](docs/20260801-020600-capability-sendfile.md) |
 | 8 | browse | site (cascades) | [capability-browse](docs/20260801-042700-capability-browse.md) |
 | 9 | access log | per-site `log` | [capability-access-log](docs/20260801-081600-capability-access-log.md) |
+| 10 | webtransport | process-wide listener, site routes (no cascade) | [capability-webtransport](docs/20260928-200621-capability-webtransport.md) |
 
-Exposure modes (`localhost` | `lan` | `wan`) are not a tenth capability;
+Exposure modes (`localhost` | `lan` | `wan`) are not a capability;
 they are the binary's job (where the service edge listens, and the pf
 anchor or exact binds that hold it there) plus one module rule: in
 `wan`, every janus site refuses `<name>.local`, `<name>.localhost`,
@@ -113,7 +115,7 @@ certificate for them, and mdns announces nothing.
   **foreground** shell: its fixture processes die when the parent
   detaches, and this has cost real debugging time. `test.sh` groups run
   ping, control, apps, data, heartbeat, tls, hub, tenant, mdns, auth,
-  files, sendfile, browse, access; the cases are the sourced files in
+  files, sendfile, browse, access, webtransport; the cases are the sourced files in
   `tests/acceptance/`.
 - **Before tagging, run `go test -race ./...` locally.** The release
   workflow runs the full check (unit, vet, race on two platforms, then
@@ -234,10 +236,10 @@ certificate for them, and mdns announces nothing.
 
 ## Environment
 
-- Go (current stable; `go.mod` says 1.25.1, CI uses
-  `go-version-file`). `make janus` builds `bin/janus` (gitignored) and
-  asserts the module is linked. Caddy is pinned at 2.11.4 with explicit
-  security overrides in `go.mod`.
+- Go: `go.mod` requires 1.26.0 and pins `toolchain go1.27.2`, so local
+  builds and CI (`go-version-file`) compile with that release. `make
+  janus` builds `bin/janus` (gitignored) and asserts the module is linked.
+  Caddy is pinned at 2.11.7; `govulncheck` gates every pull request.
 - Acceptance needs `bun` and the sibling `../rip` checkout
   (`Data/Code/rip`) as the real tenant, `oha` only for `bench/`.
 - Sibling repositories referenced from here: `rip` (Rip Sites is the
@@ -251,7 +253,7 @@ certificate for them, and mdns announces nothing.
 
 ## State of the tree
 
-Verified 2026-09-21:
+Verified 2026-09-29:
 
 - **Release.** `v1.19.0` (2026-09-29) is the latest tag and sits on
   main's head. `go test ./...` passes on this machine (module,
