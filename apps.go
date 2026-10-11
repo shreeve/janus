@@ -157,6 +157,29 @@ func errSiteConflict(format string, args ...any) *apiError {
 	return &apiError{Status: http.StatusConflict, Msg: fmt.Sprintf(format, args...)}
 }
 
+// upstreamConflictLocked reports a socket path in ups that another app
+// already publishes: per-socket health and in-flight state is keyed by
+// path, and two apps selecting one socket under separate selection locks
+// would overshoot its published concurrency. Callers hold r.mu.
+func (r *appRegistry) upstreamConflictLocked(self string, ups []Upstream) *apiError {
+	for _, u := range ups {
+		for id, rec := range r.apps {
+			if id == self {
+				continue
+			}
+			for _, held := range rec.Upstreams {
+				if held.Path == u.Path {
+					return &apiError{
+						Status: http.StatusConflict,
+						Msg:    fmt.Sprintf("upstream %q is already published by app %q", u.Path, id),
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // --- validation ------------------------------------------------------------
 
 var (
@@ -457,6 +480,10 @@ func (r *appRegistry) createWithLease(name string, hosts []string, site *SitePol
 			r.mu.Unlock()
 			return AppRecord{}, errSiteConflict("host %q conflicts with site pattern suffix %q held by app %q", h, heldSuffix, holder)
 		}
+	}
+	if err := r.upstreamConflictLocked("", upstreams); err != nil {
+		r.mu.Unlock()
+		return AppRecord{}, err
 	}
 	if suffix != "" {
 		if r.browse != nil {
@@ -803,6 +830,10 @@ func (r *appRegistry) setUpstreams(id string, ups []Upstream) (AppRecord, error)
 	if rec.Files != nil && rec.Files.Shell == "" && len(ups) != 0 {
 		r.mu.Unlock()
 		return AppRecord{}, errBadRequest("terminal browse-only registration cannot publish upstreams")
+	}
+	if err := r.upstreamConflictLocked(id, ups); err != nil {
+		r.mu.Unlock()
+		return AppRecord{}, err
 	}
 	rec.Upstreams = append([]Upstream{}, ups...)
 	out := rec.clone()

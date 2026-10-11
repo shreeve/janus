@@ -556,3 +556,39 @@ func TestControlJSONRejectsDuplicateKeysBeforeMutation(t *testing.T) {
 		}
 	}
 }
+
+// TestUpstreamPathBelongsToOneApp pins the cross-app socket rule: a path one
+// app publishes is refused to every other app (409), on PUT and on POST,
+// while the owner may republish it and a released path is free again.
+func TestUpstreamPathBelongsToOneApp(t *testing.T) {
+	r := newAppRegistry()
+	shop, err := r.create("shop", []string{"shop.example.com"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rival, err := r.create("rival", []string{"rival.example.com"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := []Upstream{{Path: "/run/shop/w1.sock"}}
+	if _, err := r.setUpstreams(shop.ID, sock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.setUpstreams(shop.ID, sock); err != nil {
+		t.Fatalf("owner republish: %v", err)
+	}
+	_, err = r.setUpstreams(rival.ID, sock)
+	if ae, ok := err.(*apiError); !ok || ae.Status != 409 || !strings.Contains(ae.Msg, shop.ID) {
+		t.Fatalf("rival PUT: want 409 naming %s, got %v", shop.ID, err)
+	}
+	_, err = r.createWithLease("third", []string{"third.example.com"}, nil, nil, "", sock, "heartbeat")
+	if ae, ok := err.(*apiError); !ok || ae.Status != 409 {
+		t.Fatalf("POST with a held path: want 409, got %v", err)
+	}
+	if _, err := r.setUpstreams(shop.ID, []Upstream{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.setUpstreams(rival.ID, sock); err != nil {
+		t.Fatalf("released path: %v", err)
+	}
+}

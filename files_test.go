@@ -667,10 +667,13 @@ func TestSiteClaimsReleaseOnHeartbeatReapAndClonesAreDeep(t *testing.T) {
 func TestHandlerStripsAndInjectsTrustedRipSite(t *testing.T) {
 	dp, reg := newTestDataPlane(t)
 	seen := make(chan string, 2)
-	sock := startUnixHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	worker := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen <- r.Header.Get(ripSiteHeader)
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})
+	// One socket belongs to one app, so each registration gets its own.
+	sock := startUnixHTTP(t, worker)
+	exactSock := startUnixHTTP(t, worker)
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "ola"), 0o755); err != nil {
 		t.Fatal(err)
@@ -689,7 +692,7 @@ func TestHandlerStripsAndInjectsTrustedRipSite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reg.setUpstreams(exact.ID, []Upstream{{Path: sock}}); err != nil {
+	if _, err := reg.setUpstreams(exact.ID, []Upstream{{Path: exactSock}}); err != nil {
 		t.Fatal(err)
 	}
 	handler := &Handler{dp: dp}

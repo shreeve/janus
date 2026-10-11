@@ -16,6 +16,13 @@
 # api.janus.localhost is hub off.
 
 HUB_SOCK="$TEST_RUN_DIR/run/hub-tenant.sock"
+# Janus gives each socket path to one app, so every app the fixture serves
+# has its own path; one hubtenant process listens on all of them.
+HUB_ISO_SOCK="$TEST_RUN_DIR/run/hub-iso.sock"
+HUB_CAP_SOCK="$TEST_RUN_DIR/run/hub-cap.sock"
+HUB_DEL_SOCK="$TEST_RUN_DIR/run/hub-del.sock"
+HUB_RACE_SOCK="$TEST_RUN_DIR/run/hub-race.sock"
+HUB_ALSO_SOCKS="$HUB_ISO_SOCK,$HUB_CAP_SOCK,$HUB_DEL_SOCK,$HUB_RACE_SOCK"
 HUB_BRIDGE_LOG="$TEST_RUN_DIR/hub-bridge.jsonl"
 HUB_PLAYBOOK="$TEST_RUN_DIR/hub-playbook"
 HUB_PIDS_FILE="$TEST_RUN_DIR/hub-pids"
@@ -37,6 +44,7 @@ stop_hub_fixtures() {
 	fi
 	rm -f "$HUB_PIDS_FILE" "$HUB_BRIDGE_LOG" "$HUB_PLAYBOOK" \
 		"$HUB_APP_FILE" "$HUB_ISO_FILE" "$HUB_CAP_FILE" "$HUB_DIRECT_FILE" "$HUB_SOCK" \
+		"$HUB_ISO_SOCK" "$HUB_CAP_SOCK" "$HUB_DEL_SOCK" "$HUB_RACE_SOCK" \
 		"$TEST_RUN_DIR"/hub-flag-* "$TEST_RUN_DIR"/hub-out-* "$TEST_RUN_DIR"/hub-cap-codes
 }
 
@@ -131,7 +139,7 @@ start_hub_tenant() {
 	shift
 	rm -f "$sock"
 	: >"$HUB_BRIDGE_LOG"
-	"$TESTKIT" hubtenant --sock "$sock" --hits "$HUB_BRIDGE_LOG" --playbook "$HUB_PLAYBOOK" "$@" \
+	"$TESTKIT" hubtenant --sock "$sock" --also "$HUB_ALSO_SOCKS" --hits "$HUB_BRIDGE_LOG" --playbook "$HUB_PLAYBOOK" "$@" \
 		>>"$TEST_RUN_DIR/fixtures.log" 2>&1 &
 	printf '%s\n' "$!" >>"$HUB_PIDS_FILE"
 	local i
@@ -171,11 +179,16 @@ case_hub_setup() {
 	printf '%s' "$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >"$HUB_DIRECT_FILE"
 
 	start_hub_tenant "$HUB_SOCK" "$(hub_app_id)" "$(hub_iso_id)" "$(hub_cap_id)" "$(hub_direct_id)" || return 1
-	local id
-	for id in "$(hub_app_id)" "$(hub_iso_id)" "$(hub_cap_id)"; do
-		capi PUT "/1.0/apps/$id/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_SOCK\"}]}"
-		eq "$REPLY_CODE" "200"
-	done
+	capi PUT "/1.0/apps/$(hub_app_id)/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_SOCK\"}]}"
+	eq "$REPLY_CODE" "200"
+	capi PUT "/1.0/apps/$(hub_cap_id)/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_CAP_SOCK\"}]}"
+	eq "$REPLY_CODE" "200"
+	# A socket path belongs to one app: another app publishing it is refused.
+	capi PUT "/1.0/apps/$(hub_iso_id)/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_SOCK\"}]}"
+	eq "$REPLY_CODE" "409"
+	json_has "$REPLY_BODY" "already published by app"
+	capi PUT "/1.0/apps/$(hub_iso_id)/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_ISO_SOCK\"}]}"
+	eq "$REPLY_CODE" "200"
 
 	# bridge surfaces on GET; /1.0/hub counters answer.
 	capi GET "/1.0/apps/$(hub_app_id)"
@@ -605,7 +618,7 @@ case_hub_teardown_on_delete() {
 	eq "$REPLY_CODE" "201"
 	local del_id
 	del_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
-	capi PUT "/1.0/apps/$del_id/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_SOCK\"}]}"
+	capi PUT "/1.0/apps/$del_id/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_DEL_SOCK\"}]}"
 	rm -f "$TEST_RUN_DIR"/hub-flag-*
 	hub_ws_bg "$TEST_RUN_DIR/hub-out-del" hubdel2.janus.localhost https://hubdel2.janus.localhost - \
 		'send={"+":["/dying"]}' touch="$TEST_RUN_DIR/hub-flag-del" \
@@ -717,7 +730,7 @@ case_hub_open_teardown_race() {
 	eq "$REPLY_CODE" "201"
 	local race_id
 	race_id="$(printf '%s' "$REPLY_BODY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
-	capi PUT "/1.0/apps/$race_id/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_SOCK\"}]}"
+	capi PUT "/1.0/apps/$race_id/upstreams" "{\"upstreams\":[{\"path\":\"$HUB_RACE_SOCK\"}]}"
 	hub_playbook '{"open":{"status":204,"delay_ms":1500}}'
 	local code_file="$TEST_RUN_DIR/hub-flag-racecode"
 	rm -f "$code_file"
