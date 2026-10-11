@@ -6,8 +6,13 @@ package janus
 // logged.
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/quic-go/quic-go/http3"
 
 	"go.uber.org/zap"
 )
@@ -56,15 +61,18 @@ func (r *wtRelay) serveHTTP(sock *wtSocket, w http.ResponseWriter, req *http.Req
 		r.refuse(w, http.StatusForbidden, "origin not allowed", host, path, origin)
 		return
 	}
-	user := ""
+	// A ticket is verified here and spent only after every later check
+	// passes, so a refusal for capacity, the target, or the client's
+	// SETTINGS leaves it good for a retry inside its lifetime.
+	var claim wtTicketClaim
 	if cfg.gated {
-		u, ok := r.tickets.redeem(req.URL.Query().Get(wtTicketQuery), wtRouteKey(host, path))
+		c, ok := r.tickets.verify(req.URL.Query().Get(wtTicketQuery), wtRouteKey(host, path))
 		if !ok {
 			route.counters.refusedTicket.Add(1)
 			r.refuse(w, http.StatusForbidden, "ticket missing, invalid, expired, or already used", host, path, "")
 			return
 		}
-		user = u
+		claim = c
 	}
 	if !r.reserve(route, cfg.maxSessions, table.maxSessions) {
 		route.counters.refusedCap.Add(1)
@@ -80,10 +88,26 @@ func (r *wtRelay) serveHTTP(sock *wtSocket, w http.ResponseWriter, req *http.Req
 		r.refuse(w, http.StatusServiceUnavailable, "target socket: "+err.Error(), host, path, "")
 		return
 	}
+	if err := wtAwaitSettings(w, req); err != nil {
+		_ = udp.Close()
+		r.release(route)
+		route.counters.refusedSettings.Add(1)
+		r.refuse(w, http.StatusBadRequest, "webtransport upgrade: "+err.Error(), host, path, "")
+		return
+	}
+	if cfg.gated && !r.tickets.consume(claim) {
+		// A concurrent CONNECT spent the same ticket first.
+		_ = udp.Close()
+		r.release(route)
+		route.counters.refusedTicket.Add(1)
+		r.refuse(w, http.StatusForbidden, "ticket missing, invalid, expired, or already used", host, path, "")
+		return
+	}
 	sess, err := sock.wt.Upgrade(w, req)
 	if err != nil {
-		// Upgrade has written nothing on this path: the client's SETTINGS
-		// were missing datagram support or did not arrive in time.
+		// Upgrade has written nothing on this path. Its SETTINGS checks
+		// already passed above, so what is left is the connection closing
+		// under it; the spent ticket stays spent.
 		_ = udp.Close()
 		r.release(route)
 		route.counters.refusedSettings.Add(1)
@@ -91,8 +115,36 @@ func (r *wtRelay) serveHTTP(sock *wtSocket, w http.ResponseWriter, req *http.Req
 		return
 	}
 	route.counters.accepted.Add(1)
-	s := newWtSession(r, route, sess, udp, sock.addr, user, table.maxDatagram)
+	s := newWtSession(r, route, sess, udp, sock.addr, claim.user, table.maxDatagram)
 	s.run()
+}
+
+// wtSettingsWait bounds the wait for the client's HTTP/3 SETTINGS before
+// a session is admitted: the library's reordering timeout, which bounds
+// the same wait inside Upgrade.
+const wtSettingsWait = 5 * time.Second
+
+// wtAwaitSettings waits for the client's SETTINGS and requires datagram
+// support, the checks Upgrade makes before it writes 200, so they run
+// before the ticket is spent rather than after.
+func wtAwaitSettings(w http.ResponseWriter, req *http.Request) error {
+	s, ok := w.(http3.Settingser)
+	if !ok {
+		return errors.New("not an HTTP/3 request")
+	}
+	t := time.NewTimer(wtSettingsWait)
+	defer t.Stop()
+	select {
+	case <-s.ReceivedSettings():
+	case <-req.Context().Done():
+		return context.Cause(req.Context())
+	case <-t.C:
+		return errors.New("the client's SETTINGS did not arrive in time")
+	}
+	if set := s.Settings(); set == nil || !set.EnableDatagrams {
+		return errors.New("the client's SETTINGS lack datagram support")
+	}
+	return nil
 }
 
 // reserve takes a session slot on the route and in the process, or

@@ -75,39 +75,67 @@ func (s *wtTicketSet) mint(route, user string) string {
 	return base64.RawURLEncoding.EncodeToString(append(body, mac...))
 }
 
-// redeem checks a ticket for the route and marks its nonce used. It
-// returns the user it was minted for.
-func (s *wtTicketSet) redeem(ticket, route string) (user string, ok bool) {
+// wtTicketClaim is a ticket that verified for a route and is not yet
+// spent: what consume marks used.
+type wtTicketClaim struct {
+	route string
+	user  string
+	nonce [wtTicketNonceLen]byte
+	exp   int64
+}
+
+// verify checks a ticket for the route — signature, shape, lifetime, and
+// that its nonce is unspent — without spending it. Admission verifies
+// first and consumes only once every other check has passed, so a refusal
+// for capacity or a target failure leaves the ticket good for a retry.
+func (s *wtTicketSet) verify(ticket, route string) (wtTicketClaim, bool) {
 	raw, err := base64.RawURLEncoding.DecodeString(ticket)
 	if err != nil || len(raw) < wtTicketNonceLen+8+1+sha256.Size {
-		return "", false
+		return wtTicketClaim{}, false
 	}
 	body, mac := raw[:len(raw)-sha256.Size], raw[len(raw)-sha256.Size:]
 	if !hmac.Equal(mac, s.sign(route, body)) {
-		return "", false
+		return wtTicketClaim{}, false
 	}
 	n := int(body[wtTicketNonceLen+8])
 	if len(body) != wtTicketNonceLen+8+1+n {
-		return "", false
+		return wtTicketClaim{}, false
 	}
-	exp := int64(binary.BigEndian.Uint64(body[wtTicketNonceLen : wtTicketNonceLen+8]))
+	c := wtTicketClaim{route: route, user: string(body[wtTicketNonceLen+8+1:])}
+	c.exp = int64(binary.BigEndian.Uint64(body[wtTicketNonceLen : wtTicketNonceLen+8]))
+	copy(c.nonce[:], body[:wtTicketNonceLen])
 	now := s.now()
-	if now.Unix() >= exp {
-		return "", false
+	if now.Unix() >= c.exp {
+		return wtTicketClaim{}, false
 	}
-	var nonce [wtTicketNonceLen]byte
-	copy(nonce[:], body[:wtTicketNonceLen])
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeLocked(now)
-	if _, seen := s.used[route][nonce]; seen {
-		return "", false
+	if _, seen := s.used[route][c.nonce]; seen {
+		return wtTicketClaim{}, false
 	}
-	if s.used[route] == nil {
-		s.used[route] = map[[wtTicketNonceLen]byte]int64{}
+	return c, true
+}
+
+// consume spends a verified claim. It fails when the claim expired since
+// verify or a concurrent admission spent the same ticket first: a ticket
+// admits exactly one session.
+func (s *wtTicketSet) consume(c wtTicketClaim) bool {
+	now := s.now()
+	if now.Unix() >= c.exp {
+		return false
 	}
-	s.used[route][nonce] = exp
-	return string(body[wtTicketNonceLen+8+1:]), true
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	if _, seen := s.used[c.route][c.nonce]; seen {
+		return false
+	}
+	if s.used[c.route] == nil {
+		s.used[c.route] = map[[wtTicketNonceLen]byte]int64{}
+	}
+	s.used[c.route][c.nonce] = c.exp
+	return true
 }
 
 func (s *wtTicketSet) sign(route string, body []byte) []byte {

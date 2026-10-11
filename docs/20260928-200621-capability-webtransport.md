@@ -309,17 +309,22 @@ match wins:
 | 4 | `wan` mode and Host is a local family name | 421 |
 | 5 | Path is not a route of that site | 404 |
 | 6 | Origin missing or not allowed by the route's policy | 403, logged with Origin and route |
-| 6a | The site is gated and the ticket is missing, malformed, expired, already used, or for another route | 403, logged with the reason and never the ticket; the path is logged without its query everywhere |
+| 6a | The site is gated and the ticket is missing, malformed, expired, already used, or for another route | 403, logged with the reason and never the ticket; the path is logged without its query everywhere. The ticket is verified here and not yet spent |
 | 7 | Route or process session count at its cap | 503 with `Retry-After: 1`, logged. The slot is reserved atomically here, so two racing CONNECTs cannot both pass the cap; a later refusal releases it |
 | 8 | Connected UDP socket toward the target cannot be created | 503 with `Retry-After: 5`, logged with the error |
-| 9 | `Upgrade` fails: client SETTINGS lack datagram support, or do not arrive within the library's 5 s reordering timeout | 400 written by Janus; the socket and slot are released |
-| 10 | Otherwise | `Upgrade` has written 200; the session begins |
+| 9 | Client SETTINGS lack datagram support, or do not arrive within 5 s (the library's reordering timeout) | 400 written by Janus; the socket and slot are released |
+| 9a | The site is gated and the ticket was spent since 6a (a concurrent CONNECT presented it first) or expired | 403, counted as `refused_ticket`; the socket and slot are released. Otherwise the ticket is spent here |
+| 10 | `Upgrade` fails (the connection closed under it) | 400 written by Janus; the socket and slot are released |
+| 11 | Otherwise | `Upgrade` has written 200; the session begins |
 
-The socket is created before `Upgrade` because `Upgrade` writes and
-flushes the 200 the moment the client's SETTINGS arrive; there is no hook
-between them. Every refusal is counted per route and logged at warn with
-the reason, so a refused client is visible to the operator and never only
-to itself.
+A ticket is spent only once every check that can refuse has passed, so a
+503 for capacity or the target, or a 400 for the client's SETTINGS, leaves
+it good for a retry inside its 60 s lifetime. The socket is created before
+`Upgrade` because `Upgrade` writes and flushes the 200 the moment the
+client's SETTINGS arrive; there is no hook between them, so Janus waits for
+those SETTINGS itself (row 9) before spending the ticket. Every refusal is
+counted per route and logged at warn with the reason, so a refused client
+is visible to the operator and never only to itself.
 
 ## Datagram semantics
 
@@ -618,6 +623,9 @@ loopback:
   expired one, one for another route, and one presented twice is refused
   403 and counted (`refused_ticket`); a valid one admits and the session
   log line names the user; no log line contains the ticket or the query.
+  A valid ticket refused 503 at the route cap is not spent and admits once
+  a slot frees; verify never spends, and of two consumes of one ticket
+  only the first succeeds.
 
 `./test.sh`, group `webtransport` after `access`: the root `Caddyfile`
 gains `servers { protocols h1 h2 }`, the global block, and a route site;

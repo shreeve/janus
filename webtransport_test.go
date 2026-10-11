@@ -517,6 +517,65 @@ func TestWebtransportTicketGate(t *testing.T) {
 	}
 }
 
+// TestWebtransportCapRefusalKeepsTicket pins that a ticket refused for
+// capacity (503) is not spent: it admits once a slot frees.
+func TestWebtransportCapRefusalKeepsTicket(t *testing.T) {
+	f := newWtFixture(t, func(rc *wtRouteConfig) { rc.gated = true; rc.maxSessions = 1 }, nil)
+	key := wtRouteKey(wtTestHost, "/r")
+	res, first, err := f.dial(t, "/r?t="+f.relay.tickets.mint(key, "steve"), sameOrigin())
+	if err != nil || res.StatusCode != http.StatusOK {
+		t.Fatalf("first session: %v %v", res, err)
+	}
+	second := f.relay.tickets.mint(key, "steve")
+	if res, _, err := f.dial(t, "/r?t="+second, sameOrigin()); err == nil || res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("at cap: want 503, got %v %v", res, err)
+	}
+	if n := f.route().counters.refusedTicket.Load(); n != 0 {
+		t.Fatalf("refused_ticket = %d at cap, want 0", n)
+	}
+	_ = first.CloseWithError(0, "")
+	wtWaitFor(t, "slot released", func() bool { return f.route().sessions.Load() == 0 })
+	res, _, err = f.dial(t, "/r?t="+second, sameOrigin())
+	if err != nil || res.StatusCode != http.StatusOK {
+		t.Fatalf("ticket refused for capacity must still admit: %v %v", res, err)
+	}
+	if res, _, err := f.dial(t, "/r?t="+second, sameOrigin()); err == nil || res.StatusCode != http.StatusForbidden {
+		t.Fatalf("spent ticket: want 403, got %v %v", res, err)
+	}
+}
+
+// TestWebtransportTicketVerifyDoesNotSpend pins the split: verify leaves a
+// ticket unspent, consume spends it once, and a second consume of the
+// same claim (a racing CONNECT) fails.
+func TestWebtransportTicketVerifyDoesNotSpend(t *testing.T) {
+	set := newWtTicketSet()
+	tk := set.mint("h/p", "u")
+	c1, ok1 := set.verify(tk, "h/p")
+	c2, ok2 := set.verify(tk, "h/p")
+	if !ok1 || !ok2 || c1.user != "u" {
+		t.Fatal("verify must not spend")
+	}
+	if !set.consume(c1) {
+		t.Fatal("first consume must succeed")
+	}
+	if set.consume(c2) {
+		t.Fatal("a racing consume of the same ticket must fail")
+	}
+	if _, ok := set.verify(tk, "h/p"); ok {
+		t.Fatal("a spent ticket must not verify")
+	}
+}
+
+// redeem verifies and spends a ticket in one step, as admission does
+// across its checks, returning the user it was minted for.
+func (s *wtTicketSet) redeem(ticket, route string) (user string, ok bool) {
+	c, ok := s.verify(ticket, route)
+	if !ok || !s.consume(c) {
+		return "", false
+	}
+	return c.user, true
+}
+
 func TestWebtransportTicketExpiry(t *testing.T) {
 	set := newWtTicketSet()
 	now := time.Unix(1_800_000_000, 0)
