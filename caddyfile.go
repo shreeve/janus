@@ -45,6 +45,8 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		}
 		for d.NextBlock(0) {
 			switch d.Val() {
+			case "vista":
+				return d.Err("vista routes are site-scoped; declare `vista <path> unix/<socket>` in an exact-host site's janus block")
 			case "control":
 				c, err := parseControl(d)
 				if err != nil {

@@ -317,6 +317,8 @@ func (a *App) controlMuxAt(base string) *http.ServeMux {
 
 	mux.HandleFunc("GET "+base+"/1.0/webtransport", a.handleWebtransportState)
 	mux.HandleFunc("GET "+base+"/1.0/webtransport/{$}", a.handleWebtransportState)
+	mux.HandleFunc("GET "+base+"/1.0/vista", a.handleVistaState)
+	mux.HandleFunc("GET "+base+"/1.0/vista/{$}", a.handleVistaState)
 
 	// Auth wall state, always on: {"enabled": false} when no site's
 	// effective auth is on; counters, the session list, and
