@@ -175,6 +175,15 @@ func (c *hubConn) enqueueAndClose(data []byte, code int, reason string) bool {
 	return true
 }
 
+// closing reports whether the connection accepts no further outbound
+// frames: a close began, a slow-consumer overflow tripped, or a kick's
+// final frame is queued. A closing connection executes no client frame.
+func (c *hubConn) closing() bool {
+	c.qmu.Lock()
+	defer c.qmu.Unlock()
+	return c.qclosed
+}
+
 // writeLoop is the connection's one writer, draining the queue in enqueue
 // order (per-connection FIFO delivery).
 func (c *hubConn) writeLoop() {

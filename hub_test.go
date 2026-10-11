@@ -579,6 +579,123 @@ func TestHubTrustedKick(t *testing.T) {
 	})
 }
 
+// TestHubClosedConnExecutesNothing pins that a frame the reader still holds
+// after its connection closed has no effect: no membership, no phantom
+// channel, no delivery.
+func TestHubClosedConnExecutesNothing(t *testing.T) {
+	hub := newTestAppHub()
+	a, _ := dialHubConn(t, hub, hubDefaultMaxChannels)
+	b, bws := dialHubConn(t, hub, hubDefaultMaxChannels)
+	mustExec(t, hub, hubPlaneClient, b, `{"+":["/room"]}`)
+
+	a.closeWith(hubCloseTryLater, "slow consumer")
+	out, verr := clientExec(t, hub, a, `{"+":["/leak"]}`)
+	if verr != nil || out.deliveries != 0 {
+		t.Fatalf("closed conn join: out=%+v verr=%v", out, verr)
+	}
+	out, verr = clientExec(t, hub, a, `{"@":["/room"],"chat":{"x":1}}`)
+	if verr != nil || out.deliveries != 0 {
+		t.Fatalf("closed conn publish: out=%+v verr=%v", out, verr)
+	}
+	expectNoWS(t, bws)
+	checkMirror(t, hub)
+	hub.mu.Lock()
+	_, leak := hub.channels["/leak"]
+	_, aLive := hub.conns[a.id]
+	chans := len(a.channels)
+	hub.mu.Unlock()
+	if leak || aLive || chans != 0 {
+		t.Fatalf("closed conn left state: leak=%v live=%v channels=%d", leak, aLive, chans)
+	}
+}
+
+// TestHubKickedConnCannotPublish pins that a kicked connection, whose
+// final frame is queued but whose socket has not closed yet, executes
+// nothing: it neither publishes nor joins.
+func TestHubKickedConnCannotPublish(t *testing.T) {
+	hub := newTestAppHub()
+	b, bws := dialHubConn(t, hub, hubDefaultMaxChannels)
+	mustExec(t, hub, hubPlaneClient, b, `{"+":["/room"]}`)
+	// No writer: the kick's final frame and close stay queued, so the
+	// connection is registered and closing for the whole test.
+	a := newHubConn("kkkkkkkkkkkkkkkk", hub, "h", "", http.Header{}, 8, hubDefaultMaxFrame)
+	srvWS, _ := wsPair(t)
+	a.ws = srvWS
+	if !hub.registerConn(a) {
+		t.Fatal("registerConn refused")
+	}
+	mustExec(t, hub, hubPlaneClient, a, `{"+":["/room"]}`)
+	mustExec(t, hub, hubPlanePublish, nil, fmt.Sprintf(`{"@":[%q],"*":"kicked"}`, a.id))
+
+	out, verr := clientExec(t, hub, a, `{"@":["/room"],"chat!":{"x":1}}`)
+	if verr != nil || out.deliveries != 0 {
+		t.Fatalf("kicked conn publish: out=%+v verr=%v", out, verr)
+	}
+	expectNoWS(t, bws)
+	if _, verr := clientExec(t, hub, a, `{"+":["/leak"]}`); verr != nil {
+		t.Fatalf("kicked conn join: %v", verr)
+	}
+	if hubChannelCount(hub, "/leak") != 0 {
+		t.Fatal("kicked conn created a channel")
+	}
+	checkMirror(t, hub)
+}
+
+// TestHubReadLoopStopsExecutingOnClose drives the real reader: frames that
+// arrive while the connection is closing are read and discarded, never
+// counted, executed, or forwarded.
+func TestHubReadLoopStopsExecutingOnClose(t *testing.T) {
+	hub := newTestAppHub()
+	c := newHubConn("llllllllllllllll", hub, "h", "", http.Header{}, 8, hubDefaultMaxFrame)
+	srvWS, clientWS := wsPair(t)
+	c.ws = srvWS
+	if !hub.registerConn(c) {
+		t.Fatal("registerConn refused")
+	}
+	mustExec(t, hub, hubPlanePublish, nil, fmt.Sprintf(`{"@":[%q],"*":"kicked"}`, c.id))
+	h := &Handler{app: &App{hubLog: zap.NewNop()}}
+	done := make(chan struct{})
+	go func() {
+		h.hubReadLoop(c)
+		close(done)
+	}()
+	for _, f := range []string{`{"+":["/leak"]}`, `{"@":["/leak"],"chat!":{}}`} {
+		if err := clientWS.WriteMessage(websocket.TextMessage, []byte(f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A ping round trip proves the reader consumed both frames first.
+	pong := make(chan struct{}, 1)
+	clientWS.SetPongHandler(func(string) error { pong <- struct{}{}; return nil })
+	go func() {
+		for {
+			if _, _, err := clientWS.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	if err := clientWS.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-pong:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader stopped answering control frames while closing")
+	}
+	if n := hub.ctr.framesIn.Load(); n != 0 {
+		t.Fatalf("frames_in: want 0 while closing, got %d", n)
+	}
+	if hubChannelCount(hub, "/leak") != 0 {
+		t.Fatal("closing conn created a channel")
+	}
+	c.closeWith(hubCloseNormal, "kicked")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader did not end after close")
+	}
+}
+
 // --- backpressure ---------------------------------------------------------------------
 
 func TestHubSlowConsumerMessageCap(t *testing.T) {
