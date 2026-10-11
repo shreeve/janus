@@ -1095,17 +1095,57 @@ func authCookieNameReserved(name string) bool {
 }
 
 // authRespStrip strips reserved __Host-janus* Set-Cookie values from
-// upstream responses when effective auth is on.
+// upstream responses when effective auth is on. For a request that passed
+// a gate (private), it also keeps the final response out of shared caches
+// (authPrivateCacheControl): what a gate guards is per-user content.
 type authRespStrip struct {
 	http.ResponseWriter
 	wroteHeader bool
+	private     bool
 }
 
-func (w *authRespStrip) strip() {
+func (w *authRespStrip) strip(status int) {
 	if w.wroteHeader {
 		return
 	}
 	stripReservedAuthCookies(w.Header())
+	if w.private && status >= http.StatusOK {
+		authPrivateCacheControl(w.Header())
+	}
+}
+
+// authPrivateCacheControl rewrites a gated response's Cache-Control so no
+// shared cache stores it: public (and a field-qualified private="…", which
+// still lets a shared cache store the rest) becomes private, every other
+// directive (max-age, immutable, …) is kept, and private is added when
+// absent; a no-store response only has a public turned private.
+func authPrivateCacheControl(h http.Header) {
+	var out []string
+	private, noStore := false, false
+	for _, line := range h.Values("Cache-Control") {
+		for _, directive := range strings.Split(line, ",") {
+			directive = strings.TrimSpace(directive)
+			if directive == "" {
+				continue
+			}
+			name, _, _ := strings.Cut(directive, "=")
+			switch strings.ToLower(strings.TrimSpace(name)) {
+			case "public", "private":
+				if !private {
+					out = append(out, "private")
+					private = true
+				}
+				continue
+			case "no-store":
+				noStore = true
+			}
+			out = append(out, directive)
+		}
+	}
+	if !private && !noStore {
+		out = append(out, "private")
+	}
+	h.Set("Cache-Control", strings.Join(out, ", "))
 }
 
 func stripReservedAuthCookies(h http.Header) {
@@ -1127,7 +1167,7 @@ func stripReservedAuthCookies(h http.Header) {
 }
 
 func (w *authRespStrip) WriteHeader(status int) {
-	w.strip()
+	w.strip(status)
 	// A 1xx informational write (e.g. 103 Early Hints) does not commit the
 	// final header set: the scrub must still run on the real status later.
 	if status >= http.StatusOK {
@@ -1218,8 +1258,43 @@ func (h *Handler) authPageSession(r *http.Request) (string, time.Time, bool) {
 
 func (h *Handler) renderAuthPage(w http.ResponseWriter, status int, data authPageData) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	authDenyFraming(w.Header())
 	w.WriteHeader(status)
 	return authPageTmpl.Execute(w, data)
+}
+
+// authDenyFraming forbids framing the login and status page (no
+// clickjacking a sign-in or sign-out): X-Frame-Options DENY, and
+// frame-ancestors 'none' merged into every Content-Security-Policy
+// already set (replacing any frame-ancestors there), or set alone.
+func authDenyFraming(h http.Header) {
+	h.Set("X-Frame-Options", "DENY")
+	const deny = "frame-ancestors 'none'"
+	policies := h.Values("Content-Security-Policy")
+	if len(policies) == 0 {
+		h.Set("Content-Security-Policy", deny)
+		return
+	}
+	merged := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		kept := []string{}
+		for _, directive := range strings.Split(policy, ";") {
+			directive = strings.TrimSpace(directive)
+			if directive == "" {
+				continue
+			}
+			name, _, _ := strings.Cut(directive, " ")
+			if strings.EqualFold(name, "frame-ancestors") {
+				continue
+			}
+			kept = append(kept, directive)
+		}
+		merged = append(merged, strings.Join(append(kept, deny), "; "))
+	}
+	h.Del("Content-Security-Policy")
+	for _, policy := range merged {
+		h.Add("Content-Security-Policy", policy)
+	}
 }
 
 // serveAuthPost parses exactly one application/x-www-form-urlencoded

@@ -251,7 +251,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 		facts.clearOwner()
 		r = rr
-		w = &authRespStrip{ResponseWriter: w}
+		w = &authRespStrip{ResponseWriter: w, private: authGatedUser(rr.Context()) != ""}
 	}
 	if frontDoor {
 		h.app.mdnsSharedRoutes.ServeHTTP(w, r)

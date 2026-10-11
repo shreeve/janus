@@ -35,6 +35,9 @@ func phiFilesHarness(t *testing.T) *authHarness {
 	if err := os.WriteFile(filepath.Join(root, "reports", "phi", "x.txt"), []byte("phi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "pub.txt"), []byte("pub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	dp, reg := newTestDataPlane(t)
 	if _, err := reg.createWithPolicy("app", []string{"app.test"}, nil, &FilesPolicy{
 		Roots: []FilesRoot{{Path: root, Cache: filesCacheForever}},
@@ -710,6 +713,87 @@ func TestAuthSetsCaddyUserID(t *testing.T) {
 	ah.wall(t, r)
 	if got, ok := repl.GetString("http.auth.user.id"); ok && got != "" {
 		t.Fatalf("open path set http.auth.user.id = %q", got)
+	}
+}
+
+// --- response headers -----------------------------------------------------------
+
+func TestAuthPageDeniesFraming(t *testing.T) {
+	ah := newAuthHarness(t, aliceUsers(t), 0)
+	check := func(label string, rr *httptest.ResponseRecorder) {
+		t.Helper()
+		if got := rr.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("%s: X-Frame-Options = %q", label, got)
+		}
+		if got := rr.Header().Values("Content-Security-Policy"); len(got) != 1 || got[0] != "frame-ancestors 'none'" {
+			t.Errorf("%s: CSP = %q", label, got)
+		}
+	}
+	rr, _ := ah.wall(t, authReq(http.MethodGet, "app.test", "/auth", nil))
+	check("login form", rr)
+	check("failed login", ah.postLoginFrom(t, "app.test", "192.0.2.30:1", "", "alice", "wrong"))
+	session := ah.login(t, "app.test", "alice", "open-sesame")
+	r := authReq(http.MethodGet, "app.test", "/auth", nil)
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	rr, _ = ah.wall(t, r)
+	check("status page", rr)
+}
+
+func TestAuthDenyFramingMergesExistingCSP(t *testing.T) {
+	h := http.Header{}
+	h.Add("Content-Security-Policy", "default-src 'self'; frame-ancestors https://evil.example; img-src *")
+	h.Add("Content-Security-Policy", "script-src 'none'")
+	authDenyFraming(h)
+	want := []string{
+		"default-src 'self'; img-src *; frame-ancestors 'none'",
+		"script-src 'none'; frame-ancestors 'none'",
+	}
+	got := h.Values("Content-Security-Policy")
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("merged CSP = %q, want %q", got, want)
+	}
+}
+
+func TestAuthPrivateCacheControl(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"public, max-age=31536000, immutable", "private, max-age=31536000, immutable"},
+		{"max-age=60", "max-age=60, private"},
+		{"no-cache", "no-cache, private"},
+		{"s-maxage=600, Public", "s-maxage=600, private"},
+		{`private="Set-Cookie", max-age=60`, "private, max-age=60"},
+		{"private, max-age=60", "private, max-age=60"},
+		{"no-store", "no-store"},
+		{"public, no-store", "private, no-store"},
+		{"", "private"},
+	}
+	for _, tc := range cases {
+		h := http.Header{}
+		if tc.in != "" {
+			h.Set("Cache-Control", tc.in)
+		}
+		authPrivateCacheControl(h)
+		if got := h.Get("Cache-Control"); got != tc.want {
+			t.Errorf("Cache-Control %q → %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestAuthGatedFilesResponseIsPrivate(t *testing.T) {
+	ah := phiFilesHarness(t)
+	session := ah.loginDoor(t, "app.test", "/reports/phi/auth", "alice", "open-sesame")
+	r := authReq(http.MethodGet, "app.test", "/reports/phi/x.txt", nil)
+	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
+	rr := serveSite(t, ah.h, r)
+	if rr.Code != http.StatusOK || rr.Body.String() != "phi" {
+		t.Fatalf("gated file: %d %q", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "private, max-age=31536000, immutable" {
+		t.Fatalf("gated forever-root Cache-Control = %q", got)
+	}
+	// Outside every gate the root's policy is untouched.
+	rr = serveSite(t, ah.h, authReq(http.MethodGet, "app.test", "/pub.txt", nil))
+	if rr.Code != http.StatusOK || rr.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("open file: %d Cache-Control=%q", rr.Code, rr.Header().Get("Cache-Control"))
 	}
 }
 
