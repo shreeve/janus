@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1455,4 +1456,54 @@ func TestVistaAcceptThenClose(t *testing.T) {
 	if st := g.status(); st.Ended["closed"] != 1 || st.Started != 1 {
 		t.Fatalf("status: %+v", st)
 	}
+}
+
+// rpc_timeout runs from leaving the queue: two 350 ms RPCs on one session
+// under a 500 ms limit both answer, though the second waits 350 ms first.
+func TestVistaRPCTimeoutStartsAfterTheQueue(t *testing.T) {
+	g := newVistaRig(t, nil, func(l *vistaLimits) { l.rpcTimeout = 500 * time.Millisecond })
+	g.em.Script(func(c *fakeEmConn, m fakeEmMsg) []fakeEmAction {
+		if m.RPC == "ECHO" {
+			return []fakeEmAction{{Delay: 350 * time.Millisecond}, {Write: echoReply(fakeEmParam(m, 0))}}
+		}
+		return fakeEmDefault(c, m)
+	})
+	tok := g.connect()
+	var wg sync.WaitGroup
+	got := make([]vistaResp, 2)
+	for i := range got {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i] = g.do(echoMsg("slow"+strconv.Itoa(i)), bearer(tok)...)
+		}(i)
+		time.Sleep(50 * time.Millisecond) // the second arrives while the first runs
+	}
+	wg.Wait()
+	for i, r := range got {
+		wantReply(t, "request "+strconv.Itoa(i), r, echoReply("slow"+strconv.Itoa(i)))
+	}
+	if st := g.status(); st.Sessions != 1 || st.Ended["rpc_timeout"] != 0 {
+		t.Fatalf("status: %+v", st)
+	}
+}
+
+// A cookie-borne TCPConnect that replaced a session and then failed clears
+// the dead cookie in its own answer.
+func TestVistaFailedReplaceClearsTheCookie(t *testing.T) {
+	g := newVistaRig(t, nil, nil)
+	tok := g.connect()
+	g.h.vistaRoutes[0].limits.socket = "/nonexistent/em.sock"
+	r := g.do(xwbTCPConnectMsg(), cookie(tok, "X-OV", "1", "Origin", g.srv.URL)...)
+	if r.code != http.StatusBadGateway {
+		t.Fatalf("TCPConnect to a dead target: %d", r.code)
+	}
+	cleared := false
+	for _, v := range r.h.Values("Set-Cookie") {
+		cleared = cleared || strings.HasPrefix(v, vistaCookieName+"=;") && strings.Contains(v, "Max-Age=0")
+	}
+	if !cleared {
+		t.Fatalf("the replaced session's cookie was not cleared: %q", r.h.Values("Set-Cookie"))
+	}
+	wantEnded(t, "the replaced token", g.do(imHereMsg, bearer(tok)...), http.StatusUnauthorized, vistaEndReplaced)
 }

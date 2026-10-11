@@ -166,10 +166,10 @@ type vistaTomb struct {
 type vistaRouteState struct {
 	pool      *vistaPool
 	key       string
-	target    string
 	createdBy any
 
 	mu                sync.Mutex
+	target            string                   // the declaring generation's, for status
 	sessions          map[string]*vistaSession // token HMAC → session
 	all               map[*vistaSession]bool   // every live session, including one still starting
 	total             int                      // sessions, including those still starting
@@ -387,6 +387,16 @@ func (g *vistaLogGate) allow(every time.Duration) (int64, bool) {
 	n := g.suppressed
 	g.suppressed, g.last = 0, time.Now()
 	return n, true
+}
+
+// declare records what the generation now starting declares for the
+// route: its target and limits, which status reports. Existing sessions
+// keep the streams they opened.
+func (rs *vistaRouteState) declare(target string, l *vistaLimits) {
+	rs.mu.Lock()
+	rs.target = target
+	rs.mu.Unlock()
+	rs.lim.Store(l)
 }
 
 // status is the route's row on GET /1.0/vista.

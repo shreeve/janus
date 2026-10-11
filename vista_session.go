@@ -84,8 +84,14 @@ func newVistaSession(rs *vistaRouteState, conn net.Conn, key netip.Prefix, clien
 		chunks: make(chan vistaChunk, 1), eof: make(chan struct{}), done: make(chan struct{}),
 		turn: make(chan struct{}, 1), starting: true,
 	}
-	go s.readLoop()
 	return s
+}
+
+// start begins reading the stream. The caller adds the session to its
+// route first, so a session the reader ends at once is still forgotten
+// (its reservation released).
+func (s *vistaSession) start() {
+	go s.readLoop()
 }
 
 // readLoop is the stream's only reader. While a request runs it hands
@@ -340,8 +346,11 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 
 	_ = s.conn.SetWriteDeadline(time.Now().Add(vistaWriteTimeout))
 	if _, err := s.conn.Write(body); err != nil {
+		// A write fails because the stream closed, or because the session
+		// was already ended (route-removed, replaced): report what ended it.
 		s.end(vistaEndClosed)
-		return vistaExchange{cause: vistaEndClosed}
+		c, _ := s.endedCause()
+		return vistaExchange{cause: c}
 	}
 	s.bytesIn.Add(int64(len(body)))
 	s.route.c.bytesIn.Add(int64(len(body)))

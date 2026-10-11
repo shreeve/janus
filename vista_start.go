@@ -59,7 +59,7 @@ func (a *App) collectVista(ha *caddyhttp.App) error {
 						return fmt.Errorf("janus vista: %s is declared twice", key)
 					}
 					a.vistaKeys[key] = true
-					a.state.vista.route(key, rt.target, a).lim.Store(rt.limits)
+					a.state.vista.route(key, rt.target, a).declare(rt.target, rt.limits)
 				}
 			}
 			return nil

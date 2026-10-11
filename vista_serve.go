@@ -224,17 +224,30 @@ func (h *Handler) serveVista(w http.ResponseWriter, r *http.Request, rt *vistaSi
 // vistaStart admits, dials, and opens a session for a TCPConnect.
 func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSiteRoute, rs *vistaRouteState, body []byte, tok vistaToken) error {
 	l := rt.limits
+	replaced := false
 	if tok.value != "" {
 		if old, _ := rs.lookup(tok.value); old != nil {
 			old.end(vistaEndReplaced)
+			replaced = true
 		}
+	}
+	// A browser whose session this TCPConnect replaced holds a dead
+	// cookie; any answer without a new token clears it at once.
+	clearReplaced := func() {
+		if replaced && tok.viaCookie {
+			w.Header().Add("Set-Cookie", vistaClearCookie)
+		}
+	}
+	fail := func(code int, msg string) error {
+		clearReplaced()
+		http.Error(w, msg, code)
+		return nil
 	}
 	peer, ok := vistaPeer(r)
 	local, lok := vistaLocal(r)
 	if !ok || !lok {
 		rs.refuse("dial", true, zap.String("why", "the connection's addresses are unknown"))
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-		return nil
+		return fail(http.StatusBadGateway, "bad gateway")
 	}
 	key := vistaClientKey(peer.Addr())
 	exempt := false
@@ -247,24 +260,22 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 	if capName := rs.reserve(l, key, exempt); capName != "" {
 		rs.refuse(capName, true, zap.String("client", key.String()))
 		w.Header().Set("Retry-After", "5")
-		http.Error(w, "service unavailable: "+strings.ReplaceAll(capName, "_", " "), http.StatusServiceUnavailable)
-		return nil
+		return fail(http.StatusServiceUnavailable, "service unavailable: "+strings.ReplaceAll(capName, "_", " "))
 	}
 	conn, err := net.DialTimeout("unix", l.socket, vistaDialTimeout)
 	if err != nil {
 		rs.unreserve(key, false)
 		rs.refuse("dial", true, zap.Error(err))
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-		return nil
+		return fail(http.StatusBadGateway, "bad gateway")
 	}
 	s := newVistaSession(rs, conn, key, peer.Addr().String(), h.app.state.vista.logger)
 	rs.add(s)
+	s.start()
 	vistaLogField(r, zap.String("vista_session", s.id))
 	_ = conn.SetWriteDeadline(time.Now().Add(vistaWriteTimeout))
 	if _, err := conn.Write([]byte(vistaProxyLine(peer, local))); err != nil {
 		s.end(vistaEndClosed)
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-		return nil
+		return fail(http.StatusBadGateway, "bad gateway")
 	}
 	o := newVistaResponder(w)
 	o.hold = true // the token rides in the headers, decided by the reply
@@ -276,8 +287,7 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 		if ex.cause == vistaEndRPCTimeout {
 			status = http.StatusGatewayTimeout
 		}
-		http.Error(w, "bad gateway", status)
-		return nil
+		return fail(status, "bad gateway")
 	case string(ex.reply) == "\x00\x00accept\x04":
 		token := vistaMintToken()
 		rs.bind(s, token, vistaEndRotated)
@@ -294,14 +304,16 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 		// Sign-ons inhibited or the job limit reached: em ends the stream.
 		rs.c.rejected.Add(1)
 		s.end(vistaCauseRejected)
+		if replaced && tok.viaCookie {
+			o.setCookie = vistaClearCookie
+		}
 		o.release()
 		return nil
 	default:
 		s.end(vistaEndClosed)
 		s.logger.Warn("janus vista: TCPConnect answered neither accept nor reject",
 			zap.String("route", rs.key), zap.Int("bytes", len(ex.reply)))
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-		return nil
+		return fail(http.StatusBadGateway, "bad gateway")
 	}
 }
 
@@ -323,7 +335,8 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 		return nil
 	}
 	defer s.pending.Add(-1)
-	deadline := time.Now().Add(l.rpcTimeout)
+	// The wait in the queue has a limit of its own; the request's
+	// rpc_timeout runs from leaving the queue.
 	wait := time.NewTimer(l.rpcTimeout)
 	rs.c.queued.Add(1)
 	select {
@@ -347,6 +360,7 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 		return ended(c)
 	}
 	defer func() { s.turn <- struct{}{} }()
+	deadline := time.Now().Add(l.rpcTimeout)
 	if c, done := s.endedCause(); done {
 		return ended(c)
 	}
