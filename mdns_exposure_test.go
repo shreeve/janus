@@ -3,6 +3,7 @@ package janus
 import (
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/brutella/dnssd"
@@ -111,5 +112,26 @@ func TestMdnsStandaloneKeepsAddressPolicy(t *testing.T) {
 	srv := fake.handles["janus"].Service()
 	if len(srv.IPs) != 0 || srv.AdvertiseIPType != dnssd.Both || len(srv.Ifaces) != 1 || srv.Ifaces[0] != "custom0" {
 		t.Fatalf("standalone address policy changed: %+v", srv)
+	}
+}
+
+// Under the service edge (a published exposure mode), a dedicated front
+// door is refused in every mode: its port lies outside the ports the mode
+// governs, so it would serve the status page past the firewall rule and
+// the socket watch, on a global IPv6 address too.
+func TestMdnsDedicatedFrontDoorRefusedUnderTheServiceEdge(t *testing.T) {
+	t.Cleanup(func() { SetExposure("", "", netip.Addr{}) })
+	for _, scope := range []string{"localhost", "lan", "wan"} {
+		lan := netip.Addr{}
+		iface := ""
+		if scope == "lan" {
+			lan, iface = netip.MustParseAddr("10.0.0.211"), "en0"
+		}
+		SetExposure(scope, iface, lan)
+		app := newTestMdnsApp(t, &MdnsSettings{Listen: ":7680"})
+		err := app.startMdns()
+		if err == nil || !strings.Contains(err.Error(), "remove `listen`") || !strings.Contains(err.Error(), scope) {
+			t.Errorf("%s: want the dedicated front door refused, got %v", scope, err)
+		}
 	}
 }

@@ -786,6 +786,13 @@ func (a *App) startMdns() error {
 			zap.String("name", ms.Name),
 		)
 	} else {
+		// Under the service edge the exposure mode governs ports 80 and 443
+		// alone (its firewall rule and its socket watch): a dedicated
+		// front-door port would serve the status page outside both, on
+		// every address the listen names, a global IPv6 one included.
+		if scope := ExposureScope(); scope != "" {
+			return fmt.Errorf("janus mdns: `listen %s` gives the front door a port of its own, which the %s exposure mode does not govern (it covers ports 80 and 443); under the service edge the front door shares the HTTP port: remove `listen`", ms.Listen, scope)
+		}
 		if err := a.checkMdnsListenCollision(); err != nil {
 			return err
 		}
