@@ -47,6 +47,7 @@ type vistaSession struct {
 
 	mu        sync.Mutex
 	active    bool
+	starting  bool // TCPConnect's reply is being decided; a close waits for vistaStart
 	ended     bool
 	cause     string
 	signed    bool
@@ -66,7 +67,7 @@ func newVistaSession(rs *vistaRouteState, conn net.Conn, key netip.Prefix, clien
 		id: vistaSessionID(), route: rs, logger: logger, conn: conn,
 		clientKey: key, client: client, started: time.Now(),
 		chunks: make(chan []byte, 1), eof: make(chan struct{}), done: make(chan struct{}),
-		turn: make(chan struct{}, 1),
+		turn: make(chan struct{}, 1), starting: true,
 	}
 	go s.readLoop()
 	return s
@@ -103,7 +104,7 @@ func (s *vistaSession) readLoop() {
 			s.eofClosed.Store(true)
 			close(s.eof)
 			s.mu.Lock()
-			idle := !s.active
+			idle := !s.active && !s.starting
 			s.mu.Unlock()
 			if idle {
 				s.end(vistaEndClosed)
@@ -419,6 +420,7 @@ func (s *vistaSession) finish(sc xwbReplyScanner, judge string, judged, leftover
 	}
 	s.active = false
 	endAfter := s.endAfter
+	starting := s.starting
 	s.mu.Unlock()
 	s.requests.Add(1)
 	switch {
@@ -429,10 +431,24 @@ func (s *vistaSession) finish(sc xwbReplyScanner, judge string, judged, leftover
 		s.end(vistaEndProtocol)
 	case endAfter != "":
 		s.end(endAfter)
-	case s.eofClosed.Load():
+	case s.eofClosed.Load() && !starting:
 		s.end(vistaEndClosed)
 	}
 	return vistaExchange{complete: true, reply: kept}
+}
+
+// startedOK ends the TCPConnect phase of an accepted session, which holds
+// its token by now: a stream that closed meanwhile ends it (closed) here,
+// and from now on the reader ends it at once. While starting, a close is
+// left to vistaStart, so a reject is never counted as an ended session.
+func (s *vistaSession) startedOK() {
+	s.mu.Lock()
+	s.starting = false
+	closed := s.eofClosed.Load()
+	s.mu.Unlock()
+	if closed {
+		s.end(vistaEndClosed)
+	}
 }
 
 func vistaSetCookie(token string) string {

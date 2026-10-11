@@ -288,6 +288,7 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 			zap.String("route", rs.key), zap.String("session", s.id), zap.String("client", s.client))
 		o.release()
 		s.turn <- struct{}{}
+		s.startedOK()
 		return nil
 	case string(ex.reply) == "\x00\x00reject\x04":
 		// Sign-ons inhibited or the job limit reached: em ends the stream.
