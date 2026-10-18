@@ -12,7 +12,7 @@ require (
 	github.com/caddyserver/certmagic v0.25.6
 	github.com/dustin/go-humanize v1.1.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	github.com/quic-go/quic-go v0.63.0
 	github.com/quic-go/webtransport-go v0.13.0
 	github.com/spf13/cobra v1.10.2
