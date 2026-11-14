@@ -99,7 +99,7 @@ Capabilities, in landing order (the order never changes in docs or
 | 8 | browse | site (cascades) | [capability-browse](docs/20260801-042700-capability-browse.md) |
 | 9 | access log | per-site `log` | [capability-access-log](docs/20260801-081600-capability-access-log.md) |
 | 10 | webtransport | process-wide listener, site routes (no cascade) | [capability-webtransport](docs/20260928-200621-capability-webtransport.md) |
-| 11 | vista | site routes (no cascade) | [capability-vista](docs/20261010-232539-capability-vista.md) |
+| 11 | vista | site routes (no cascade) | [capability-vista](docs/20261010-232539-capability-vista.md), [TCP targets](docs/20261114-142034-capability-vista-tcp.md) |
 
 Exposure modes (`localhost` | `lan` | `wan`) are not a capability;
 they are the binary's job (where the service edge listens, and the pf

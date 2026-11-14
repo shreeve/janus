@@ -132,11 +132,9 @@ with a broker reply carrying a fixed security message and no data:
 
 | Rule | Message |
 | --- | --- |
-| 1, 2, 3, 4 | `The message holds a parameter the server will not parse` |
-| 5 | `Remote procedure cannot run before sign-on` |
-| 6 | `A reference parameter is not a variable` |
-| 7 | `The session is already signed on` |
-| failed sign-ons | `Too many failed sign-ons from this address; try later` |
+| 1, 2, 3, 4 | `Invalid request` |
+| 5, 6, 7 | `Unauthorized request` |
+| failed sign-ons | `Too many failed sign-ons; try again later` |
 
 No client byte is echoed, so the reply is byte-safe. The stream is
 untouched and the session continues. Sign-on judging never runs on a
@@ -221,6 +219,7 @@ the network and, for TCP, the dial's local port.
 | 5 | `signon_timeout` for TCP routes defaults to 170 s, below the broker's 180 s | yes |
 | 6 | A warn line, not a refusal, for a TCP target off loopback and private ranges | yes |
 | 7 | First release proven on pup's three VEHU brokers only, read-only RPCs and the owner's sign-on | yes |
+| 8 | Refusal text: `Invalid request`, `Unauthorized request`, and the failed sign-on hold's (`Too many failed sign-ons; try again later`); the rule broken is in the per-rule counters | ruled by the owner |
 
 ## Adversarial review
 

@@ -135,7 +135,7 @@ Cold capabilities land in order. Each step stands alone before the next is added
 | 8 | **browse** | Navigable hot and cold roots, content-addressed themes, bounded extension renderers, and process leases | [`capability-browse`](docs/20260801-042700-capability-browse.md) |
 | 9 | **access log** | JSON-compatible durable access log plus bounded app-scoped NDJSON streams on `/1.0` | [`capability-access-log`](docs/20260801-081600-capability-access-log.md) |
 | 10 | **webtransport** | WebTransport (HTTP/3 over QUIC) on the edge's own UDP 443, relaying datagrams byte-exact to a config-fixed UDP target; auth-gate tickets | [`capability-webtransport`](docs/20260928-200621-capability-webtransport.md) |
-| 11 | **vista** | VistA's RPC Broker over HTTPS: one em process per session behind `POST /rpc`, its stream held by Janus; sign-on-aware caps and token rotation | [`capability-vista`](docs/20261010-232539-capability-vista.md) |
+| 11 | **vista** | VistA's RPC Broker over HTTPS: one em process per session behind `POST /rpc`, or a stock broker over TCP behind Janus's message guard, its stream held by Janus; sign-on-aware caps and token rotation | [`capability-vista`](docs/20261010-232539-capability-vista.md), [TCP targets](docs/20261114-142034-capability-vista-tcp.md) |
 
 ```bash
 make janus   # go build ./cmd/janus -> bin/janus
@@ -287,6 +287,8 @@ vista.example.org {
 	}
 }
 ```
+
+A route can instead target an unmodified VistA RPC Broker (VistA's own listener, on YottaDB, GT.M or IRIS) by IP address literal: `vista /rpc tcp/10.10.218.1:9432`. The client side is the same. Janus sends no PROXY line, so the broker sees Janus's address for every user; Janus judges every message before it leaves (list subscripts literals and bounded, no framing bytes, `TCPConnect`'s shape, only the sign-on RPCs before sign-on, references naming a variable, no second sign-on) and answers a refused one with a broker security reply, never sending it; it counts failed sign-ons per client key (`max_failed_signons`, `failed_signon_window`) and ends an unsigned session at 170 s, before the broker's own 180 s. The hop to the broker is plain TCP. The contract is [the TCP extension](docs/20261114-142034-capability-vista-tcp.md).
 
 ```bash
 curl -s http://127.0.0.1:7600/1.0/vista
