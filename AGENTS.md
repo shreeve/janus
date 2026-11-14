@@ -87,7 +87,7 @@ implement → pin in tests → measure**.
 | 8 | **browse** | Navigable hot and cold roots, embedded/custom themes, bounded extension renderers, strict leases, cold-host reservations, and redacted status (cascades: yes). |
 | 9 | **access log** | Durable JSON-compatible Caddy encoder plus bounded app-scoped live NDJSON observation (cascades: no; configured by each site's `log`). |
 | 10 | **webtransport** | WebTransport (HTTP/3 over QUIC) terminated on the edge's own UDP 443 listener, relaying datagrams opaque and byte-exact to a config-fixed UDP target; routes per exact-host site, tickets carry the auth gate's decision (cascades: no; process-wide listener, site routes). |
-| 11 | **vista** | VistA's RPC Broker over HTTPS: `POST /rpc` carries one broker message to a session's own em process over a Unix socket (one stream per session, the PROXY line first) and its reply back; strict admission, sign-on detection with token rotation, caps on unsigned sessions (cascades: no; exact-host site routes). |
+| 11 | **vista** | VistA's RPC Broker over HTTPS: `POST /rpc` carries one broker message to a session's own em process over a Unix socket (one stream per session, the PROXY line first), or to a stock broker over TCP behind Janus's message guard and failed sign-on limit, and its reply back; strict admission, sign-on detection with token rotation, caps on unsigned sessions (cascades: no; exact-host site routes). |
 
 `./test.sh` runs groups in this order: ping, control, apps, data,
 heartbeat, tls, hub, tenant, mdns, auth, files, sendfile,

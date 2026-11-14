@@ -205,3 +205,140 @@ case_vista_no_token_in_access_log() {
 	done
 	grep -Eq '"(Cookie|Authorization)":\["REDACTED"\]' "$JANUS_TEST_ACCESS_LOG"
 }
+
+# --- cases: vista to a stock broker over TCP ----------------------------------
+#
+# The same capability to a stock RPC Broker (`testkit vistaem --tcp`): no
+# PROXY line (the fake logs bad-first for any byte before TCPConnect), and
+# Janus's message guard and failed sign-on limit (max_failed_signons 2) in
+# front of it. A refused message is answered 200 with a fixed security
+# reply and never reaches the broker.
+
+VISTA_TCP_HOST=vista-tcp.janus.localhost
+VISTA_TCP_URL="https://$VISTA_TCP_HOST/rpc"
+VISTA_TCP_LOG="$TEST_RUN_DIR/vista-broker.log"
+
+vista_tcp_msgs() {
+	printf '[XWB]11302\x051.108\x0dORWU USERINFO5\x04' >"$VISTA_DIR/userinfo"
+	printf '[XWB]11302\x051.108\x0bXUS AV CODE50010 BAD;CODE f\x04' >"$VISTA_DIR/avbad"
+	printf '[XWB]11302\x051.108\x08ZZ GUARD52002$J001vf\x04' >"$VISTA_DIR/guardlist"
+	printf '[XWB]10304\x0aTCPConnect50009127.0.0.1f0001''0f0005cp^rsf\x04' >"$VISTA_DIR/tcpconnect-caret"
+	printf '\x0fInvalid request\x00\x04' >"$VISTA_DIR/r-invalid"
+	printf '\x14Unauthorized request\x00\x04' >"$VISTA_DIR/r-unauthorized"
+	printf '\x29Too many failed sign-ons; try again later\x00\x04' >"$VISTA_DIR/r-held"
+	printf '\x00\x00100^MANAGER,SITE^0^0^0^0^0^300^20^1^1^5^FOIA.DOMAIN.EXT^0^180\x04' >"$VISTA_DIR/r-userinfo"
+	printf '\x00\x00100\r\n0\r\n0\r\n\r\n0\r\n0\r\n\r\nGood evening MANAGER,SITE\r\n\x04' >"$VISTA_DIR/r-avgood"
+}
+
+# vista_tcp_post MSG [curl args…] — vista_post to the tcp route.
+vista_tcp_post() {
+	local VISTA_URL="$VISTA_TCP_URL"
+	vista_post "$@"
+}
+
+vista_tcp_session() {
+	vista_tcp_post tcpconnect
+	eq "$REPLY_CODE" "200" >&2
+	vista_reply_is r-accept
+	vista_token
+}
+
+# vista_broker_saw RPC — whether the fake broker received an RPC so named.
+vista_broker_saw() {
+	grep -qF "rpc=\"$1\"" "$VISTA_TCP_LOG"
+}
+
+case_vista_tcp_setup() {
+	vista_tcp_msgs
+	: >"$VISTA_TCP_LOG"
+	"$TESTKIT" vistaem --tcp "127.0.0.1:$JANUS_TEST_VISTA_TCP_PORT" --log "$VISTA_TCP_LOG" >>"$TEST_RUN_DIR/fixtures.log" 2>&1 &
+	printf '%s\n' "$!" >>"$DATA_PIDS_FILE"
+	local i
+	for i in $(seq 1 50); do
+		grep -q . "$VISTA_TCP_LOG" 2>/dev/null && break
+		(exec 3<>"/dev/tcp/127.0.0.1/$JANUS_TEST_VISTA_TCP_PORT") 2>/dev/null && break
+		sleep 0.1
+	done
+	capi GET /1.0/vista
+	eq "$REPLY_CODE" "200"
+	json_has "$REPLY_BODY" "\"$VISTA_TCP_HOST/rpc\":{\"target\":\"tcp/127.0.0.1:$JANUS_TEST_VISTA_TCP_PORT\",\"network\":\"tcp\""
+	json_has "$REPLY_BODY" "\"$VISTA_HOST/rpc\":{\"target\":\"unix/$JANUS_TEST_VISTA_SOCK\",\"network\":\"unix\""
+	json_has "$REPLY_BODY" '"failed_signon_holds":0'
+}
+
+case_vista_tcp_session() {
+	local token new
+	token="$(vista_tcp_session)"
+	eq "${#token}" "43"
+	grep -Eq '^conn [0-9]+ tcp$' "$VISTA_TCP_LOG"
+	if grep -q 'bad-first' "$VISTA_TCP_LOG"; then
+		echo "a byte preceded TCPConnect at the broker" >&2
+		return 1
+	fi
+	# Before sign-on only the sign-on RPCs run.
+	vista_tcp_post userinfo -H "Authorization: Bearer $token"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-unauthorized
+	if vista_broker_saw "ORWU USERINFO"; then
+		echo "a refused RPC reached the broker" >&2
+		return 1
+	fi
+	vista_tcp_post avgood -H "Authorization: Bearer $token"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-avgood
+	new="$(vista_token)"
+	ok "-n \"$new\" && \"$new\" != \"$token\"" "sign-on did not rotate the token"
+	vista_tcp_post userinfo -H "Authorization: Bearer $new"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-userinfo
+	vista_tcp_post bye -H "Authorization: Bearer $new"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-bye
+	vista_tcp_post imhere -H "Authorization: Bearer $new"
+	eq "$REPLY_CODE" "401"
+	eq "$(vista_hdr ov-session-ended)" "bye"
+}
+
+case_vista_tcp_guard() {
+	local token
+	token="$(vista_tcp_session)"
+	# A list subscript that is not literals: refused at admission, never sent.
+	vista_tcp_post guardlist -H "Authorization: Bearer $token"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-invalid
+	if vista_broker_saw "ZZ GUARD"; then
+		echo "a refused message reached the broker" >&2
+		return 1
+	fi
+	# The session goes on.
+	vista_tcp_post imhere -H "Authorization: Bearer $token"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-imhere
+	# TCPConnect's shape is judged too: a ^ in its name.
+	vista_tcp_post tcpconnect-caret
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-invalid
+	capi GET /1.0/vista
+	json_has "$REPLY_BODY" '"list_subscript":1'
+	json_has "$REPLY_BODY" '"command_params":1'
+	json_has "$REPLY_BODY" '"signon_rpc":1'
+}
+
+case_vista_tcp_failed_signons() {
+	# max_failed_signons 2: the third XUS AV CODE from this client is held,
+	# even with the right code, and never reaches the broker.
+	local token before
+	token="$(vista_tcp_session)"
+	vista_tcp_post avbad -H "Authorization: Bearer $token"
+	eq "$REPLY_CODE" "200"
+	vista_tcp_post avbad -H "Authorization: Bearer $token"
+	eq "$REPLY_CODE" "200"
+	before="$(grep -c 'rpc="XUS AV CODE"' "$VISTA_TCP_LOG")"
+	vista_tcp_post avgood -H "Authorization: Bearer $token"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-held
+	eq "$(grep -c 'rpc="XUS AV CODE"' "$VISTA_TCP_LOG")" "$before"
+	capi GET /1.0/vista
+	json_has "$REPLY_BODY" '"failed_signons":2'
+	json_has "$REPLY_BODY" '"failed_signon_holds":1'
+}

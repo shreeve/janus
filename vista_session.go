@@ -1,6 +1,7 @@
 package janus
 
-// A vista session: one stream to one em process, one request at a time.
+// A vista session: one stream to one em process (or a stock broker's
+// job), one request at a time.
 // One reader goroutine owns every read of the stream, so an idle close is
 // seen at once and bytes nobody asked for end the session; a request's
 // body is written whole once it leaves the queue, whatever its client
@@ -20,12 +21,17 @@ import (
 
 const (
 	vistaDialTimeout  = 3 * time.Second
+	vistaKeepAlive    = 15 * time.Second // a tcp target's keepalive idle and interval
 	vistaWriteTimeout = 30 * time.Second
 	vistaReadChunk    = 32 << 10
 	// vistaCauseRejected ends a session whose TCPConnect em answered
 	// reject: no token was minted, so it leaves no tombstone that matters.
 	vistaCauseRejected = "rejected"
 )
+
+// vistaBrokerBye is the reply a stock broker sends unasked when its
+// activity timeout ends a signed-on session, before it exits.
+const vistaBrokerBye = "\x00\x00#BYE#\x04"
 
 // vistaChunkPool recycles the reader's buffers: a read passes to the
 // running request, which returns it once its bytes are written or copied.
@@ -49,6 +55,7 @@ type vistaSession struct {
 	conn      net.Conn
 	clientKey netip.Prefix
 	client    string
+	tcp       bool // a stock broker: its idle #BYE# then EOF is closed
 	started   time.Time
 	mac       string // guarded by route.mu
 
@@ -68,6 +75,7 @@ type vistaSession struct {
 	signed    bool
 	changing  bool
 	endAfter  string // a cause to end with when the running reply ends
+	idleBye   []byte // a stock broker's unasked #BYE#, as far as it has arrived
 	timer     *time.Timer
 	timerGen  int
 	timeout   time.Duration
@@ -95,8 +103,9 @@ func (s *vistaSession) start() {
 }
 
 // readLoop is the stream's only reader. While a request runs it hands
-// each read to it; a read while idle is a protocol violation, and EOF or
-// an error while idle ends the session.
+// each read to it; a read while idle is a protocol violation, but for a
+// stock broker's unasked #BYE#, and EOF or an error while idle ends the
+// session (closed).
 func (s *vistaSession) readLoop() {
 	for {
 		p := vistaChunkPool.Get().(*[]byte)
@@ -108,21 +117,30 @@ func (s *vistaSession) readLoop() {
 			chunk := vistaChunk{p: p, n: n}
 			s.mu.Lock()
 			if !s.active {
+				// A stock broker's activity timeout sends #BYE# unasked,
+				// then exits: the EOF that follows ends the session closed.
+				bye := s.tcp && !s.starting && s.idleByeLocked(chunk.bytes())
 				s.mu.Unlock()
 				chunk.release()
-				s.end(vistaEndProtocol)
-				return
-			}
-			select {
-			case s.chunks <- chunk:
-				s.mu.Unlock()
-			default:
-				s.mu.Unlock()
+				if !bye {
+					s.end(vistaEndProtocol)
+					return
+				}
+				if err == nil {
+					continue
+				}
+			} else {
 				select {
 				case s.chunks <- chunk:
-				case <-s.done:
-					chunk.release()
-					return
+					s.mu.Unlock()
+				default:
+					s.mu.Unlock()
+					select {
+					case s.chunks <- chunk:
+					case <-s.done:
+						chunk.release()
+						return
+					}
 				}
 			}
 		}
@@ -138,6 +156,24 @@ func (s *vistaSession) readLoop() {
 			return
 		}
 	}
+}
+
+// idleByeLocked takes bytes read while no request runs and reports that
+// everything read so far while idle is the broker's #BYE# reply, or the
+// start of it. The caller holds s.mu.
+func (s *vistaSession) idleByeLocked(b []byte) bool {
+	if len(s.idleBye)+len(b) > len(vistaBrokerBye) {
+		return false
+	}
+	s.idleBye = append(s.idleBye, b...)
+	return vistaBrokerBye[:len(s.idleBye)] == string(s.idleBye)
+}
+
+// isSigned reports that the session has signed on.
+func (s *vistaSession) isSigned() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.signed
 }
 
 // end ends the session with cause, once: the stream closes (so em exits),
@@ -314,9 +350,10 @@ func (o *vistaResponder) release() {
 
 // vistaExchange is what one request's exchange came to.
 type vistaExchange struct {
-	complete bool   // the reply ended by the framing rule
-	cause    string // the session's end cause when the exchange failed
-	reply    []byte // the whole reply, kept only when keep is set
+	complete bool          // the reply ended by the framing rule
+	cause    string        // the session's end cause when the exchange failed
+	reply    []byte        // the whole reply, kept only when keep is set
+	verdict  signonVerdict // a judged sign-on reply's verdict, when complete
 }
 
 // exchange writes body and reads its reply into o. The caller holds the
@@ -339,6 +376,12 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 		return vistaExchange{cause: vistaEndProtocol}
 	default:
 	}
+	if len(s.idleBye) > 0 {
+		// The broker began its unasked #BYE#: it is ending the session.
+		s.mu.Unlock()
+		s.end(vistaEndClosed)
+		return vistaExchange{cause: vistaEndClosed}
+	}
 	s.active = true
 	s.mu.Unlock()
 	s.runSince.Store(time.Now().UnixNano())
@@ -358,6 +401,7 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 	var sc xwbReplyScanner
 	var kept []byte
 	judged := judge == ""
+	verdict := signonNone
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	leftover := false
@@ -375,7 +419,7 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 		o.write(part)
 		if !judged && sc.PastShorts() {
 			if v, decided := judgeSignon(judge, sc.Clean(), sc.MError(), sc.DataPrefix(), done); decided {
-				judged = true
+				judged, verdict = true, v
 				if s.applySignon(v) {
 					token := vistaMintToken()
 					s.route.bind(s, token, vistaEndRotated)
@@ -399,7 +443,7 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 				return vistaExchange{cause: cause}
 			}
 			if done {
-				return s.finish(sc, judge, judged, leftover, bye, kept, o)
+				return s.finish(sc, judge, judged, verdict, leftover, bye, kept, o)
 			}
 		case <-s.eof:
 			// The reader hands over its last read before it closes eof.
@@ -413,7 +457,7 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 						return vistaExchange{cause: cause}
 					}
 					if done {
-						return s.finish(sc, judge, judged, leftover, bye, kept, o)
+						return s.finish(sc, judge, judged, verdict, leftover, bye, kept, o)
 					}
 					continue
 				default:
@@ -434,9 +478,10 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 
 // finish closes a complete exchange: the last sign-on judgement, the
 // leftover-bytes rule, and an end the sign-on deadline deferred.
-func (s *vistaSession) finish(sc xwbReplyScanner, judge string, judged, leftover, bye bool, kept []byte, o *vistaResponder) vistaExchange {
+func (s *vistaSession) finish(sc xwbReplyScanner, judge string, judged bool, verdict signonVerdict, leftover, bye bool, kept []byte, o *vistaResponder) vistaExchange {
 	if !judged {
 		v, _ := judgeSignon(judge, sc.Clean(), sc.MError(), sc.DataPrefix(), true)
+		verdict = v
 		if s.applySignon(v) {
 			token := vistaMintToken()
 			s.route.bind(s, token, vistaEndRotated)
@@ -474,7 +519,7 @@ func (s *vistaSession) finish(sc xwbReplyScanner, judge string, judged, leftover
 	case s.eofClosed.Load() && !starting:
 		s.end(vistaEndClosed)
 	}
-	return vistaExchange{complete: true, reply: kept}
+	return vistaExchange{complete: true, reply: kept, verdict: verdict}
 }
 
 // startedOK ends the TCPConnect phase of an accepted session, which holds

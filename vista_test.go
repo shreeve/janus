@@ -1236,7 +1236,7 @@ func TestVistaParseLegal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Path != "/rpc" || l.socket != "/run/openvista/rpc.sock" || l.maxSessions != 256 || l.maxUnsigned != 32 ||
+	if r.Path != "/rpc" || l.address != "/run/openvista/rpc.sock" || l.network != "unix" || l.tcp || l.maxSessions != 256 || l.maxUnsigned != 32 ||
 		l.perClient != 64 || l.perClientUnsigned != 8 || l.signonTimeout != 180*time.Second ||
 		l.rpcTimeout != 10*time.Minute || l.queue != 8 || l.maxRequest != 1<<20 || l.maxReply != 64<<20 ||
 		!l.originSame || len(l.origins) != 0 || r.AuthExempt {
@@ -1307,8 +1307,8 @@ func TestVistaParseErrors(t *testing.T) {
 		{"percent", "vista /%72pc unix//run/em.sock", "canonical"},
 		{"parameter", "vista /rpc;x unix//run/em.sock", "canonical"},
 		{"query", "vista /rpc?x unix//run/em.sock", "canonical"},
-		{"tcp target", "vista /rpc tcp/127.0.0.1:9430", "want a unix socket"},
-		{"bare host target", "vista /rpc 127.0.0.1:9430", "want a unix socket"},
+		{"udp target", "vista /rpc udp/127.0.0.1:9430", `network is "udp"`},
+		{"bare host target", "vista /rpc 127.0.0.1:9430", "want unix/<socket path> or tcp/<IP>:<port>"},
 		{"relative socket", "vista /rpc unix/run/em.sock", "absolute and clean"},
 		{"unclean socket", "vista /rpc unix//run/../em.sock", "absolute and clean"},
 		{"socket path too long", "vista /rpc unix//" + strings.Repeat("s", 104) + ".sock", "at most 103"},
@@ -1493,7 +1493,7 @@ func TestVistaRPCTimeoutStartsAfterTheQueue(t *testing.T) {
 func TestVistaFailedReplaceClearsTheCookie(t *testing.T) {
 	g := newVistaRig(t, nil, nil)
 	tok := g.connect()
-	g.h.vistaRoutes[0].limits.socket = "/nonexistent/em.sock"
+	g.h.vistaRoutes[0].limits.address = "/nonexistent/em.sock"
 	r := g.do(xwbTCPConnectMsg(), cookie(tok, "X-OV", "1", "Origin", g.srv.URL)...)
 	if r.code != http.StatusBadGateway {
 		t.Fatalf("TCPConnect to a dead target: %d", r.code)

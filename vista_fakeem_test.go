@@ -6,6 +6,12 @@ package janus
 // which requires a PROXY v1 line first, then reads XWB messages and writes
 // exactly one reply each (RPC-HTTPS §2–§3). This fake does the same with
 // scripted replies whose defaults are RPC-HTTPS §3's measured bytes.
+//
+// newFakeBroker is the same fake as a stock RPC Broker (VistA's XWBTCPM
+// listener) on TCP: no PROXY line, the TCPConnect message the first byte
+// (docs/20261114-142034-capability-vista-tcp.md). A connection whose first
+// bytes are anything else is closed, as the stock brokers close it, and
+// fails the test.
 
 import (
 	"bufio"
@@ -52,6 +58,7 @@ const fakeEmPiece = 32000
 type fakeEm struct {
 	path string
 	ln   net.Listener
+	tcp  bool // a stock broker: no PROXY line
 
 	mu     sync.Mutex
 	script func(c *fakeEmConn, m fakeEmMsg) []fakeEmAction
@@ -74,6 +81,8 @@ type fakeEmConn struct {
 
 	mu       sync.Mutex
 	proxy    string
+	raw      []byte // every byte received, in order
+	badFirst bool   // a stock broker's first bytes were not TCPConnect
 	received []fakeEmMsg
 	closed   bool
 	signedOn bool // the default policy's sign-on state
@@ -111,7 +120,8 @@ func newFakeEm(t testing.TB) *fakeEm {
 			if err != nil {
 				return
 			}
-			fc := &fakeEmConn{em: e, c: c, r: bufio.NewReader(c)}
+			fc := &fakeEmConn{em: e, c: c}
+			fc.r = bufio.NewReader(fakeEmRecorder{fc})
 			e.mu.Lock()
 			e.conns = append(e.conns, fc)
 			e.mu.Unlock()
@@ -129,8 +139,79 @@ func newFakeEm(t testing.TB) *fakeEm {
 	return e
 }
 
+// newFakeBroker is a fake stock broker on a loopback TCP listener; its
+// target is "tcp/" + Addr().
+func newFakeBroker(t testing.TB) *fakeEm {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &fakeEm{ln: ln, tcp: true, script: fakeEmDefault}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			fc := &fakeEmConn{em: e, c: c}
+			fc.r = bufio.NewReader(fakeEmRecorder{fc})
+			e.mu.Lock()
+			e.conns = append(e.conns, fc)
+			e.mu.Unlock()
+			go fc.serve()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-done
+		for _, c := range e.Conns() {
+			c.Close()
+			c.mu.Lock()
+			bad, raw := c.badFirst, c.raw
+			c.mu.Unlock()
+			if bad {
+				t.Errorf("fake broker: bytes preceded TCPConnect: %q", raw[:min(len(raw), 64)])
+			}
+		}
+	})
+	return e
+}
+
 // Path is the socket's path
 func (e *fakeEm) Path() string { return e.path }
+
+// Addr is a fake broker's listening address, IP:port
+func (e *fakeEm) Addr() string { return e.ln.Addr().String() }
+
+// fakeEmRecorder records every byte a connection reads
+type fakeEmRecorder struct{ c *fakeEmConn }
+
+func (r fakeEmRecorder) Read(p []byte) (int, error) {
+	n, err := r.c.c.Read(p)
+	if n > 0 {
+		r.c.mu.Lock()
+		r.c.raw = append(r.c.raw, p[:n]...)
+		r.c.mu.Unlock()
+	}
+	return n, err
+}
+
+// Raw is every byte the connection received, in order
+func (c *fakeEmConn) Raw() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.raw...)
+}
+
+// CloseWrite half-closes a fake broker's stream: Janus reads EOF
+func (c *fakeEmConn) CloseWrite() {
+	if tc, ok := c.c.(*net.TCPConn); ok {
+		_ = tc.CloseWrite()
+	}
+}
 
 // Script replaces the reply policy; fakeEmDefault is the default, and a
 // script may fall through to it
@@ -221,15 +302,23 @@ func (c *fakeEmConn) Send(b []byte) {
 
 func (c *fakeEmConn) serve() {
 	defer c.Close()
-	line, err := fakeEmReadProxy(c.r)
-	c.mu.Lock()
-	c.proxy = line
-	c.mu.Unlock()
-	if err != nil {
-		return // em ends a stream that does not start with a PROXY line
+	if !c.em.tcp {
+		line, err := fakeEmReadProxy(c.r)
+		c.mu.Lock()
+		c.proxy = line
+		c.mu.Unlock()
+		if err != nil {
+			return // em ends a stream that does not start with a PROXY line
+		}
 	}
-	for {
+	for first := true; ; first = false {
 		m, err := fakeEmReadMsg(c.r)
+		if c.em.tcp && first && (err != nil || m.Command != "TCPConnect") {
+			c.mu.Lock()
+			c.badFirst = len(c.raw) > 0
+			c.mu.Unlock()
+			return // a stock broker closes a connection that does not begin with TCPConnect
+		}
 		if err != nil {
 			return // EOF, a closed conn, or a message em's parser refuses
 		}

@@ -364,3 +364,16 @@ vista.janus.localhost {
 		}
 	}
 }
+
+# The same capability to a stock RPC Broker over TCP: no PROXY line, and
+# Janus's message guard and failed sign-on limit in front of the broker;
+# the suite's fake broker stands in for VistA's own listener.
+vista-tcp.janus.localhost {
+	import janus_access
+	janus {
+		vista /rpc tcp/127.0.0.1:{$JANUS_TEST_VISTA_TCP_PORT:7691} {
+			max_failed_signons 2
+			auth exempt
+		}
+	}
+}

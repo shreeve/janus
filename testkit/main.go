@@ -17,7 +17,7 @@
 //	testkit now-ns
 //	testkit udp-echo --listen ADDR
 //	testkit wt --url URL [--ca FILE] [--origin O] [--resolve IP:PORT] [--n N] [--size B]
-//	testkit vistaem --sock S [--log F]
+//	testkit vistaem --sock S | --tcp ADDR [--log F]
 package main
 
 import (
