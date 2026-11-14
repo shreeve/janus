@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -182,6 +183,8 @@ type vistaRouteState struct {
 
 	lim atomic.Pointer[vistaLimits] // the serving generation's limits, for status
 
+	failures vistaFailedSignons // a tcp route's failed sign-ons per client key
+
 	c vistaCounters
 }
 
@@ -190,9 +193,11 @@ type vistaCounters struct {
 	requests, bytesIn, bytesOut                atomic.Int64
 	clientGone, aborted, queueTimeout, running atomic.Int64
 	queued, draining                           atomic.Int64
-	ended                                      sync.Map // cause → *atomic.Int64
-	refused                                    sync.Map // row → *atomic.Int64
-	refusedLogAt                               sync.Map // row → *vistaLogGate
+	failedSignons, failedSignonHolds           atomic.Int64 // tcp routes
+	ended                                      sync.Map     // cause → *atomic.Int64
+	refused                                    sync.Map     // row → *atomic.Int64
+	guard                                      sync.Map     // guard rule → *atomic.Int64 (tcp routes)
+	refusedLogAt                               sync.Map     // row → *vistaLogGate
 }
 
 func newVistaRouteState(p *vistaPool, key, target string, gen any) *vistaRouteState {
@@ -362,11 +367,16 @@ func (rs *vistaRouteState) refuse(row string, warn bool, fields ...zap.Field) {
 		rs.pool.logger.Debug("janus vista: refused", append(fields, zap.String("route", rs.key), zap.String("reason", row))...)
 		return
 	}
+	rs.warn(row, "janus vista: refused", append(fields, zap.String("reason", row))...)
+}
+
+// warn logs msg at warn, at most one line per route and row each 10 s,
+// with how many were suppressed since the last line.
+func (rs *vistaRouteState) warn(row, msg string, fields ...zap.Field) {
 	v, _ := rs.c.refusedLogAt.LoadOrStore(row, &vistaLogGate{})
 	gate := v.(*vistaLogGate)
 	if suppressed, ok := gate.allow(10 * time.Second); ok {
-		rs.pool.logger.Warn("janus vista: refused",
-			append(fields, zap.String("route", rs.key), zap.String("reason", row), zap.Int64("suppressed", suppressed))...)
+		rs.pool.logger.Warn(msg, append(fields, zap.String("route", rs.key), zap.Int64("suppressed", suppressed))...)
 	}
 }
 
@@ -402,8 +412,10 @@ func (rs *vistaRouteState) declare(target string, l *vistaLimits) {
 // status is the route's row on GET /1.0/vista.
 func (rs *vistaRouteState) status(l *vistaLimits) vistaRouteStatus {
 	rs.mu.Lock()
+	network, _, _ := strings.Cut(rs.target, "/")
 	st := vistaRouteStatus{
 		Target:   rs.target,
+		Network:  network,
 		Sessions: rs.total,
 		Unsigned: rs.unsigned,
 	}
@@ -433,6 +445,14 @@ func (rs *vistaRouteState) status(l *vistaLimits) vistaRouteStatus {
 	for _, row := range vistaRefusalRows {
 		st.Refused[row] = counterOf(&c.refused, row).Load()
 	}
+	if network == "tcp" {
+		st.GuardRefused = map[string]int64{}
+		for _, rule := range vistaGuardRules {
+			st.GuardRefused[rule] = counterOf(&c.guard, rule).Load()
+		}
+		failed, holds := c.failedSignons.Load(), c.failedSignonHolds.Load()
+		st.FailedSignons, st.FailedSignonHolds = &failed, &holds
+	}
 	return st
 }
 
@@ -451,6 +471,7 @@ var vistaRefusalRows = []string{"method", "no_tls", "early_data", "origin", "con
 
 type vistaRouteStatus struct {
 	Target          string           `json:"target"`
+	Network         string           `json:"network"`
 	Sessions        int              `json:"sessions"`
 	Unsigned        int              `json:"unsigned"`
 	Running         int64            `json:"running"`
@@ -470,4 +491,8 @@ type vistaRouteStatus struct {
 	QueueTimeout    int64            `json:"queue_timeout"`
 	Ended           map[string]int64 `json:"ended"`
 	Refused         map[string]int64 `json:"refused"`
+	// A tcp route's message guard and failed sign-on limit.
+	GuardRefused      map[string]int64 `json:"guard_refused,omitempty"`
+	FailedSignons     *int64           `json:"failed_signons,omitempty"`
+	FailedSignonHolds *int64           `json:"failed_signon_holds,omitempty"`
 }

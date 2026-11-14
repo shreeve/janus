@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"go.uber.org/zap"
 )
 
 func (a *App) startVista() error {
@@ -60,6 +61,10 @@ func (a *App) collectVista(ha *caddyhttp.App) error {
 					}
 					a.vistaKeys[key] = true
 					a.state.vista.route(key, rt.target, a).declare(rt.target, rt.limits)
+					if rt.limits.tcp && vistaPublicTarget(rt.limits.tcpAddr) {
+						a.vistaLogger().Warn("janus vista: a tcp target is neither loopback nor private; the hop to the broker is plain TCP and carries sign-on codes",
+							zap.String("route", key), zap.String("target", rt.target))
+					}
 				}
 			}
 			return nil
@@ -69,4 +74,13 @@ func (a *App) collectVista(ha *caddyhttp.App) error {
 		}
 	}
 	return nil
+}
+
+// vistaLogger is the vista pool's logger, which Start's lines share with
+// the sessions'.
+func (a *App) vistaLogger() *zap.Logger {
+	if a.state != nil && a.state.vista != nil && a.state.vista.logger != nil {
+		return a.state.vista.logger
+	}
+	return zap.NewNop()
 }

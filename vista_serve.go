@@ -2,7 +2,8 @@ package janus
 
 // A vista route's request path: admission in the contract's order, the
 // token, a new session on TCPConnect, and every later request through its
-// session's queue (docs/20261010-232539-capability-vista.md, Admission).
+// session's queue (docs/20261010-232539-capability-vista.md, Admission),
+// with a tcp target's message guard (vista_guard.go).
 
 import (
 	"errors"
@@ -192,9 +193,23 @@ func (h *Handler) serveVista(w http.ResponseWriter, r *http.Request, rt *vistaSi
 	if int64(len(body)) > l.maxRequest {
 		return fail(http.StatusBadRequest, "message", true, "bad request: the body exceeds the limit")
 	}
-	msg, err := walkXWB(body)
+	// A tcp target's message guard records the fields the walk passes.
+	var detail *xwbDetail
+	if l.tcp {
+		detail = &xwbDetail{}
+	}
+	msg, err := walkXWBInto(body, detail)
 	if err != nil {
 		return fail(http.StatusBadRequest, "message", true, "bad request: not one broker message", zap.String("why", err.Error()))
+	}
+	// A stock broker parses what it is sent as VA wrote it: the shape
+	// rules judge every message, commands included, before anything else.
+	if l.tcp {
+		if rule := vistaShapeGuard(msg, detail); rule != "" {
+			rs.guardRefuse(rule)
+			vistaWriteSecurity(w, vistaGuardMessage(rule))
+			return nil
+		}
 	}
 
 	// Row 7: the token's form.
@@ -218,7 +233,27 @@ func (h *Handler) serveVista(w http.ResponseWriter, r *http.Request, rt *vistaSi
 		return fail(http.StatusUnauthorized, "unknown", false, "the session has ended")
 	}
 	vistaLogField(r, zap.String("vista_session", s.id))
-	return h.vistaRun(w, r, rs, s, l, body, msg, tok)
+	return h.vistaRun(w, r, rs, s, l, body, msg, detail, tok)
+}
+
+// vistaWriteSecurity answers a refused message with a broker security
+// reply (200): the message was never sent and the session goes on.
+func vistaWriteSecurity(w http.ResponseWriter, msg string) {
+	h := w.Header()
+	h.Set("Content-Type", "application/x-xwb")
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(vistaSecurityReply(msg))
+}
+
+// vistaDialer dials a route's target: 3 s, and for a tcp target TCP
+// keepalive every 15 s, so a broker host that vanishes is noticed.
+func vistaDialer(l *vistaLimits) *net.Dialer {
+	d := &net.Dialer{Timeout: vistaDialTimeout}
+	if l.tcp {
+		d.KeepAliveConfig = net.KeepAliveConfig{Enable: true, Idle: vistaKeepAlive, Interval: vistaKeepAlive}
+	}
+	return d
 }
 
 // vistaStart admits, dials, and opens a session for a TCPConnect.
@@ -245,7 +280,7 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 	}
 	peer, ok := vistaPeer(r)
 	local, lok := vistaLocal(r)
-	if !ok || !lok {
+	if !ok || (!lok && !l.tcp) {
 		rs.refuse("dial", true, zap.String("why", "the connection's addresses are unknown"))
 		return fail(http.StatusBadGateway, "bad gateway")
 	}
@@ -262,20 +297,25 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 		w.Header().Set("Retry-After", "5")
 		return fail(http.StatusServiceUnavailable, "service unavailable: "+strings.ReplaceAll(capName, "_", " "))
 	}
-	conn, err := net.DialTimeout("unix", l.socket, vistaDialTimeout)
+	conn, err := vistaDialer(l).Dial(l.network, l.address)
 	if err != nil {
 		rs.unreserve(key, false)
 		rs.refuse("dial", true, zap.Error(err))
 		return fail(http.StatusBadGateway, "bad gateway")
 	}
 	s := newVistaSession(rs, conn, key, peer.Addr().String(), h.app.state.vista.logger)
+	s.tcp = l.tcp
 	rs.add(s)
 	s.start()
 	vistaLogField(r, zap.String("vista_session", s.id))
-	_ = conn.SetWriteDeadline(time.Now().Add(vistaWriteTimeout))
-	if _, err := conn.Write([]byte(vistaProxyLine(peer, local))); err != nil {
-		s.end(vistaEndClosed)
-		return fail(http.StatusBadGateway, "bad gateway")
+	// em reads the PROXY line first; a stock broker closes a connection
+	// that does not begin with TCPConnect.
+	if !l.tcp {
+		_ = conn.SetWriteDeadline(time.Now().Add(vistaWriteTimeout))
+		if _, err := conn.Write([]byte(vistaProxyLine(peer, local))); err != nil {
+			s.end(vistaEndClosed)
+			return fail(http.StatusBadGateway, "bad gateway")
+		}
 	}
 	o := newVistaResponder(w)
 	o.hold = true // the token rides in the headers, decided by the reply
@@ -294,8 +334,14 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 		o.setCookie = vistaSetCookie(token)
 		s.armSignon(l.signonTimeout)
 		rs.c.started.Add(1)
-		s.logger.Info("janus vista: session started",
-			zap.String("route", rs.key), zap.String("session", s.id), zap.String("client", s.client))
+		fields := []zap.Field{zap.String("route", rs.key), zap.String("session", s.id),
+			zap.String("client", s.client), zap.String("network", l.network)}
+		// The broker sees Janus's address for every session; the dial's
+		// local port joins this line to the broker job's record.
+		if ta, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+			fields = append(fields, zap.Int("local_port", ta.Port))
+		}
+		s.logger.Info("janus vista: session started", fields...)
 		o.release()
 		s.turn <- struct{}{}
 		s.startedOK()
@@ -318,7 +364,7 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 }
 
 // vistaRun queues a request on its session and runs it.
-func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRouteState, s *vistaSession, l *vistaLimits, body []byte, msg xwbMessage, tok vistaToken) error {
+func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRouteState, s *vistaSession, l *vistaLimits, body []byte, msg xwbMessage, detail *xwbDetail, tok vistaToken) error {
 	ended := func(cause string) error {
 		w.Header().Set(vistaEndedHeader, cause)
 		if tok.viaCookie {
@@ -364,6 +410,20 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 	if c, done := s.endedCause(); done {
 		return ended(c)
 	}
+	// A tcp target's session rules, judged under the turn on the state
+	// the requests before this one left; then the failed sign-on hold.
+	if l.tcp {
+		if rule := vistaSessionGuard(msg, detail, s.isSigned()); rule != "" {
+			rs.guardRefuse(rule)
+			vistaWriteSecurity(w, vistaGuardMessage(rule))
+			return nil
+		}
+		if msg.RPC == "XUS AV CODE" && rs.failures.held(s.clientKey, time.Now()) {
+			rs.c.failedSignonHolds.Add(1)
+			vistaWriteSecurity(w, vistaMsgFailedSignon)
+			return nil
+		}
+	}
 	rs.c.running.Add(1)
 	defer rs.c.running.Add(-1)
 	rs.c.requests.Add(1)
@@ -391,6 +451,11 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 	ex := s.exchange(body, judge, false, bye, l, deadline, o)
 	if o.gone {
 		rs.c.clientGone.Add(1)
+	}
+	// An XUS AV CODE reply that signs nothing on and is not an expired
+	// verify code is a failed sign-on from this client key.
+	if l.tcp && ex.complete && msg.RPC == "XUS AV CODE" && ex.verdict != signonOn && ex.verdict != signonExpired {
+		rs.failedSignon(s.clientKey, l)
 	}
 	if ex.complete {
 		return nil
