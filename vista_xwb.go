@@ -20,11 +20,36 @@ type xwbMessage struct {
 	RPC     string // type 1: the RPC name from chunk 2; "" for a command
 }
 
+// xwbDetail is the rest of a request, for the message guard of a route to
+// a stock broker (vista_guard.go): every short string of chunks 1, 2 and
+// 4, and every parameter. Each field is a slice of the body.
+type xwbDetail struct {
+	Shorts    [][]byte   // chunk 1's two, chunk 2's version and name, chunk 4's command
+	HasParams bool       // the message carries chunk 5
+	Params    []xwbParam // chunk 5's parameters, in order
+}
+
+// xwbParam is one parameter: its type byte, a literal's or reference's
+// value (types 0 and 1), or a list's entries (types 2 and 3).
+type xwbParam struct {
+	Type    byte
+	Value   []byte
+	Entries []xwbEntry
+}
+
+// xwbEntry is one list entry; an empty subscript has no value.
+type xwbEntry struct {
+	Sub   []byte
+	Value []byte
+}
+
 // xwbwWalk walks a request in place: every value is a slice of the body,
 // never a copy, and every declared length is checked before it is taken.
+// d, when set, records the request's fields for the guard.
 type xwbwWalk struct {
 	b []byte
 	i int
+	d *xwbDetail
 }
 
 func (w *xwbwWalk) early() error {
@@ -55,7 +80,11 @@ func (w *xwbwWalk) shortString() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return w.take(int(n), "a short string")
+	s, err := w.take(int(n), "a short string")
+	if err == nil && w.d != nil {
+		w.d.Shorts = append(w.d.Shorts, s)
+	}
+	return s, err
 }
 
 // longString takes width decimal digits and that many bytes.
@@ -89,19 +118,28 @@ func (w *xwbwWalk) params(width int) error {
 		case xwbEnd:
 			return nil
 		case '0', '1':
-			if _, err := w.longString(width); err != nil {
+			v, err := w.longString(width)
+			if err != nil {
 				return err
 			}
+			if w.d != nil {
+				w.d.Params = append(w.d.Params, xwbParam{Type: typ, Value: v})
+			}
 		case '2', '3':
+			var entries []xwbEntry
 			for {
 				sub, err := w.longString(width)
 				if err != nil {
 					return err
 				}
+				var val []byte
 				if len(sub) > 0 {
-					if _, err := w.longString(width); err != nil {
+					if val, err = w.longString(width); err != nil {
 						return err
 					}
+				}
+				if w.d != nil {
+					entries = append(entries, xwbEntry{Sub: sub, Value: val})
 				}
 				c, err := w.byte()
 				if err != nil {
@@ -114,8 +152,14 @@ func (w *xwbwWalk) params(width int) error {
 					return fmt.Errorf("xwb: a list entry at byte %d is followed by neither t nor f", at)
 				}
 			}
+			if w.d != nil {
+				w.d.Params = append(w.d.Params, xwbParam{Type: typ, Entries: entries})
+			}
 			continue
 		case '4', '5':
+			if w.d != nil {
+				w.d.Params = append(w.d.Params, xwbParam{Type: typ})
+			}
 		default:
 			return fmt.Errorf("xwb: the parameter at byte %d has no known type", at)
 		}
@@ -132,12 +176,16 @@ func (w *xwbwWalk) params(width int) error {
 // walkXWB checks that body is exactly one well-formed XWB message per the
 // contract's walker rules and returns what it is. Errors are descriptive
 // and never quote the body.
-func walkXWB(body []byte) (xwbMessage, error) {
+func walkXWB(body []byte) (xwbMessage, error) { return walkXWBInto(body, nil) }
+
+// walkXWBInto is walkXWB that also records the message's fields in d when
+// d is set; d is meaningful only when the walk succeeds.
+func walkXWBInto(body []byte, d *xwbDetail) (xwbMessage, error) {
 	var m xwbMessage
 	if len(body) < 5 || string(body[:5]) != "[XWB]" {
 		return m, fmt.Errorf("xwb: the message does not start with [XWB]")
 	}
-	w := xwbwWalk{b: body, i: 5}
+	w := xwbwWalk{b: body, i: 5, d: d}
 	head, err := w.take(4, "the header")
 	if err != nil {
 		return m, err
@@ -200,6 +248,9 @@ func walkXWB(body []byte) (xwbMessage, error) {
 			command, err = w.shortString()
 			hasCommand = true
 		case '5':
+			if d != nil {
+				d.HasParams = true
+			}
 			err = w.params(width)
 			done = true
 		}
