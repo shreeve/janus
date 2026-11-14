@@ -2,17 +2,17 @@ module github.com/shreeve/janus
 
 go 1.26.0
 
-toolchain go1.27.2
+toolchain go1.27.4
 
 require (
-	github.com/andybalholm/brotli v1.2.6
+	github.com/andybalholm/brotli v1.2.8
 	github.com/brutella/dnssd v1.2.15-0.20260227152348-8c9d3cd68d00
 	github.com/caddy-dns/route53 v1.6.2
 	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/caddyserver/certmagic v0.25.6
 	github.com/dustin/go-humanize v1.1.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	github.com/quic-go/quic-go v0.63.0
 	github.com/quic-go/webtransport-go v0.13.0
 	github.com/spf13/cobra v1.10.2

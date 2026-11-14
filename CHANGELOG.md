@@ -47,7 +47,7 @@ A hardening round. What an upgrading operator notices first:
   loaded but unread, and status no longer says `verified`; `sudo janus
   firewall` reloads `/etc/pf.conf` to put the reference back.
 - **Caddy 2.11.7**, current quic-go, webtransport-go, and `x/` modules,
-  built with Go 1.27.2; `govulncheck` gates every pull request.
+  built with Go 1.27.4, with brotli 1.2.8 and compress 1.20.3; `govulncheck` gates every pull request.
 
 Also: `X-Forwarded-For` honors `trusted_proxies`; Janus refusals are
 `no-store`; strict JSON refuses keys repeated in any case; a live control
