@@ -5,7 +5,10 @@ package main
 // connection running VistA's broker loop, which requires a PROXY v1 line
 // first, then reads XWB messages and writes exactly one reply each
 // (OpenVista's docs/RPC-HTTPS.md §2–§3). This serves the same, with
-// RPC-HTTPS §3's measured replies, until killed. The Go tests' in-package
+// RPC-HTTPS §3's measured replies, until killed. With --tcp it is a stock
+// RPC Broker instead (Janus's docs/20261114-142034-capability-vista-tcp.md):
+// a TCP listener, no PROXY line, and a connection whose first message is
+// not TCPConnect is logged bad-first and closed. The Go tests' in-package
 // fake (vista_fakeem_test.go) has the same default policy.
 
 import (
@@ -42,35 +45,40 @@ var (
 	vemEmpty       = []byte("\x00\x00\x04")
 )
 
-// cmdVistaEm: `testkit vistaem --sock S [--log F]` — a fake em on a unix
-// socket. Beyond RPC-HTTPS §3's replies: TCPConnect named "reject" gets
+// cmdVistaEm: `testkit vistaem --sock S | --tcp ADDR [--log F]` — a fake
+// em on a unix socket, or a fake stock broker on a TCP address. Beyond RPC-HTTPS §3's replies: TCPConnect named "reject" gets
 // reject and the stream's end; MERR an M error; ECHO its first literal;
 // BIG N bytes of data; CLOSE-AFTER MS an empty reply, then the stream's
 // end MS milliseconds later (em's idle timeout). The log holds one line
 // per connection and message, never a parameter's value.
 func cmdVistaEm(args []string) {
-	var sock, logf string
-	flagValues(args, map[string]*string{"--sock": &sock, "--log": &logf})
-	if sock == "" {
-		die("usage: testkit vistaem --sock S [--log F]")
+	var sock, tcp, logf string
+	flagValues(args, map[string]*string{"--sock": &sock, "--tcp": &tcp, "--log": &logf})
+	if (sock == "") == (tcp == "") {
+		die("usage: testkit vistaem --sock S | --tcp ADDR [--log F]")
 	}
 	logLine := func(format string, a ...any) {
 		if logf != "" {
 			appendLine(logf, fmt.Sprintf(format, a...))
 		}
 	}
-	_ = os.Remove(sock)
-	l, err := net.Listen("unix", sock)
+	network, addr := "unix", sock
+	if tcp != "" {
+		network, addr = "tcp", tcp
+	} else {
+		_ = os.Remove(sock)
+	}
+	l, err := net.Listen(network, addr)
 	if err != nil {
-		die("testkit: listen %s: %v", sock, err)
+		die("testkit: listen %s: %v", addr, err)
 	}
 	var n atomic.Int64
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			die("testkit: accept %s: %v", sock, err)
+			die("testkit: accept %s: %v", addr, err)
 		}
-		go vemServe(c, int(n.Add(1)), logLine)
+		go vemServe(c, int(n.Add(1)), tcp != "", logLine)
 	}
 }
 
@@ -84,19 +92,31 @@ type vemConn struct {
 
 func (v *vemConn) close() { v.once.Do(func() { v.c.Close() }) }
 
-func vemServe(c net.Conn, id int, logLine func(string, ...any)) {
+func vemServe(c net.Conn, id int, tcp bool, logLine func(string, ...any)) {
 	v := &vemConn{c: c}
 	defer v.close()
 	r := bufio.NewReader(c)
-	line, err := vemReadProxy(r)
-	if err != nil {
-		logLine("conn %d bad-proxy=%q", id, line)
-		return
+	if tcp {
+		logLine("conn %d tcp", id)
+	} else {
+		line, err := vemReadProxy(r)
+		if err != nil {
+			logLine("conn %d bad-proxy=%q", id, line)
+			return
+		}
+		logLine("conn %d proxy=%s", id, line)
 	}
-	logLine("conn %d proxy=%s", id, line)
 	defer logLine("end %d", id)
-	for {
+	for first := true; ; first = false {
 		m, err := vemReadMsg(r)
+		if tcp && first && (err != nil || m.cmd != "TCPConnect") {
+			// A stock broker closes a connection that does not begin with
+			// TCPConnect; anything before it is the bug the log records.
+			if r.Buffered() > 0 || !errors.Is(err, io.EOF) {
+				logLine("conn %d bad-first", id)
+			}
+			return
+		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				logLine("conn %d refused", id)

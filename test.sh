@@ -25,6 +25,7 @@ export XDG_STATE_HOME="$TEST_RUN_DIR/state"
 export JANUS_TEST_CONTROL="$TEST_RUN_DIR/run/janus.sock"
 export JANUS_TEST_ACCESS_LOG="$TEST_RUN_DIR/access.log"
 export JANUS_TEST_VISTA_SOCK="$TEST_RUN_DIR/run/vista.sock"
+export JANUS_TEST_VISTA_TCP_PORT=7691
 # Caddy storage is pinned under the run directory, so the internal CA root
 # that signs every site certificate lands here (see start_caddy).
 export XDG_DATA_HOME="$TEST_RUN_DIR/caddy-data"
@@ -262,7 +263,7 @@ start_caddy() {
 	# Fixed ports must be exclusive. Killing an unknown listener is unsafe, and
 	# supervised services can immediately restart with SO_REUSEPORT and split
 	# acceptance traffic between two Caddy processes.
-	require_ports_free 443 2019 7600 8443 7680 7681 7602 8444 8081 || return 1
+	require_ports_free 443 2019 7600 8443 7680 7681 7602 8444 8081 7691 || return 1
 	rm -f "$TEST_RUN_DIR/run/janus.sock"
 	sleep 0.5
 	# Pin caddy storage so the internal CA root lands at a known path
@@ -589,6 +590,10 @@ test "refusals: not a message, no reply wanted, no token, method, type, path spe
 test "#BYE# ends the session; em closing an idle stream is seen at once" case_vista_bye_and_idle_close
 test "the unsigned cap refuses, and the sign-on deadline frees it" case_vista_unsigned_cap_and_deadline
 test "no session token in the access log" case_vista_no_token_in_access_log
+test "tcp route in place; fake stock broker on its TCP port" case_vista_tcp_setup
+test "tcp: no PROXY line; the pre-sign-on rule; sign-on rotates; #BYE#" case_vista_tcp_session
+test "tcp: the message guard answers 200 with a fixed reply and never sends" case_vista_tcp_guard
+test "tcp: failed sign-ons hold a client's XUS AV CODE" case_vista_tcp_failed_signons
 
 report
 exit $?

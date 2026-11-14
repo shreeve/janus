@@ -391,6 +391,16 @@ vista.example.com {
 			# per_client_exempt 10.20.0.0/24   # terminal servers: many users, one address
 			# signon_timeout 180s · rpc_timeout 10m · queue 8 · max_request 1MiB · max_reply 64MiB
 		}
+		# Or, in place of the route above, a stock VistA RPC Broker over TCP,
+		# by IP address literal: no PROXY line, so the broker sees Janus's
+		# address for every user; Janus guards each message and counts
+		# failed sign-ons per client.
+		# The hop is plain TCP: run Janus on the broker's host or a segment
+		# only the two share (a public address logs a warn line at Start).
+		# vista /rpc tcp/10.10.218.1:9432 {
+		# 	auth exempt
+		# 	# max_failed_signons 5 · failed_signon_window 15m · signon_timeout 170s (at most 179s)
+		# }
 	}
 }
 
