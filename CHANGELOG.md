@@ -46,8 +46,9 @@ A hardening round. What an upgrading operator notices first:
   all`, or a `pfctl -f` of a file without it, the anchor's rules stay
   loaded but unread, and status no longer says `verified`; `sudo janus
   firewall` reloads `/etc/pf.conf` to put the reference back.
-- **Caddy 2.11.7**, current quic-go, webtransport-go, and `x/` modules,
-  built with Go 1.27.4, with brotli 1.2.8 and compress 1.20.3; `govulncheck` gates every pull request.
+- **Caddy 2.11.9**, quic-go 0.63 (the newest Caddy and webtransport-go
+  build with), current webtransport-go and `x/` modules, built with Go
+  1.27.4, with brotli 1.3.0 and compress 1.20.4; `govulncheck` gates every pull request.
 
 Also: `X-Forwarded-For` honors `trusted_proxies`; Janus refusals are
 `no-store`; strict JSON refuses keys repeated in any case; a live control
