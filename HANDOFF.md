@@ -238,7 +238,7 @@ certificate for them, and mdns announces nothing.
 
 ## Environment
 
-- Go: `go.mod` requires 1.26.0 and pins `toolchain go1.27.2`, so local
+- Go: `go.mod` requires 1.26.0 and pins `toolchain go1.27.4`, so local
   builds and CI (`go-version-file`) compile with that release. `make
   janus` builds `bin/janus` (gitignored) and asserts the module is linked.
   Caddy is pinned at 2.11.7; `govulncheck` gates every pull request.

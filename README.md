@@ -104,7 +104,7 @@ behind Janus in production, unchanged.
 
 - A supported prebuilt platform, or **Go** 1.26 or later
   ([go.dev/dl](https://go.dev/dl/)) for source builds; `go.mod` pins the
-  `go1.27.2` toolchain, which Go fetches on its own
+  `go1.27.4` toolchain, which Go fetches on its own
 - A Caddyfile that loads Janus; start with [`Caddyfile.minimal`](Caddyfile.minimal)
 
 ### Install Go (macOS, Homebrew)
