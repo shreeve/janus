@@ -105,7 +105,7 @@ Exposure modes (`localhost` | `lan` | `wan`) are not a capability;
 they are the binary's job (where the service edge listens, and the pf
 anchor or exact binds that hold it there) plus one module rule: in
 `wan`, every janus site refuses `<name>.local`, `<name>.localhost`,
-`localhost`, `via.rip`, and `<name>.via.rip` with 421, mints no
+and `localhost` with 421, mints no
 certificate for them, and mdns announces nothing.
 
 ## How work moves
@@ -182,9 +182,8 @@ certificate for them, and mdns announces nothing.
   the merge procedure. A symptom of a stale seed: a Rip manager
   logging `Janus change publish failed (409)` forever, because hub is
   not enabled for any of its sites.
-- **Local names belong to a machine you sit at.** `*.localhost`,
-  `*.local`, and `via.rip` / `*.via.rip` (public DNS pins them to
-  127.0.0.1) are served in `localhost` and `lan`, refused in `wan`. The
+- **Local names belong to a machine you sit at.** `*.localhost` and
+  `*.local` are served in `localhost` and `lan`, refused in `wan`. The
   trust page (`http://janus.local/trust`, `/trust/ca.crt`,
   `/trust/ca.mobileconfig`) rides the mdns front door over plain HTTP
   on purpose: a phone cannot validate the local CA before installing

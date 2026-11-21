@@ -58,7 +58,8 @@ sendfile caps a request at 16 ranges and sends `nosniff`; `janus status`
 shows the CA fingerprint and a crash loop with its last error; the
 supervisor log rolls over; release archives are built without cgo,
 attested, and verified by `install.sh` where `gh` is present; the root
-systemd unit is sandboxed.
+systemd unit is sandboxed; the local name families are `<name>.local`,
+`<name>.localhost`, and `localhost`, so `via.rip` names are ordinary hosts.
 
 ## 1.19.0 — 2026-09-29
 
