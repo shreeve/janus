@@ -499,14 +499,12 @@ listener the mode covers, at the same addresses as HTTPS; HTTP/3 stays off
 in the seed because it would bind the relay's port.
 
 In `wan` the local name families are off: a request whose Host is
-`<name>.local`, `<name>.localhost`, `localhost`, `via.rip`, or
-`<name>.via.rip` (public DNS pins the via.rip names to 127.0.0.1) is
+`<name>.local`, `<name>.localhost`, or `localhost` is
 refused (421) by every janus site, the front door included, no
 certificate is minted for such a name, mdns announces nothing, and
 `janus serve` says why it has nothing to open. Those names belong to a
 machine you sit at and a network you are on; a public address has
-neither, and neither the seed's local sites nor a via.rip drop-in need
-editing to be safe there. The mode governs the service
+neither, and the seed's local sites need no editing to be safe there. The mode governs the service
 edge; a Caddyfile run some other way is localhost by default and keeps
 its local names.
 

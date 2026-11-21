@@ -411,10 +411,10 @@ function appState(app) {
   if (age >= HEARTBEAT_TTL_MS) return "stale";
   return "idle";
 }
-// via.rip names publicly resolve to 127.0.0.1 by design — on any device
-// other than the machine running the edge they point at the device itself.
+// .localhost names mean the device asking — on any device other than the
+// machine running the edge they point at the device itself.
 function onLan() { return location.hostname.endsWith(".local"); }
-function deadHere(host) { return onLan() && /(^|\.)via\.rip$/.test(host || ""); }
+function deadHere(host) { return onLan() && /(^|\.)localhost$/.test(host || ""); }
 
 function linkIcon() {
   var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");

@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-const appsFixture = `[{"id":"a1","name":"shop","hosts":["shop.via.rip","shop.local"],"upstreams":[{"path":"/tmp/w1.sock"},{"path":"/tmp/w2.sock"}],"lease":"heartbeat"},` +
+const appsFixture = `[{"id":"a1","name":"shop","hosts":["shop.localhost","shop.local"],"upstreams":[{"path":"/tmp/w1.sock"},{"path":"/tmp/w2.sock"}],"lease":"heartbeat"},` +
 	`{"id":"b2","name":"browse","hosts":["browse-1f2e.localhost"],"upstreams":[],"files":{"roots":[{"path":"/Users/ann/docs","browse":true}]},"lease":"process"},` +
 	`{"id":"c3","name":"medlabs","hosts":[],"upstreams":[{"path":"/tmp/bell.sock","doorbell":true}],"site":{"host":"{site}.medlabs.health","dir":"/srv/medlabs/sites","aliases":{"z.local":"z","a.local":"a"}},"lease":"heartbeat"}]`
 
@@ -26,7 +26,7 @@ func TestAppsVerb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apps: %v\n%s", err, out)
 	}
-	for _, want := range []string{"3 apps registered (control unix " + p.sock + ")", "NAME", "shop", "shop.via.rip shop.local", "2 workers", "heartbeat", "browse /Users/ann/docs", "process", "doorbell /tmp/bell.sock, sites in /srv/medlabs/sites", "{site}.medlabs.health a.local z.local", "c3"} {
+	for _, want := range []string{"3 apps registered (control unix " + p.sock + ")", "NAME", "shop", "shop.localhost shop.local", "2 workers", "heartbeat", "browse /Users/ann/docs", "process", "doorbell /tmp/bell.sock, sites in /srv/medlabs/sites", "{site}.medlabs.health a.local z.local", "c3"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("apps lacks %q:\n%s", want, out)
 		}
