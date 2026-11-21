@@ -1,4 +1,4 @@
-import { get, post, read, start } from '@rip-lang/server'
+import { get, hub, read, start } from 'rip/sites'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 
 # The hot-reload act (act 4) edits this constant to 2 and saves.
@@ -7,8 +7,8 @@ STEP = 1
 CHANNEL = '/stats/tally'
 CONTROL = 'http://127.0.0.1:7600'
 
-# Authoritative tally, persisted so it survives pool reloads. tmp/ is
-# ignored by the manager's watcher, so writes here never cause a reload.
+# Authoritative tally, persisted so it survives pool reloads. Only files
+# the API build reads trigger a reload, so writes here never cause one.
 DIR  = "#{import.meta.dir}/tmp"
 FILE = "#{DIR}/tally"
 mkdirSync DIR, { recursive: true }
@@ -28,15 +28,15 @@ resolveAppId = ->
   appId = apps.find((a) -> a.name is 'demo')?.id
 
 snapshot = ->
-  resolveAppId!() unless appId?
+  resolveAppId! unless appId?
   res = fetch! "#{CONTROL}/1.0/apps/#{appId}/hub"
   if res.status is 404
-    resolveAppId!()
+    resolveAppId!
     res = fetch! "#{CONTROL}/1.0/apps/#{appId}/hub"
   res.json!   # { conns, channels: {"/stats/tally": N}, connections: {opaque handles} }
 
 members = ->
-  snap = snapshot!()
+  snap = snapshot!
   snap.channels[CHANNEL] or 0
 
 # --- routes -------------------------------------------------------------------
@@ -47,7 +47,7 @@ get '/' -> PAGE   # PAGE is the HTML constant at the bottom of this file
 # plane. no-store keeps browser and intermediary storage out of the way.
 get '/plumbing' ->
   @header 'Cache-Control', 'no-store'
-  resolveAppId!() unless appId?
+  resolveAppId! unless appId?
   res   = fetch! "#{CONTROL}/1.0/hub"
   stats = res.json!
   mine  = stats.apps[appId] or {}
@@ -55,20 +55,22 @@ get '/plumbing' ->
     conns: mine.conns, frames_in: mine.frames_in,
     deliveries: mine.deliveries, publishes: mine.publishes }
 
-# The hub bridge: Janus POSTs every socket event here with
-# Sec-WebSocket-Frame: open | text | close. The route is TOLERANT: frames
-# it does not recognize (the ?-pings of act 3, future events) fall through
-# to the 204 at the bottom — observed, nothing to say.
-post '/rt/bridge' ->
-  kind = @req.header 'sec-websocket-frame'
+# The hub bridge: Janus POSTs every socket event to /rt/bridge with
+# Sec-WebSocket-Frame: open | text | close, and hub() sends each to its
+# handler. The page has no sign-in, so auth is off. Frames a handler does
+# not recognize (the ?-pings of act 3, future events) fall through to null,
+# a 204 — observed, nothing to say.
+hub
+  bridge: 'rt/bridge'
+  auth: false
 
   # open: the admission decision, AND enrollment + greeting. The list
   # executes in order on the new connection: join first, then deliver.
   # The snapshot cannot include this connection yet (it registers only
   # after this 2xx) — hence the +1.
-  if kind is 'open'
-    n = members!() + 1
-    return [
+  open: ->
+    n = 1 + members!
+    [
       { '+': [CHANNEL] }
       { 'tally!': { value: tally } }
       { '@': [CHANNEL], 'viewers!': { count: n } }
@@ -76,27 +78,25 @@ post '/rt/bridge' ->
 
   # close: fires after Janus's local cleanup, so the snapshot already
   # excludes the departed connection — the count is exact.
-  if kind is 'close'
-    return { '@': [CHANNEL], 'viewers!': { count: members!() } }
+  close: ->
+    { '@': [CHANNEL], 'viewers!': { count: members! } }
 
-  return null unless kind is 'text'
+  text: ->
+    # Act 1: the counter. The client's frame arrives verbatim as the JSON
+    # body; read() sees its top-level keys.
+    if read('increment')? or read('decrement')?
+      tally += STEP if read('increment')?
+      tally -= STEP if read('decrement')?
+      save()
+      # Bridge-response plane: the ORIGINATING connection is the exclusion
+      # context — the "!" suffix is REQUIRED. See the callout below.
+      return { '@': [CHANNEL], 'tally!': { value: tally } }
 
-  # Act 1: the counter. The client's frame arrives verbatim as the JSON
-  # body; read() sees its top-level keys.
-  if read('increment')? or read('decrement')?
-    tally += STEP if read('increment')?
-    tally -= STEP if read('decrement')?
-    save()
-    # Bridge-response plane: the ORIGINATING connection is the exclusion
-    # context — the "!" suffix is REQUIRED. See the callout below.
-    return { '@': [CHANNEL], 'tally!': { value: tally } }
+    # Act 5: the kick. Trusted-plane "*": every resolved member — including
+    # the clicker — receives {"*":"admin kick"} then close 1000.
+    return { '@': [CHANNEL], '*': 'admin kick' } if read('kickall')?
 
-  # Act 5: the kick. Trusted-plane "*": every resolved member — including
-  # the clicker — receives {"*":"admin kick"} then close 1000.
-  if read('kickall')?
-    return { '@': [CHANNEL], '*': 'admin kick' }
-
-  null   # ?-pings and anything else: observed, 204
+    null   # ?-pings and anything else: observed, 204
 
 # --- the page ------------------------------------------------------------------
 
@@ -158,4 +158,4 @@ PAGE = """
 </html>
 """
 
-start()
+start!

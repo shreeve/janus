@@ -1,10 +1,10 @@
-# A realtime counter: Janus + Rip Server, end to end
+# A realtime counter: Janus + Rip Sites, end to end
 
-A guided tour of Janus in one page and one `app.rip`. You will build
+A guided tour of Janus in one page and one `index.rip`. You will build
 a normal web app served over HTTPS that also has WSS support, where the
 browser's secure WebSocket frames are proxied **by Janus as plain HTTP** to
 the Rip server — the Janus↔Rip WS/HTTP bridge is the star. One page, one
-`app.rip`, no extra infrastructure; the richness is small UI panels that
+`index.rip`, no extra infrastructure; the richness is small UI panels that
 make each capability visible.
 
 The page you will build shows a shared tally (+/− buttons), a live viewer
@@ -12,7 +12,7 @@ count, a WS round-trip badge, an admin
 kick button, and a collapsible plumbing panel. Along the way you exercise
 three Janus capabilities — **ping** (the edge answers `/ping` itself,
 proving site admission before any tenant exists), **control** (`/1.0`
-registration, snapshot, counters), and **hub** (every realtime act) — and Rip Server's strengths as the tenant:
+registration, snapshot, counters), and **hub** (every realtime act) — and Rip Sites' strengths as the tenant:
 the Sinatra-style DSL (the whole tenant is a handful of routes that read
 naturally), watch-mode hot reload (the finale), the manager's
 registration/heartbeat lifecycle (visible in `/1.0/apps`), and worker
@@ -22,7 +22,7 @@ Everything below is exact and verified against the shipped contracts: the
 hub contract ([`../20260720-162350-hub-design.md`](../20260720-162350-hub-design.md)),
 the pool protocol
 ([`../20260719-002000-pool-protocol.md`](../20260719-002000-pool-protocol.md)),
-and the `@rip-lang/server` sources. Where the demo makes a judgment call,
+and the `rip/sites` sources. Where the demo makes a judgment call,
 **Design notes** at the end explains it.
 
 Open two browser windows side by side and this is the show, as acts:
@@ -42,13 +42,13 @@ example — substitute your own directory throughout:
 
 ```text
 ~/src/janus   # this repo — the edge (github.com/shreeve/janus)
-~/src/rip     # the Rip language + @rip-lang/server (github.com/shreeve/rip)
+~/src/rip     # the Rip language + Rip Sites (github.com/shreeve/rip)
 ```
 
-The demo's tenant runs on `@rip-lang/server` from
+The demo's tenant runs on Rip Sites (`rip/sites`) from
 [github.com/shreeve/rip](https://github.com/shreeve/rip) — clone it next
-to janus. The demo files `app.rip` and `Caddyfile.demo` sit next to this
-page (`docs/counter/` in the janus repo) — download or copy them; the
+to janus. The demo files `index.rip`, `serve.rip`, and `Caddyfile.demo`
+sit next to this page (`docs/counter/` in the janus repo) — download or copy them; the
 tutorial shows their full contents below, and the shipped files are
 byte-identical to the listings.
 
@@ -70,8 +70,8 @@ byte-identical to the listings.
     (data plane) │ (open/text/close) │ upstreams PUTs, doorbell;
                  ▼                   │ tenant reads /1.0/apps/{id}/hub
         ┌──────────────────────────────────────────────────┐   and /1.0/hub
-        │  rip manager (bun … server.rip, watch mode)      │
-        │   └── worker ×1 (app.rip) — owns tally + STEP    │
+        │  rip sites run (the Manager, watch mode)         │
+        │   └── worker ×1 (index.rip) — owns tally + STEP  │
         └──────────────────────────────────────────────────┘
 ```
 
@@ -88,9 +88,10 @@ Three named flows you will see over and over:
    same data plane. The worker's answer body carries directives, which
    Janus executes and fans out over WSS. This bridge POST is the WSS→HTTP
    proxying moment the demo exists to show.
-3. **Reload (doorbell; sockets survive).** A save settles (~150ms), passes
-   the content-hash gate, and cuts admission with one doorbell PUT. The
-   next demand — here, the next click's bridge POST — rings, the manager
+3. **Reload (doorbell; sockets survive).** A save settles (50ms after the
+   last event, at most 250ms after the first), the Manager builds the new
+   API, and a build that succeeds cuts admission with one doorbell PUT. The
+   next demand — here, the next click's bridge POST — rings, the Manager
    boots a fresh pool, publishes sockets, and the held bridge completes
    against the fresh worker. Hub sockets, channels, and fan-out ride above
    the worker plane and never notice.
@@ -151,74 +152,70 @@ cd ~/src/janus
 ./bin/janus run --config docs/counter/Caddyfile.demo
 ```
 
-**Create and launch the rip app.** The app directory needs
-`node_modules/@rip-lang/server` resolving to the rip checkout, and the
-manager is launched with bun's `--preload` loader plus `--name`, `--host`,
-`--workers`, and `--control`:
+**Create and launch the rip app.** The app directory holds the two
+tenant files: `index.rip`, the API, and `serve.rip`, which names the app,
+its host, and its Hub bridge. `rip` resolves `rip/sites` from the rip
+checkout, so the directory needs nothing installed. `rip sites run`
+starts the Manager in the foreground; `--control` points it at this
+Janus and `--workers 1` keeps one worker:
 
 ```bash
 mkdir -p ~/counter-demo && cd ~/counter-demo
-cp ~/src/janus/docs/counter/app.rip .   # the sibling file, listed in full in section 4
-mkdir -p node_modules/@rip-lang
-ln -sfn ~/src/rip/packages/server node_modules/@rip-lang/server
-
-bun --preload=$HOME/src/rip/src/loader.js \
-  $HOME/src/rip/packages/server/server.rip \
-  --name demo --host demo.localhost --workers 1 \
-  --control http://127.0.0.1:7600
+cp ~/src/janus/docs/counter/index.rip ~/src/janus/docs/counter/serve.rip .
+~/src/rip/bin/rip sites run --control http://127.0.0.1:7600 --workers 1
 ```
 
-Watch mode is on by default (`RIP_ENV` unset): the manager registers,
-heartbeats every 5s, cuts admission with the doorbell, and boots on the
-first demand. Startup prints
-`rip-server: demo registered (demo-xxxxxx) — 1 worker(s), watch on`.
-`--workers 1` is deliberate: the tally and `STEP` live in one worker's
-memory for demo clarity. The production path is to externalize that state
-(a database, a KV store), after which `--workers N` and the data plane's
-least-conn selection shine unchanged.
+`serve.rip`, shipped next to this page:
 
-**Register the bridge path.** The manager registers only `name` and
-`hosts` — it does not know about `bridge` (verified in the rip
-checkout's `packages/server/manager.rip`, `registerApp`). Without a
-registered `bridge`, every hub handshake answers 503 by contract.
-Wire it once, by hand, against the app id the manager just minted:
-
-```bash
-APP_ID=$(curl -s http://127.0.0.1:7600/1.0/apps | jq -r '.[] | select(.name=="demo") | .id')
-curl -s -X PATCH -H 'Content-Type: application/json' \
-  --data '{"bridge":"/rt/bridge"}' \
-  "http://127.0.0.1:7600/1.0/apps/$APP_ID"
+```coffee
+export default
+  name: 'demo'
+  hosts: ['demo.localhost']
+  hub:
+    bridge: 'rt/bridge'
 ```
+
+Watch mode is on by default (`RIP_ENV` unset): the Manager builds the API,
+boots its worker, registers `name`, `hosts`, the worker socket, and the
+`bridge` path in one call, and heartbeats every 5s. Startup prints
+`rip-sites: demo  https://demo.localhost/`. `--workers 1` is deliberate:
+the tally and `STEP` live in one worker's memory for demo clarity. The
+production path is to externalize that state (a database, a KV store),
+after which `--workers N` and the data plane's least-conn selection shine
+unchanged.
+
+The Hub bridge comes from `serve.rip`'s `hub.bridge`: the Manager
+registers `/rt/bridge` with the app, so every hub handshake has a tenant
+to admit it, and the tenant's `hub()` route answers there (section 4).
 
 **Verify:**
 
 ```bash
 curl -s https://demo.localhost/ping           # → pong, answered at the edge: site admission proven, worker never touched — the primordial capability
 curl -s http://127.0.0.1:7600/1.0/apps        # the demo app: id, hosts, upstreams (the manager's lifecycle, visible), "bridge":"/rt/bridge"
-curl -s https://demo.localhost/               # the HTML page (first hit may ride the initial boot)
+curl -s https://demo.localhost/               # the HTML page, from the worker
 curl -s http://127.0.0.1:7600/1.0/hub         # hub counters, all zeros before the first socket
 ```
 
 ## 4. The rip app
 
-Complete `app.rip` — the whole tenant, shipped next to this page.
-Sinatra-style DSL: every act below is one plainly-readable route. The
-tally is persisted under `tmp/` because a hot reload scraps the worker
-pool and with it all module state; `tmp/` is in the watcher's ignore list
-(`IGNORED_DIRS` in `manager.rip`) and is skipped by the content-hash gate,
-so writing it neither triggers nor is lost to reloads. Without this file
-the finale would show 0 → 2 → 4 instead of 3 → 5 → 7.
+Complete `index.rip` — the whole tenant, shipped next to this page.
+Sinatra-style DSL: every act below is one plainly-readable route or hub
+handler. The tally is persisted under `tmp/` because a hot reload scraps
+the worker pool and with it all module state. The Manager reloads only
+when a file the API build read changes, so writing `tmp/tally` neither
+triggers nor is lost to reloads. Without this file the finale would show
+0 → 2 → 4 instead of 3 → 5 → 7.
 
 The app id (needed for the snapshot URL and the plumbing panel) is not in
-the worker's environment — the manager passes only `APP_ARTIFACT`,
-`SOCKET_PATH`, `WORKER_ID`, `WORKER_CONCURRENCY`, `RIP_DRAIN_DEADLINE_MS`
-(verified in `manager.rip`, `spawnWorker`). The clean mechanism: resolve
-it lazily with `GET /1.0/apps`, match by name, cache it, and re-resolve on
-a snapshot 404 (a Janus restart makes the manager re-register under a new
-id).
+the worker's environment — the Manager passes `APP_ARTIFACT`,
+`SOCKET_PATH`, `WORKER_ID`, and `WORKER_CONCURRENCY`. The clean mechanism:
+resolve it lazily with `GET /1.0/apps`, match by name, cache it, and
+re-resolve on a snapshot 404 (a Janus restart makes the Manager
+re-register under a new id).
 
 ```coffee
-import { get, post, read, start } from '@rip-lang/server'
+import { get, hub, read, start } from 'rip/sites'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 
 # The hot-reload act (act 4) edits this constant to 2 and saves.
@@ -227,8 +224,8 @@ STEP = 1
 CHANNEL = '/stats/tally'
 CONTROL = 'http://127.0.0.1:7600'
 
-# Authoritative tally, persisted so it survives pool reloads. tmp/ is
-# ignored by the manager's watcher, so writes here never cause a reload.
+# Authoritative tally, persisted so it survives pool reloads. Only files
+# the API build reads trigger a reload, so writes here never cause one.
 DIR  = "#{import.meta.dir}/tmp"
 FILE = "#{DIR}/tally"
 mkdirSync DIR, { recursive: true }
@@ -248,15 +245,15 @@ resolveAppId = ->
   appId = apps.find((a) -> a.name is 'demo')?.id
 
 snapshot = ->
-  resolveAppId!() unless appId?
+  resolveAppId! unless appId?
   res = fetch! "#{CONTROL}/1.0/apps/#{appId}/hub"
   if res.status is 404
-    resolveAppId!()
+    resolveAppId!
     res = fetch! "#{CONTROL}/1.0/apps/#{appId}/hub"
   res.json!   # { conns, channels: {"/stats/tally": N}, connections: {opaque handles} }
 
 members = ->
-  snap = snapshot!()
+  snap = snapshot!
   snap.channels[CHANNEL] or 0
 
 # --- routes -------------------------------------------------------------------
@@ -267,7 +264,7 @@ get '/' -> PAGE   # PAGE is the HTML constant at the bottom of this file
 # plane. no-store keeps browser and intermediary storage out of the way.
 get '/plumbing' ->
   @header 'Cache-Control', 'no-store'
-  resolveAppId!() unless appId?
+  resolveAppId! unless appId?
   res   = fetch! "#{CONTROL}/1.0/hub"
   stats = res.json!
   mine  = stats.apps[appId] or {}
@@ -275,20 +272,22 @@ get '/plumbing' ->
     conns: mine.conns, frames_in: mine.frames_in,
     deliveries: mine.deliveries, publishes: mine.publishes }
 
-# The hub bridge: Janus POSTs every socket event here with
-# Sec-WebSocket-Frame: open | text | close. The route is TOLERANT: frames
-# it does not recognize (the ?-pings of act 3, future events) fall through
-# to the 204 at the bottom — observed, nothing to say.
-post '/rt/bridge' ->
-  kind = @req.header 'sec-websocket-frame'
+# The hub bridge: Janus POSTs every socket event to /rt/bridge with
+# Sec-WebSocket-Frame: open | text | close, and hub() sends each to its
+# handler. The page has no sign-in, so auth is off. Frames a handler does
+# not recognize (the ?-pings of act 3, future events) fall through to null,
+# a 204 — observed, nothing to say.
+hub
+  bridge: 'rt/bridge'
+  auth: false
 
   # open: the admission decision, AND enrollment + greeting. The list
   # executes in order on the new connection: join first, then deliver.
   # The snapshot cannot include this connection yet (it registers only
   # after this 2xx) — hence the +1.
-  if kind is 'open'
-    n = members!() + 1
-    return [
+  open: ->
+    n = 1 + members!
+    [
       { '+': [CHANNEL] }
       { 'tally!': { value: tally } }
       { '@': [CHANNEL], 'viewers!': { count: n } }
@@ -296,27 +295,25 @@ post '/rt/bridge' ->
 
   # close: fires after Janus's local cleanup, so the snapshot already
   # excludes the departed connection — the count is exact.
-  if kind is 'close'
-    return { '@': [CHANNEL], 'viewers!': { count: members!() } }
+  close: ->
+    { '@': [CHANNEL], 'viewers!': { count: members! } }
 
-  return null unless kind is 'text'
+  text: ->
+    # Act 1: the counter. The client's frame arrives verbatim as the JSON
+    # body; read() sees its top-level keys.
+    if read('increment')? or read('decrement')?
+      tally += STEP if read('increment')?
+      tally -= STEP if read('decrement')?
+      save()
+      # Bridge-response plane: the ORIGINATING connection is the exclusion
+      # context — the "!" suffix is REQUIRED. See the callout below.
+      return { '@': [CHANNEL], 'tally!': { value: tally } }
 
-  # Act 1: the counter. The client's frame arrives verbatim as the JSON
-  # body; read() sees its top-level keys.
-  if read('increment')? or read('decrement')?
-    tally += STEP if read('increment')?
-    tally -= STEP if read('decrement')?
-    save()
-    # Bridge-response plane: the ORIGINATING connection is the exclusion
-    # context — the "!" suffix is REQUIRED. See the callout below.
-    return { '@': [CHANNEL], 'tally!': { value: tally } }
+    # Act 5: the kick. Trusted-plane "*": every resolved member — including
+    # the clicker — receives {"*":"admin kick"} then close 1000.
+    return { '@': [CHANNEL], '*': 'admin kick' } if read('kickall')?
 
-  # Act 5: the kick. Trusted-plane "*": every resolved member — including
-  # the clicker — receives {"*":"admin kick"} then close 1000.
-  if read('kickall')?
-    return { '@': [CHANNEL], '*': 'admin kick' }
-
-  null   # ?-pings and anything else: observed, 204
+    null   # ?-pings and anything else: observed, 204
 
 # --- the page ------------------------------------------------------------------
 
@@ -378,7 +375,7 @@ PAGE = """
 </html>
 """
 
-start()
+start!
 ```
 
 Notes on why this is correct against the shipped contracts:
@@ -411,7 +408,7 @@ Notes on why this is correct against the shipped contracts:
   including the clicker, receives `{"*":"admin kick"}` as its final
   application frame and then close 1000 (verified in `hub.go`, `execute`).
 - Returning `null` gives 204 — the "observed, no directives" bridge
-  answer. This is what makes the route tolerant: `?`-pings and unknown
+  answer. This is what makes the text handler tolerant: `?`-pings and unknown
   events are observed and ignored, never errored.
 
 > **The `!` footgun (do not trip it).** Bridge-response directives execute
@@ -520,26 +517,28 @@ worker's route does nothing but 204.
 
 ## 6. Act 4 — the hot-reload finale
 
-Edit one line in `~/counter-demo/app.rip` and save:
+Edit one line in `~/counter-demo/index.rip` and save:
 
 ```coffee
 STEP = 2
 ```
 
-Mind which file you edit: the manager's watcher sees only the copy in
+Mind which file you edit: the Manager's watcher sees only the copy in
 `~/counter-demo/` — the running app directory. Editing the repo's
-`docs/counter/app.rip` (the shipped artifact this copy came from) changes
-nothing until you copy it over.
+`docs/counter/index.rip` (the shipped artifact this copy came from)
+changes nothing until you copy it over.
 
-The manager's watcher fires; the save settles (~150ms) and the changed
-content hash triggers the reload epoch: one doorbell PUT replaces the
-worker sockets, cutting admission. Nothing boots yet — watch mode is lazy;
-the next demand rings.
+The Manager's watcher fires; the save settles (50ms after the last event,
+at most 250ms after the first) and the Manager builds the new API. A build
+that succeeds cuts admission: one doorbell PUT replaces the worker
+sockets. Nothing boots yet — watch mode is lazy; the next demand rings. A
+build that fails is reported in the Manager's terminal and the running
+worker keeps serving.
 
 Click **+** in browser 2. The frame executes at the edge as always, and
 its text-bridge POST becomes that demand: it selects the doorbell, rings,
-the manager compiles the app once and boots a fresh worker (which reads
-`tmp/tally` → 3), publishes the fresh socket with a sockets PUT, and the
+the Manager boots a fresh worker from the build it already made (which
+reads `tmp/tally` → 3), publishes the fresh socket with a sockets PUT, and the
 held bridge POST completes against the new worker. `3 + 2 = 5`, the
 response directives fan out, both windows render 5. Another click: 7.
 Browser 1 did nothing and watched it happen. The plumbing panel makes the
@@ -610,9 +609,9 @@ per-app breakdown under `"apps"`, keyed by app id):
 
 - **WS handshake answers 503 + `Retry-After`** — no `bridge`
   registered (hub-enabled site, hub-unready tenant, loud by contract).
-  Re-run the PATCH from section 3. Note: if Janus restarts, the manager
-  re-registers under a **new app id** with only `name`/`hosts` — the
-  `bridge` is gone until you PATCH the new id.
+  Check that `serve.rip` declares `hub: { bridge: 'rt/bridge' }` and that
+  `GET /1.0/apps` shows `"bridge":"/rt/bridge"`. If Janus restarts, the
+  Manager re-registers under a **new app id**, bridge included.
 - **WS handshake answers 403** — origin policy. Served page and hub share
   `demo.localhost` so `origin same` passes for browsers; a non-browser
   client (curl, wscat) sends no `Origin` header and fails `same` — that is
@@ -625,16 +624,16 @@ per-app breakdown under `"apps"`, keyed by app id):
 - **Sockets close 1008 after adding the ping timer** — the `?` value must
   be a JSON **string**; `{"?": 1721512345}` is malformed and Janus closes
   the connection with the positioned reason. Send `String(Date.now())`.
-- **Bridge route breaks when acts are added** — a route that only expects
-  increment/decrement will also receive `?`-pings and `kickall` and every
-  future frame (all client frames bridge). It must fall through to 204,
-  never 4xx/5xx: a non-2xx text answer counts `bridge_failed` (client
-  unaffected), and a non-JSON error page would count `bridge_garbage`.
-  Write the bridge route tolerant, as in section 4.
+- **The text handler breaks when acts are added** — a handler that only
+  expects increment/decrement will also receive `?`-pings and `kickall`
+  and every future frame (all client frames bridge). It must fall through
+  to `null` (a 204), never 4xx/5xx: a non-2xx text answer counts
+  `bridge_failed` (client unaffected), and a non-JSON error page would
+  count `bridge_garbage`. Write the text handler tolerant, as in section 4.
 - **Snapshot answers 404** — stale app id (Janus restarted; the manager
   re-registered and minted a new one). The `snapshot` helper re-resolves
-  by name on 404; if presence stops updating, check
-  `GET /1.0/apps` and re-PATCH `bridge` under the new id.
+  by name on 404; if presence stops updating, check `GET /1.0/apps` for
+  the app and its `bridge`.
 - **Kick reason doesn't render** — the `{"*":"admin kick"}` application
   frame arrives **before** the close; handle it in `onmessage` (the
   `msg['*']` branch), not in `onclose` — the WebSocket close code is 1000
@@ -661,8 +660,8 @@ Choices this demo makes, and why — adjust with eyes open:
    for demo clarity. A production app externalizes that state, then
    `--workers N` with least-conn selection applies unchanged.
 3. **App-id discovery is lazy**: `GET /1.0/apps`, match by `name`, cache,
-   re-resolve on snapshot 404. The manager passes no app id to workers in
-   env (verified in `spawnWorker`), so list-and-match is the cleanest real
+   re-resolve on snapshot 404. The Manager passes no app id to workers in
+   their environment, so list-and-match is the cleanest real
    mechanism. It is needed only for the snapshot and plumbing acts — the
    counter loop itself never needs it.
 4. **The open-response greeting is one list frame:**
@@ -674,12 +673,12 @@ Choices this demo makes, and why — adjust with eyes open:
    (demo-scale, accepted).
 5. **The tally persists in `tmp/tally`** inside the app dir — required for
    the 3 → 5 → 7 finale, because a hot reload scraps worker module state.
-   `tmp/` is watcher-ignored and hash-ignored (verified in `manager.rip`),
-   so the writes are reload-safe.
-6. **`bridge` is wired by an operator PATCH** after launch — the
-   `@rip-lang/server` manager does not register or manage `bridge`
-   (verified: `registerApp` sends only `name` and `hosts`). Re-PATCH under
-   the new id if the manager ever re-registers.
+   The Manager reloads only when a file the API build read changes, so the
+   writes are reload-safe.
+6. **`bridge` comes from `serve.rip`** — `hub.bridge: 'rt/bridge'` makes
+   the Manager register `/rt/bridge` with the app on every registration,
+   and the tenant's `hub()` call answers there with auth off, since the
+   page has no sign-in.
 7. **The arithmetic is deliberate**: four increments (1, 2, 3, 4), one
    decrement (3), then step 2 and two increments (5, 7) — a
    self-consistent sequence that lands the 3 → 5 → 7 finale.
