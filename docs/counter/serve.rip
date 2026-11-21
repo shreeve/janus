@@ -1,0 +1,5 @@
+export default
+  name: 'demo'
+  hosts: ['demo.localhost']
+  hub:
+    bridge: 'rt/bridge'
