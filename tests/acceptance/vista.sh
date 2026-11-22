@@ -77,6 +77,8 @@ case_vista_setup() {
 }
 
 case_vista_session_round_trip() {
+	# A bare TCPConnect is the non-browser (CPRS relay) class: accept, a
+	# __Host-ov cookie, no OV-Session, and the token speaks as a Bearer.
 	vista_post tcpconnect
 	eq "$REPLY_CODE" "200"
 	vista_reply_is r-accept
@@ -91,24 +93,38 @@ case_vista_session_round_trip() {
 		;;
 	esac
 	if tr -d '\r' <"$VISTA_DIR/headers" | grep -qi '^ov-session:'; then
-		echo "the token rode in a header other than Set-Cookie" >&2
+		echo "a non-browser TCPConnect set an OV-Session header" >&2
 		return 1
 	fi
 	token="$(vista_token)"
 	eq "${#token}" "43"
 	grep -q 'proxy=PROXY TCP[46] ' "$VISTA_EM_LOG"
-	# Bearer (the CPRS relay) needs no X-OV; a cookie needs it.
 	vista_post imhere -H "Authorization: Bearer $token"
 	eq "$REPLY_CODE" "200"
 	vista_reply_is r-imhere
-	vista_post imhere -H "Cookie: __Host-ov=$token"
+	printf '%s' "$token" >"$VISTA_DIR/token-a"
+
+	# A TCPConnect with an Origin + X-OV is the browser class: it joins a
+	# group, answers an OV-Session, and its tab speaks cookie + OV-Session.
+	local bcookie bov
+	vista_post tcpconnect -H 'X-OV: 1' -H "Origin: https://$VISTA_HOST"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-accept
+	bcookie="$(vista_token)"
+	bov="$(vista_hdr ov-session)"
+	ok "-n \"$bov\"" "a browser TCPConnect answered no OV-Session"
+	# A cookie needs X-OV (CSRF); the right Origin passes, a foreign one is refused.
+	vista_post imhere -H "Cookie: __Host-ov=$bcookie" -H "OV-Session: $bov"
 	eq "$REPLY_CODE" "403"
-	vista_post imhere -H "Cookie: __Host-ov=$token" -H 'X-OV: 1' -H "Origin: https://$VISTA_HOST"
+	vista_post imhere -H "Cookie: __Host-ov=$bcookie" -H "OV-Session: $bov" -H 'X-OV: 1' -H "Origin: https://$VISTA_HOST"
 	eq "$REPLY_CODE" "200"
 	vista_reply_is r-imhere
-	vista_post imhere -H "Cookie: __Host-ov=$token" -H 'X-OV: 1' -H 'Origin: https://evil.example'
+	vista_post imhere -H "Cookie: __Host-ov=$bcookie" -H "OV-Session: $bov" -H 'X-OV: 1' -H 'Origin: https://evil.example'
 	eq "$REPLY_CODE" "403"
-	printf '%s' "$token" >"$VISTA_DIR/token-a"
+	# The last tab's #BYE# clears the shared cookie and frees the connection.
+	vista_post bye -H "Cookie: __Host-ov=$bcookie" -H "OV-Session: $bov" -H 'X-OV: 1' -H "Origin: https://$VISTA_HOST"
+	eq "$REPLY_CODE" "200"
+	vista_reply_is r-bye
 }
 
 case_vista_signon_rotates() {
@@ -142,9 +158,13 @@ case_vista_refusals() {
 	eq "$REPLY_CODE" "400"
 	vista_post noreply
 	eq "$REPLY_CODE" "400"
-	vista_post imhere
+	# A later request naming no session: a well-formed OV-Session with no
+	# cookie resolves nothing (401 unknown); with no OV-Session it is a 400.
+	vista_post imhere -H 'OV-Session: AAAAAAAAAAAAAAAAAAAAAA'
 	eq "$REPLY_CODE" "401"
 	eq "$(vista_hdr ov-session-ended)" "unknown"
+	vista_post imhere
+	eq "$REPLY_CODE" "400"
 	REPLY_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$VISTA_URL")"
 	eq "$REPLY_CODE" "405"
 	REPLY_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H 'Content-Type: text/plain' \
