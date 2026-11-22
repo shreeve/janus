@@ -175,6 +175,33 @@ func FuzzWalkXWB(f *testing.F) {
 	})
 }
 
+// FuzzWalkXWBDetail checks that recording the detail never changes the walk's
+// verdict or message. The message guard and the browser patient binding trust
+// the detail, so a body the admission walk (nil detail) accepts must parse
+// identically with a detail, and one it rejects must reject with a detail too:
+// any divergence is a path to admit a message the guard then reads wrong. It
+// also drives the parameter walker — the richest piece of untrusted parsing
+// and the one vistaFirstLiteralDFN reads — for panics on arbitrary input.
+func FuzzWalkXWBDetail(f *testing.F) {
+	for _, c := range xwbwValid {
+		f.Add([]byte(c.msg))
+	}
+	// A type-0-literal ORWPT SELECT (what the patient binding keys on) and a
+	// type-1 reference, so the corpus seeds both param forms.
+	f.Add([]byte("[XWB]11302" + xwbwSP("1.108") + xwbwSP("ORWPT SELECT") + "5" + "0003237f\x04"))
+	f.Add([]byte("[XWB]11302" + xwbwSP("1.108") + xwbwSP("ORWPT SELECT") + "5" + "1003237f\x04"))
+	f.Fuzz(func(t *testing.T, body []byte) {
+		m0, err0 := walkXWB(body)
+		m1, err1 := walkXWBInto(body, &xwbDetail{})
+		if (err0 == nil) != (err1 == nil) {
+			t.Fatalf("detail walk diverged on accept: nil err=%v, detail err=%v for %q", err0, err1, body)
+		}
+		if err0 == nil && m0 != m1 {
+			t.Fatalf("detail walk diverged on message: nil=%+v detail=%+v for %q", m0, m1, body)
+		}
+	})
+}
+
 // xwbsReplies are RPC-HTTPS §3's measured replies.
 var xwbsReplies = []struct {
 	name  string
@@ -484,4 +511,51 @@ func TestVistaClientKey(t *testing.T) {
 	if got := vistaClientKey(netip.Addr{}); got.IsValid() {
 		t.Errorf("vistaClientKey of the zero Addr = %s", got)
 	}
+}
+
+// FuzzXWBReplyScanner checks the reply scanner's core contract: its verdict
+// must not depend on how the broker's bytes are chunked. The scanner reads an
+// untrusted stream (a buggy, slow, or hostile broker, or a MITM before TLS
+// terminates upstream), and a streaming parser that decides differently fed
+// one byte at a time than all at once is a smuggling surface. This feeds
+// arbitrary bytes both ways and compares the terminal verdict, and pins the
+// "consume everything or signal done" and prefix-cap invariants.
+func FuzzXWBReplyScanner(f *testing.F) {
+	for _, c := range xwbsReplies {
+		f.Add([]byte(c.reply))
+	}
+	f.Fuzz(func(t *testing.T, body []byte) {
+		// All at once.
+		a := &xwbReplyScanner{}
+		na, da := a.Feed(body)
+		if len(a.DataPrefix()) > xwbsPrefixMax {
+			t.Fatalf("all-at-once prefix %d exceeds cap %d", len(a.DataPrefix()), xwbsPrefixMax)
+		}
+		if !da && na != len(body) {
+			t.Fatalf("not done but consumed %d of %d (must consume all or signal done)", na, len(body))
+		}
+		// One byte at a time.
+		b := &xwbReplyScanner{}
+		nb, db := 0, false
+		for i := 0; i < len(body) && !db; i++ {
+			n, done := b.Feed(body[i : i+1])
+			nb += n
+			db = done
+		}
+		if len(b.DataPrefix()) > xwbsPrefixMax {
+			t.Fatalf("byte-by-byte prefix %d exceeds cap %d", len(b.DataPrefix()), xwbsPrefixMax)
+		}
+		if da != db {
+			t.Fatalf("chunking changed done: all-at-once=%v byte-by-byte=%v for %q", da, db, body)
+		}
+		if da {
+			if na != nb {
+				t.Fatalf("chunking changed consumed count: %d vs %d for %q", na, nb, body)
+			}
+			if a.Total() != b.Total() || a.Clean() != b.Clean() || a.MError() != b.MError() ||
+				a.PastShorts() != b.PastShorts() || !bytes.Equal(a.DataPrefix(), b.DataPrefix()) {
+				t.Fatalf("chunking changed the verdict for %q", body)
+			}
+		}
+	})
 }
