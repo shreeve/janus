@@ -689,3 +689,11 @@ func xwbTCPConnectNamedMsg(name string) []byte {
 
 // xwbByeMsg is the #BYE# command, as CPRS sends it
 func xwbByeMsg() []byte { return []byte("[XWB]10304\x05#BYE#\x04") }
+
+// xwbSelectRefMsg is an ORWPT SELECT whose first parameter is a type-1
+// reference, not a type-0 literal DFN: the form a browser connection refuses
+// (em would accept it from a signed-on client, dodging the patient binding).
+func xwbSelectRefMsg(ref string) []byte {
+	body := "1" + fakeEmLong(ref, 3) + "f"
+	return []byte("[XWB]11302" + fakeEmShort("1.108") + fakeEmShort("ORWPT SELECT") + "5" + body + "\x04")
+}

@@ -126,6 +126,41 @@ func (g *vistaRig) connect() string {
 	return tok
 }
 
+// connectBrowser starts a browser connection (Origin + X-OV, no cookie) and
+// returns the group's cookie token and the connection's OV-Session.
+func (g *vistaRig) connectBrowser() (tok, ov string) {
+	g.t.Helper()
+	r := g.do(xwbTCPConnectMsg(), "Origin", g.srv.URL, "X-OV", "1")
+	if r.code != http.StatusOK || !bytes.Equal(r.body, emReplyAccept) || r.err != nil {
+		g.t.Fatalf("browser TCPConnect: %d %q %v", r.code, r.body, r.err)
+	}
+	tok, ov = vistaSetToken(r.h), r.h.Get("OV-Session")
+	if tok == "" || ov == "" {
+		g.t.Fatalf("browser TCPConnect: token %q, OV-Session %q", tok, ov)
+	}
+	return tok, ov
+}
+
+// joinBrowser joins the group a cookie names with a new tab and returns the
+// new connection's OV-Session; no new cookie is set.
+func (g *vistaRig) joinBrowser(tok string) string {
+	g.t.Helper()
+	r := g.do(xwbTCPConnectMsg(), "Cookie", vistaCookieName+"="+tok, "Origin", g.srv.URL, "X-OV", "1")
+	if r.code != http.StatusOK || !bytes.Equal(r.body, emReplyAccept) {
+		g.t.Fatalf("join TCPConnect: %d %q", r.code, r.body)
+	}
+	if sc := vistaSetToken(r.h); sc != "" {
+		g.t.Fatalf("join set a new cookie %q, want none", sc)
+	}
+	return r.h.Get("OV-Session")
+}
+
+// ovcookie addresses a browser connection: its group cookie, OV-Session, and
+// the X-OV browser marker, plus any extra headers.
+func ovcookie(tok, ov string, kv ...string) []string {
+	return append([]string{"Cookie", vistaCookieName + "=" + tok, "OV-Session", ov, "X-OV", "1"}, kv...)
+}
+
 // status is the rig's one route's row on /1.0/vista.
 func (g *vistaRig) status() vistaRouteStatus {
 	for _, st := range g.pool.status() {
@@ -211,18 +246,60 @@ func vistaDirectReq(method string, body []byte, kv ...string) *http.Request {
 
 // --- 1. lifecycle ---------------------------------------------------------------
 
+// A non-browser (Bearer) connection: one token, one session, addressed by
+// Bearer; #BYE# ends it.
 func TestVistaLifecycle(t *testing.T) {
 	g := newVistaRig(t, nil, nil)
-	r := g.do(xwbTCPConnectMsg())
+	tok := g.connect()
+	if !vistaTokenWellFormed(tok) {
+		t.Fatalf("token %q is not 43 base64url characters", tok)
+	}
+	g.em.WaitConns(t, 1)
+	conn := g.em.Conns()[0]
+	_, cport, _ := net.SplitHostPort(g.remote.Load().(string))
+	_, sport, _ := net.SplitHostPort(g.srv.Listener.Addr().String())
+	if want := "PROXY TCP4 127.0.0.1 127.0.0.1 " + cport + " " + sport; conn.Proxy() != want {
+		t.Fatalf("PROXY line %q, want %q", conn.Proxy(), want)
+	}
+
+	r := g.do(imHereMsg, bearer(tok)...)
+	wantReply(t, "IM HERE by Bearer", r, emReplyIMHere)
+	if len(r.h.Values("Set-Cookie")) != 0 {
+		t.Fatalf("IM HERE set a cookie: %q", r.h.Values("Set-Cookie"))
+	}
+	r = g.do(xwbByeMsg(), bearer(tok)...)
+	wantReply(t, "#BYE#", r, emReplyBye)
+	r = g.do(imHereMsg, bearer(tok)...)
+	wantEnded(t, "after #BYE#", r, http.StatusUnauthorized, vistaEndBye)
+	conn.WaitClosed(t)
+
+	var got []string
+	for _, m := range conn.Received() {
+		got = append(got, m.Command+m.RPC)
+	}
+	if want := "TCPConnect,XWB IM HERE,#BYE#"; strings.Join(got, ",") != want {
+		t.Fatalf("the em received %q, want %q", got, want)
+	}
+	vistaWait(t, "the session's entry to go", func() bool { return g.status().Sessions == 0 })
+	if st := g.status(); st.Started != 1 || st.Ended["bye"] != 1 || st.Requests != 2 {
+		t.Fatalf("status: %+v", st)
+	}
+}
+
+// A browser connection: the cookie names a group, a connection is selected by
+// OV-Session, X-OV is required, and #BYE# of the last tab clears the cookie.
+func TestVistaBrowserLifecycle(t *testing.T) {
+	g := newVistaRig(t, nil, nil)
+	r := g.do(xwbTCPConnectMsg(), "Origin", g.srv.URL, "X-OV", "1")
 	wantReply(t, "TCPConnect", r, emReplyAccept)
 	sc := r.h.Values("Set-Cookie")
-	tok := vistaSetToken(r.h)
+	tok, ov := vistaSetToken(r.h), r.h.Get("OV-Session")
 	if len(sc) != 1 || len(tok) != vistaTokenLen ||
 		sc[0] != vistaCookieName+"="+tok+"; Path=/; Secure; HttpOnly; SameSite=Strict" {
 		t.Fatalf("TCPConnect Set-Cookie: %q", sc)
 	}
-	if !vistaTokenWellFormed(tok) {
-		t.Fatalf("token %q is not 43 base64url characters", tok)
+	if !vistaTokenWellFormed(tok) || !vistaOVWellFormed(ov) {
+		t.Fatalf("token %q / OV-Session %q malformed", tok, ov)
 	}
 	for name, vals := range r.h {
 		for _, v := range vals {
@@ -235,46 +312,212 @@ func TestVistaLifecycle(t *testing.T) {
 		t.Fatalf("TCPConnect headers: %v", r.h)
 	}
 
-	g.em.WaitConns(t, 1)
-	conn := g.em.Conns()[0]
-	_, cport, _ := net.SplitHostPort(g.remote.Load().(string))
-	_, sport, _ := net.SplitHostPort(g.srv.Listener.Addr().String())
-	if want := "PROXY TCP4 127.0.0.1 127.0.0.1 " + cport + " " + sport; conn.Proxy() != want {
-		t.Fatalf("PROXY line %q, want %q", conn.Proxy(), want)
-	}
-
-	r = g.do(imHereMsg, bearer(tok)...)
-	wantReply(t, "IM HERE by Bearer", r, emReplyIMHere)
-	if len(r.h.Values("Set-Cookie")) != 0 {
-		t.Fatalf("IM HERE set a cookie: %q", r.h.Values("Set-Cookie"))
-	}
-	wantReply(t, "IM HERE by cookie and X-OV", g.do(imHereMsg, cookie(tok, "X-OV", "1")...), emReplyIMHere)
-	if r := g.do(imHereMsg, cookie(tok)...); r.code != http.StatusForbidden {
+	wantReply(t, "IM HERE by cookie and OV-Session", g.do(imHereMsg, ovcookie(tok, ov)...), emReplyIMHere)
+	if r := g.do(imHereMsg, "Cookie", vistaCookieName+"="+tok, "OV-Session", ov); r.code != http.StatusForbidden {
 		t.Fatalf("cookie without X-OV: %d, want 403", r.code)
 	}
 
-	r = g.do(xwbByeMsg(), cookie(tok, "X-OV", "1")...)
+	r = g.do(xwbByeMsg(), ovcookie(tok, ov)...)
 	wantReply(t, "#BYE#", r, emReplyBye)
 	if sc := r.h.Values("Set-Cookie"); len(sc) != 1 || sc[0] != vistaClearCookie || !strings.Contains(sc[0], "Max-Age=0") {
 		t.Fatalf("#BYE# Set-Cookie: %q, want the clearing cookie", sc)
 	}
-	r = g.do(imHereMsg, cookie(tok, "X-OV", "1")...)
-	wantEnded(t, "after #BYE#", r, http.StatusUnauthorized, vistaEndBye)
+	// The group's last connection is gone, so the cookie now resolves none.
+	r = g.do(imHereMsg, ovcookie(tok, ov)...)
+	wantEnded(t, "after #BYE#", r, http.StatusUnauthorized, vistaEndUnknown)
 	if sc := r.h.Values("Set-Cookie"); len(sc) != 1 || sc[0] != vistaClearCookie {
 		t.Fatalf("401 to a cookie: Set-Cookie %q, want the clearing cookie", sc)
 	}
-	conn.WaitClosed(t)
 
-	var got []string
-	for _, m := range conn.Received() {
-		got = append(got, m.Command+m.RPC)
-	}
-	if want := "TCPConnect,XWB IM HERE,XWB IM HERE,#BYE#"; strings.Join(got, ",") != want {
-		t.Fatalf("the em received %q, want %q", got, want)
-	}
-	vistaWait(t, "the session's entry to go", func() bool { return g.status().Sessions == 0 })
-	if st := g.status(); st.Started != 1 || st.Ended["bye"] != 1 || st.Requests != 3 {
+	vistaWait(t, "the group to go", func() bool { return g.status().Connections == 0 && g.status().Groups == 0 })
+	if st := g.status(); st.Started != 1 || st.Ended["bye"] != 1 || st.Requests != 2 {
 		t.Fatalf("status: %+v", st)
+	}
+}
+
+// Two tabs share one group cookie, each with its own OV-Session. A per-tab
+// #BYE# must leave the shared cookie intact for the sibling; only the group's
+// last tab clears it. A dead OV-Session in a live group is a 401 that keeps
+// the cookie.
+func TestVistaTabGroup(t *testing.T) {
+	g := newVistaRig(t, nil, nil)
+	tok, ov1 := g.connectBrowser()
+	ov2 := g.joinBrowser(tok)
+	if ov1 == ov2 {
+		t.Fatalf("the two tabs share an OV-Session %q", ov1)
+	}
+	if st := g.status(); st.Connections != 2 || st.Groups != 1 {
+		t.Fatalf("status after two tabs: connections %d groups %d", st.Connections, st.Groups)
+	}
+	wantReply(t, "tab 1", g.do(imHereMsg, ovcookie(tok, ov1)...), emReplyIMHere)
+	wantReply(t, "tab 2", g.do(imHereMsg, ovcookie(tok, ov2)...), emReplyIMHere)
+
+	// Tab 1 closes. Its #BYE# must not clear the cookie the sibling shares.
+	r := g.do(xwbByeMsg(), ovcookie(tok, ov1)...)
+	wantReply(t, "tab 1 #BYE#", r, emReplyBye)
+	if sc := r.h.Values("Set-Cookie"); len(sc) != 0 {
+		t.Fatalf("a per-tab #BYE# with a live sibling cleared the cookie: %q", sc)
+	}
+	vistaWait(t, "tab 1 to go", func() bool { return g.status().Connections == 1 })
+
+	// Tab 1's OV-Session now names no connection in a still-live group: a 401
+	// that names the ended connection and keeps the cookie.
+	r = g.do(imHereMsg, ovcookie(tok, ov1)...)
+	wantEnded(t, "the closed tab", r, http.StatusUnauthorized, vistaEndBye)
+	if sc := r.h.Values("Set-Cookie"); len(sc) != 0 {
+		t.Fatalf("a dead OV-Session in a live group cleared the cookie: %q", sc)
+	}
+	if st := g.status(); st.Refused["connection"] != 1 {
+		t.Fatalf("refused[connection] %d, want 1", st.Refused["connection"])
+	}
+	// The sibling still works under the shared cookie.
+	wantReply(t, "tab 2 after its sibling left", g.do(imHereMsg, ovcookie(tok, ov2)...), emReplyIMHere)
+
+	// Tab 2 is now the group's last connection, so its #BYE# clears the cookie.
+	r = g.do(xwbByeMsg(), ovcookie(tok, ov2)...)
+	wantReply(t, "tab 2 #BYE#", r, emReplyBye)
+	if sc := r.h.Values("Set-Cookie"); len(sc) != 1 || sc[0] != vistaClearCookie {
+		t.Fatalf("the last tab's #BYE# did not clear the cookie: %q", sc)
+	}
+	vistaWait(t, "the group to go", func() bool { return g.status().Connections == 0 && g.status().Groups == 0 })
+}
+
+// A tab whose request times out (a 504 that ends its connection) must not
+// clear the shared cookie while a sibling tab is still live.
+func TestVistaTabTimeoutKeepsCookie(t *testing.T) {
+	g := newVistaRig(t, nil, func(l *vistaLimits) { l.rpcTimeout = 300 * time.Millisecond })
+	g.em.Script(func(c *fakeEmConn, m fakeEmMsg) []fakeEmAction {
+		if fakeEmParam(m, 0) == "stall" {
+			return []fakeEmAction{{Stall: true}}
+		}
+		return fakeEmDefault(c, m)
+	})
+	tok, ov1 := g.connectBrowser()
+	ov2 := g.joinBrowser(tok)
+	r := g.do(echoMsg("stall"), ovcookie(tok, ov1)...)
+	wantEnded(t, "a stalled tab", r, http.StatusGatewayTimeout, vistaEndRPCTimeout)
+	if sc := r.h.Values("Set-Cookie"); len(sc) != 0 {
+		t.Fatalf("a timed-out tab with a live sibling cleared the cookie: %q", sc)
+	}
+	wantReply(t, "the sibling", g.do(imHereMsg, ovcookie(tok, ov2)...), emReplyIMHere)
+}
+
+// A group's first sign-on rotates the shared cookie once; both tabs then
+// resolve under the new cookie, and the rotated-from cookie stays a live
+// alias through the grace window. A later tab's sign-on does not rotate again.
+func TestVistaGroupRotation(t *testing.T) {
+	g := newVistaRig(t, nil, nil)
+	tok1, ov1 := g.connectBrowser()
+	ov2 := g.joinBrowser(tok1)
+
+	r := g.do(xwbRPCMsg("XUS AV CODE", "GOOD;CODE"), ovcookie(tok1, ov1)...)
+	if r.code != http.StatusOK {
+		t.Fatalf("first sign-on: %d %q", r.code, r.body)
+	}
+	tok2 := vistaSetToken(r.h)
+	if tok2 == "" || tok2 == tok1 || !vistaTokenWellFormed(tok2) {
+		t.Fatalf("first sign-on did not rotate the cookie: %q (was %q)", tok2, tok1)
+	}
+	// Both tabs resolve under the rotated cookie.
+	wantReply(t, "tab 1 under the new cookie", g.do(imHereMsg, ovcookie(tok2, ov1)...), emReplyIMHere)
+	wantReply(t, "tab 2 under the new cookie", g.do(imHereMsg, ovcookie(tok2, ov2)...), emReplyIMHere)
+	// The rotated-from cookie is still a live alias during the grace window.
+	wantReply(t, "tab 2 under the old cookie", g.do(imHereMsg, ovcookie(tok1, ov2)...), emReplyIMHere)
+
+	// A second tab's sign-on does not rotate the cookie again.
+	r = g.do(xwbRPCMsg("XUS AV CODE", "GOOD;CODE"), ovcookie(tok2, ov2)...)
+	if r.code != http.StatusOK {
+		t.Fatalf("second sign-on: %d %q", r.code, r.body)
+	}
+	if sc := r.h.Values("Set-Cookie"); len(sc) != 0 {
+		t.Fatalf("a later tab's sign-on rotated the cookie again: %q", sc)
+	}
+}
+
+// end-all (OV-End: all on a #BYE# with no OV-Session) ends every tab of the
+// group, reports the count, and clears the shared cookie.
+func TestVistaEndAll(t *testing.T) {
+	g := newVistaRig(t, nil, nil)
+	tok, _ := g.connectBrowser()
+	g.joinBrowser(tok)
+	if st := g.status(); st.Connections != 2 {
+		t.Fatalf("connections %d, want 2", st.Connections)
+	}
+	r := g.do(xwbByeMsg(), "Cookie", vistaCookieName+"="+tok, "X-OV", "1", "OV-End", "all")
+	if r.code != http.StatusOK || !bytes.Equal(r.body, emReplyBye) {
+		t.Fatalf("end-all: %d %q", r.code, r.body)
+	}
+	if got := r.h.Get("OV-Ended"); got != "2" {
+		t.Fatalf("OV-Ended %q, want 2", got)
+	}
+	if sc := r.h.Values("Set-Cookie"); len(sc) != 1 || sc[0] != vistaClearCookie {
+		t.Fatalf("end-all did not clear the cookie: %q", sc)
+	}
+	vistaWait(t, "the group to go", func() bool { return g.status().Connections == 0 && g.status().Groups == 0 })
+}
+
+// A browser connection's first literal ORWPT SELECT binds it to that DFN. A
+// later select of a different DFN, an OV-Patient naming another DFN, or a
+// non-literal (type-1) select is refused unsent with a 200 security reply.
+func TestVistaPatientBinding(t *testing.T) {
+	g := newVistaRig(t, nil, nil)
+	tok, ov := g.connectBrowser()
+	wantReply(t, "select 237 binds", g.do(xwbRPCMsg("ORWPT SELECT", "237"), ovcookie(tok, ov)...), emReplyEmpty)
+	if st := g.status(); st.Bound != 1 {
+		t.Fatalf("bound %d, want 1", st.Bound)
+	}
+	wantReply(t, "select 237 again", g.do(xwbRPCMsg("ORWPT SELECT", "237"), ovcookie(tok, ov)...), emReplyEmpty)
+
+	r := g.do(xwbRPCMsg("ORWPT SELECT", "999"), ovcookie(tok, ov)...)
+	if r.code != http.StatusOK || !bytes.Contains(r.body, []byte(vistaMsgOtherPatient)) {
+		t.Fatalf("a different patient was not refused: %d %q", r.code, r.body)
+	}
+	r = g.do(imHereMsg, ovcookie(tok, ov, "OV-Patient", "999")...)
+	if r.code != http.StatusOK || !bytes.Contains(r.body, []byte(vistaMsgOtherPatient)) {
+		t.Fatalf("an OV-Patient mismatch was not refused: %d %q", r.code, r.body)
+	}
+
+	// A second tab selecting by a non-literal reference is refused, fail-closed.
+	ov2 := g.joinBrowser(tok)
+	r = g.do(xwbSelectRefMsg("237"), ovcookie(tok, ov2)...)
+	if r.code != http.StatusOK || !bytes.Contains(r.body, []byte(vistaMsgSelectForm)) {
+		t.Fatalf("a non-literal select was not refused: %d %q", r.code, r.body)
+	}
+	if st := g.status(); st.Refused["patient"] != 3 {
+		t.Fatalf("refused[patient] %d, want 3", st.Refused["patient"])
+	}
+}
+
+// OV-* request headers belong only to a browser connection. On a non-browser
+// (Bearer) request they are a 400; a browser end-all is well-formed only as
+// 'all' on a #BYE# with no OV-Session, and OV-Session itself must be well
+// formed before the session is resolved.
+func TestVistaMisplacedOVHeaders(t *testing.T) {
+	g := newVistaRig(t, nil, nil)
+	tok := g.connect()
+	for _, kv := range [][2]string{{"OV-Session", "x"}, {"OV-Patient", "237"}, {"OV-End", "all"}} {
+		r := g.do(imHereMsg, bearer(tok, kv[0], kv[1])...)
+		if r.code != http.StatusBadRequest {
+			t.Errorf("Bearer with %s: %d, want 400", kv[0], r.code)
+		}
+	}
+	bt, bov := g.connectBrowser()
+	// end-all forms that are not 'all' on a bare #BYE#.
+	for _, kv := range [][]string{
+		{"Cookie", vistaCookieName + "=" + bt, "X-OV", "1", "OV-End", "some"},
+		{"Cookie", vistaCookieName + "=" + bt, "X-OV", "1", "OV-End", "all", "OV-Session", bov},
+	} {
+		if r := g.do(xwbByeMsg(), kv...); r.code != http.StatusBadRequest {
+			t.Errorf("malformed end-all %v: %d, want 400", kv, r.code)
+		}
+	}
+	// OV-End: all on a non-#BYE# is a 400.
+	if r := g.do(imHereMsg, "Cookie", vistaCookieName+"="+bt, "X-OV", "1", "OV-End", "all"); r.code != http.StatusBadRequest {
+		t.Errorf("OV-End on a non-#BYE#: %d, want 400", r.code)
+	}
+	// A malformed OV-Session is a 400 before the session is resolved.
+	if r := g.do(imHereMsg, ovcookie(bt, "not-well-formed")...); r.code != http.StatusBadRequest {
+		t.Errorf("malformed OV-Session: %d, want 400", r.code)
 	}
 }
 
@@ -341,7 +584,8 @@ func TestVistaAdmissionRows(t *testing.T) {
 		{"two cookies", "", imHereMsg, []string{"Cookie", vistaCookieName + "=" + tok + "; " + vistaCookieName + "=" + random, "X-OV", "1"}, http.StatusBadRequest, "token"},
 		{"cookie and Bearer", "", imHereMsg, cookie(tok, "Authorization", "Bearer "+tok, "X-OV", "1"), http.StatusBadRequest, "token"},
 		{"Basic", "", imHereMsg, []string{"Authorization", "Basic YTpi"}, http.StatusBadRequest, "token"},
-		{"no token", "", imHereMsg, nil, http.StatusUnauthorized, "unknown"},
+		{"bare later request", "", imHereMsg, nil, http.StatusBadRequest, "ov_session"},
+		{"OV-Session without cookie", "", imHereMsg, []string{"OV-Session", vistaMintOV()}, http.StatusUnauthorized, "unknown"},
 		{"unknown token", "", imHereMsg, bearer(random), http.StatusUnauthorized, "unknown"},
 	}
 	for _, tc := range cases {
@@ -418,7 +662,7 @@ func TestVistaAdmissionOrder(t *testing.T) {
 		{"no TLS", http.MethodPost, imHereMsg, []string{"Origin", "https://evil.example"}, noTLS, http.StatusMisdirectedRequest, "no_tls"},
 		{"TLS early data", http.MethodPost, imHereMsg, []string{"Origin", "https://evil.example"}, early, http.StatusTooEarly, "early_data"},
 		{"Early-Data from a trusted proxy", http.MethodPost, imHereMsg, []string{"Early-Data", "1"}, trusted, http.StatusTooEarly, "early_data"},
-		{"Early-Data from an untrusted peer", http.MethodPost, imHereMsg, []string{"Early-Data", "1"}, nil, http.StatusUnauthorized, "unknown"},
+		{"Early-Data from an untrusted peer", http.MethodPost, imHereMsg, []string{"Early-Data", "1", "OV-Session", vistaMintOV()}, nil, http.StatusUnauthorized, "unknown"},
 		{"foreign Origin before content type", http.MethodPost, []byte("x"), []string{"Origin", "https://evil.example", "Content-Type", "text/plain"}, nil, http.StatusForbidden, "origin"},
 		{"content type before the body", http.MethodPost, []byte("x"), []string{"Content-Type", "text/plain"}, nil, http.StatusUnsupportedMediaType, "content_type"},
 		{"the body before the token", http.MethodPost, []byte("x"), []string{"Authorization", "Basic YTpi"}, nil, http.StatusBadRequest, "message"},
@@ -877,11 +1121,11 @@ func TestVistaRPCTimeout(t *testing.T) {
 		return fakeEmDefault(c, m)
 	})
 
-	tok := g.connect()
-	r := g.do(echoMsg("stall"), cookie(tok, "X-OV", "1")...)
+	tok, ov := g.connectBrowser()
+	r := g.do(echoMsg("stall"), ovcookie(tok, ov)...)
 	wantEnded(t, "before the first byte", r, http.StatusGatewayTimeout, vistaEndRPCTimeout)
 	if sc := r.h.Values("Set-Cookie"); len(sc) != 1 || sc[0] != vistaClearCookie {
-		t.Fatalf("a session-ending 504 to a cookie: Set-Cookie %q", sc)
+		t.Fatalf("a session-ending 504 to a solo browser tab: Set-Cookie %q", sc)
 	}
 	g.em.Conns()[0].WaitClosed(t)
 
@@ -1086,8 +1330,9 @@ func TestVistaRoutingUnderAuth(t *testing.T) {
 	}
 	t.Cleanup(ah.h.app.state.vista.closeAll)
 
-	// The exempt route is served without a session, before the wall.
-	rr := serveSite(t, ah.h, vistaDirectReq(http.MethodPost, imHereMsg))
+	// The exempt route is served without a session, before the wall: vista
+	// answers (its ended header), not the auth gate.
+	rr := serveSite(t, ah.h, vistaDirectReq(http.MethodPost, imHereMsg, "OV-Session", vistaMintOV()))
 	if rr.Code != http.StatusUnauthorized || rr.Header().Get(vistaEndedHeader) != vistaEndUnknown {
 		t.Fatalf("exempt route: %d %s=%q", rr.Code, vistaEndedHeader, rr.Header().Get(vistaEndedHeader))
 	}
@@ -1122,7 +1367,7 @@ func TestVistaRoutingUnderAuth(t *testing.T) {
 		t.Fatalf("gated route without a login: %d %s=%q, want the gate's 401", rr.Code, vistaEndedHeader, rr.Header().Get(vistaEndedHeader))
 	}
 	session := ah.loginDoor(t, "vista.test", "/rpc/auth", "alice", "open-sesame")
-	r = vistaDirectReq(http.MethodPost, imHereMsg)
+	r = vistaDirectReq(http.MethodPost, imHereMsg, "OV-Session", vistaMintOV())
 	r.AddCookie(&http.Cookie{Name: authCookieName, Value: session})
 	rr = serveSite(t, ah.h, r)
 	if rr.Code != http.StatusUnauthorized || rr.Header().Get(vistaEndedHeader) != vistaEndUnknown {
@@ -1385,7 +1630,7 @@ func TestVistaLogsCarryNoSecret(t *testing.T) {
 	tok := g.connect()
 	tokens = append(tokens, tok)
 	wantReply(t, "IM HERE", g.do(imHereMsg, bearer(tok)...), emReplyIMHere)
-	r := g.do(xwbRPCMsg("XUS AV CODE", " GOOD;CODE "), cookie(tok, "X-OV", "1")...)
+	r := g.do(xwbRPCMsg("XUS AV CODE", " GOOD;CODE "), bearer(tok)...)
 	fresh := vistaSetToken(r.h)
 	if fresh == "" {
 		t.Fatal("no rotation")
@@ -1488,22 +1733,31 @@ func TestVistaRPCTimeoutStartsAfterTheQueue(t *testing.T) {
 	}
 }
 
-// A cookie-borne TCPConnect that replaced a session and then failed clears
-// the dead cookie in its own answer.
-func TestVistaFailedReplaceClearsTheCookie(t *testing.T) {
+// A browser join (a cookie-and-Origin TCPConnect) to a dead target fails
+// without touching the group's shared cookie: a sibling tab must survive.
+func TestVistaFailedJoinKeepsGroupCookie(t *testing.T) {
 	g := newVistaRig(t, nil, nil)
-	tok := g.connect()
+	tok, ov := g.connectBrowser() // one live tab in a fresh group
 	g.h.vistaRoutes[0].limits.address = "/nonexistent/em.sock"
 	r := g.do(xwbTCPConnectMsg(), cookie(tok, "X-OV", "1", "Origin", g.srv.URL)...)
 	if r.code != http.StatusBadGateway {
-		t.Fatalf("TCPConnect to a dead target: %d", r.code)
+		t.Fatalf("join TCPConnect to a dead target: %d", r.code)
 	}
-	cleared := false
-	for _, v := range r.h.Values("Set-Cookie") {
-		cleared = cleared || strings.HasPrefix(v, vistaCookieName+"=;") && strings.Contains(v, "Max-Age=0")
+	if sc := r.h.Values("Set-Cookie"); len(sc) != 0 {
+		t.Fatalf("a failed join touched the shared cookie: %q", sc)
 	}
-	if !cleared {
-		t.Fatalf("the replaced session's cookie was not cleared: %q", r.h.Values("Set-Cookie"))
+	// The original tab's connection is untouched and still resolves.
+	wantReply(t, "the surviving tab", g.do(imHereMsg, ovcookie(tok, ov)...), emReplyIMHere)
+}
+
+// A non-browser (Bearer) TCPConnect carrying a live token replaces its own
+// prior session, which then resolves to the replaced tombstone.
+func TestVistaBearerReplace(t *testing.T) {
+	g := newVistaRig(t, nil, nil)
+	tok := g.connect()
+	r := g.do(xwbTCPConnectMsg(), bearer(tok)...)
+	if r.code != http.StatusOK || !bytes.Equal(r.body, emReplyAccept) {
+		t.Fatalf("bearer re-TCPConnect: %d %q", r.code, r.body)
 	}
 	wantEnded(t, "the replaced token", g.do(imHereMsg, bearer(tok)...), http.StatusUnauthorized, vistaEndReplaced)
 }
