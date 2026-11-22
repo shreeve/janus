@@ -117,15 +117,17 @@ func BenchmarkVistaRoundTrip64(b *testing.B) {
 }
 
 // BenchmarkVistaAdmissionRefusal: the admission path to a refusal that
-// never touches em (no token on an RPC: 401), the cost every request pays
-// before its stream.
+// never touches em (an unknown Bearer token on an RPC: 401), the cost every
+// request pays, including the token HMAC and the session lookup miss, before
+// its stream.
 func BenchmarkVistaAdmissionRefusal(b *testing.B) {
 	e := newVbenchEdge(b)
 	msg := xwbRPCMsg("XWB IM HERE")
+	token := vistaMintToken()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if resp, _ := e.post(b, msg, ""); resp.StatusCode != http.StatusUnauthorized {
+		if resp, _ := e.post(b, msg, token); resp.StatusCode != http.StatusUnauthorized {
 			b.Fatalf("status %d", resp.StatusCode)
 		}
 	}

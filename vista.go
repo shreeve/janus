@@ -24,6 +24,10 @@ const (
 	vistaCookieName   = "__Host-ov"
 	vistaTombstoneTTL = 10 * time.Minute
 	vistaTokenLen     = 43 // 32 bytes, base64url without padding
+	vistaOVLen        = 22 // 16 bytes, base64url without padding (OV-Session)
+	// vistaRotateGrace keeps a rotated cookie-HMAC resolving its group, so a
+	// second tab's in-flight request on the pre-rotation cookie is not killed.
+	vistaRotateGrace = 60 * time.Second
 )
 
 // Session end causes, as OV-Session-Ended names them.
@@ -145,6 +149,46 @@ func vistaMintToken() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// vistaMintOV mints an OV-Session number: 16 random bytes, base64url.
+func vistaMintOV() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic("janus vista: crypto/rand: " + err.Error())
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// vistaOVWellFormed reports whether v is 22 base64url characters.
+func vistaOVWellFormed(v string) bool {
+	if len(v) != vistaOVLen {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// vistaGroup is a browser cookie's set of connections (tab sessions). It is
+// guarded by its route's rs.mu, so join, rotate, end-all, lookup, and forget
+// are atomic against each other. A cookie names a group through the route's
+// groups map; after a rotation the previous cookie-HMAC stays a live alias
+// for a grace window so a stale in-flight request still resolves the group.
+type vistaGroup struct {
+	conns   map[string]*vistaSession // OV-Session → connection
+	signed  int                      // connections signed on
+	cur     string                   // the current cookie-HMAC
+	aliases map[string]time.Time     // rotated-from cookie-HMAC → expiry
+	ending  bool                     // end-all is tearing it down
+}
+
+func newVistaGroup(cur string) *vistaGroup {
+	return &vistaGroup{conns: map[string]*vistaSession{}, aliases: map[string]time.Time{}, cur: cur}
+}
+
 func vistaSessionID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
@@ -171,7 +215,9 @@ type vistaRouteState struct {
 
 	mu                sync.Mutex
 	target            string                   // the declaring generation's, for status
-	sessions          map[string]*vistaSession // token HMAC → session
+	sessions          map[string]*vistaSession // token HMAC → session (non-browser)
+	groups            map[string]*vistaGroup   // cookie HMAC (current or alias) → group (browser)
+	bound             int                      // browser connections bound to a patient
 	all               map[*vistaSession]bool   // every live session, including one still starting
 	total             int                      // sessions, including those still starting
 	unsigned          int
@@ -203,7 +249,7 @@ type vistaCounters struct {
 func newVistaRouteState(p *vistaPool, key, target string, gen any) *vistaRouteState {
 	return &vistaRouteState{
 		pool: p, key: key, target: target, createdBy: gen,
-		sessions: map[string]*vistaSession{}, all: map[*vistaSession]bool{},
+		sessions: map[string]*vistaSession{}, groups: map[string]*vistaGroup{}, all: map[*vistaSession]bool{},
 		perClient: map[netip.Prefix]int{}, perClientUnsigned: map[netip.Prefix]int{},
 		tombs: map[string]vistaTomb{}, tombCap: vistaDefaultMaxSessions * 4,
 	}
@@ -307,7 +353,9 @@ func (rs *vistaRouteState) lookup(token string) (*vistaSession, string) {
 	return nil, vistaEndUnknown
 }
 
-// forget removes an ended session and leaves its token's tombstone.
+// forget removes an ended session and leaves its token's tombstone. A
+// browser connection leaves its group (and a tombstone keyed by its
+// OV-Session), and an emptied group is dropped.
 func (rs *vistaRouteState) forget(s *vistaSession, cause string, signed bool) {
 	rs.mu.Lock()
 	if !rs.all[s] {
@@ -319,9 +367,174 @@ func (rs *vistaRouteState) forget(s *vistaSession, cause string, signed bool) {
 		delete(rs.sessions, s.mac)
 		rs.tombLocked(s.mac, cause)
 	}
+	if g := s.group; g != nil {
+		delete(g.conns, s.ovSession)
+		rs.tombLocked(s.ovSession, cause)
+		if signed {
+			g.signed--
+		}
+		if s.bound {
+			rs.bound--
+		}
+		if len(g.conns) == 0 {
+			delete(rs.groups, g.cur)
+			for a := range g.aliases {
+				delete(rs.groups, a)
+			}
+		}
+	}
 	rs.mu.Unlock()
 	rs.unreserve(s.clientKey, signed)
 	counterOf(&rs.c.ended, cause).Add(1)
+}
+
+// resolveGroupLocked returns the live group a cookie names (its current
+// HMAC or a still-valid rotated-from alias), expiring a stale alias. The
+// caller holds rs.mu. A group being torn down by end-all resolves to none.
+func (rs *vistaRouteState) resolveGroupLocked(cookie string) *vistaGroup {
+	if cookie == "" {
+		return nil
+	}
+	mac := rs.pool.mac(cookie)
+	g := rs.groups[mac]
+	if g == nil || g.ending {
+		return nil
+	}
+	if mac == g.cur {
+		return g
+	}
+	if exp, ok := g.aliases[mac]; ok && time.Now().Before(exp) {
+		return g
+	}
+	delete(rs.groups, mac)
+	delete(g.aliases, mac)
+	return nil
+}
+
+// attachBrowser joins a reserved browser connection to the group its cookie
+// names, or to a fresh group when the cookie names none. It returns the
+// connection's new OV-Session and, for a fresh group, the cookie token to
+// set (empty when joining an existing group).
+func (rs *vistaRouteState) attachBrowser(s *vistaSession, cookie string) (ov, newToken string) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	g := rs.resolveGroupLocked(cookie)
+	if g == nil {
+		newToken = vistaMintToken()
+		g = newVistaGroup(rs.pool.mac(newToken))
+		rs.groups[g.cur] = g
+	}
+	ov = vistaMintOV()
+	s.group = g
+	s.ovSession = ov
+	g.conns[ov] = s
+	return ov, newToken
+}
+
+// lookupBrowser resolves a browser later request. groupLive reports the
+// cookie named a live group; cause is "" on a hit, else the connection's
+// tombstone cause (or unknown), or unknown when the group is gone.
+func (rs *vistaRouteState) lookupBrowser(cookie, ov string) (s *vistaSession, cause string, groupLive bool) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	g := rs.resolveGroupLocked(cookie)
+	if g == nil {
+		return nil, vistaEndUnknown, false
+	}
+	if c := g.conns[ov]; c != nil {
+		return c, "", true
+	}
+	if t, ok := rs.tombs[ov]; ok && time.Since(t.at) < vistaTombstoneTTL {
+		return nil, t.cause, true
+	}
+	return nil, vistaEndUnknown, true
+}
+
+// rotateBrowser records a browser connection's sign-on in its group and,
+// when it is the group's first, rotates the group's cookie: a new token,
+// the old HMAC kept as a live alias for the grace window. It returns the
+// new cookie token to set, or "" when no rotation (a later sign-on).
+func (rs *vistaRouteState) rotateBrowser(s *vistaSession) string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	g := s.group
+	if g == nil {
+		return ""
+	}
+	first := g.signed == 0
+	g.signed++
+	if !first {
+		return ""
+	}
+	token := vistaMintToken()
+	mac := rs.pool.mac(token)
+	g.aliases[g.cur] = time.Now().Add(vistaRotateGrace)
+	g.cur = mac
+	rs.groups[mac] = g
+	return token
+}
+
+// endGroupAll ends every connection of the group a cookie names (end-all)
+// and returns how many. It marks the group ending and drops its cookies
+// under rs.mu first, so a concurrent join makes a fresh group instead.
+func (rs *vistaRouteState) endGroupAll(cookie string) int {
+	rs.mu.Lock()
+	g := rs.resolveGroupLocked(cookie)
+	if g == nil {
+		rs.mu.Unlock()
+		return 0
+	}
+	g.ending = true
+	delete(rs.groups, g.cur)
+	for a := range g.aliases {
+		delete(rs.groups, a)
+	}
+	live := make([]*vistaSession, 0, len(g.conns))
+	for _, c := range g.conns {
+		live = append(live, c)
+	}
+	rs.mu.Unlock()
+	for _, c := range live {
+		c.end(vistaEndBye)
+	}
+	return len(live)
+}
+
+// bindPatient binds a browser connection to a DFN on its first ORWPT SELECT.
+func (rs *vistaRouteState) bindPatient(s *vistaSession, dfn string) {
+	rs.mu.Lock()
+	if !s.bound {
+		s.bound, s.boundDFN = true, dfn
+		rs.bound++
+	}
+	rs.mu.Unlock()
+}
+
+// patientBound reads a browser connection's patient binding.
+func (rs *vistaRouteState) patientBound(s *vistaSession) (string, bool) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return s.boundDFN, s.bound
+}
+
+// groupSolo reports whether s is the only live connection in its browser
+// group, so clearing the shared __Host-ov cookie would strand no sibling tab.
+// A non-browser session (no group) is always solo: its cookie, if any, is its
+// own one connection. A browser tab whose group still holds another tab is
+// not solo, so its per-tab #BYE# or end must leave the shared cookie intact.
+func (rs *vistaRouteState) groupSolo(s *vistaSession) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	g := s.group
+	if g == nil {
+		return true
+	}
+	for ov := range g.conns {
+		if ov != s.ovSession {
+			return false
+		}
+	}
+	return true
 }
 
 func (rs *vistaRouteState) tombLocked(mac, cause string) {
@@ -418,12 +631,24 @@ func (rs *vistaRouteState) status(l *vistaLimits) vistaRouteStatus {
 		Network:  network,
 		Sessions: rs.total,
 		Unsigned: rs.unsigned,
+		Bound:    rs.bound,
 	}
 	var oldest time.Time
 	for s := range rs.all {
 		if t := s.runningSince(); !t.IsZero() && (oldest.IsZero() || t.Before(oldest)) {
 			oldest = t
 		}
+	}
+	// A group appears in rs.groups under its current HMAC and any live
+	// aliases; count each distinct group once and its live connections.
+	seen := map[*vistaGroup]bool{}
+	for _, g := range rs.groups {
+		if seen[g] {
+			continue
+		}
+		seen[g] = true
+		st.Groups++
+		st.Connections += len(g.conns)
 	}
 	rs.mu.Unlock()
 	if !oldest.IsZero() {
@@ -467,13 +692,17 @@ func vistaCounterName(cause string) string {
 }
 
 var vistaRefusalRows = []string{"method", "no_tls", "early_data", "origin", "content_type", "message", "token",
-	"unknown", "cap_route", "cap_unsigned", "cap_client", "cap_client_unsigned", "dial", "queue"}
+	"unknown", "cap_route", "cap_unsigned", "cap_client", "cap_client_unsigned", "dial", "queue",
+	"ov_header", "ov_session", "connection", "patient"}
 
 type vistaRouteStatus struct {
 	Target          string           `json:"target"`
 	Network         string           `json:"network"`
 	Sessions        int              `json:"sessions"`
 	Unsigned        int              `json:"unsigned"`
+	Connections     int              `json:"connections"`
+	Groups          int              `json:"groups"`
+	Bound           int              `json:"bound"`
 	Running         int64            `json:"running"`
 	Queued          int64            `json:"queued"`
 	Draining        int64            `json:"draining"`

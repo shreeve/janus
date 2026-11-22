@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -193,9 +194,14 @@ func (h *Handler) serveVista(w http.ResponseWriter, r *http.Request, rt *vistaSi
 	if int64(len(body)) > l.maxRequest {
 		return fail(http.StatusBadRequest, "message", true, "bad request: the body exceeds the limit")
 	}
-	// A tcp target's message guard records the fields the walk passes.
+	// A non-browser client presents Authorization: Bearer; everything else
+	// is a browser (cookie) connection. The class is the namespace the token
+	// resolves in, decided here and never re-derived mid-connection.
+	bearer := r.Header.Get("Authorization") != ""
+	// The walk records fields for a tcp target's guard and for a browser
+	// connection's patient binding (ORWPT SELECT's first parameter).
 	var detail *xwbDetail
-	if l.tcp {
+	if l.tcp || !bearer {
 		detail = &xwbDetail{}
 	}
 	msg, err := walkXWBInto(body, detail)
@@ -217,23 +223,100 @@ func (h *Handler) serveVista(w http.ResponseWriter, r *http.Request, rt *vistaSi
 		return fail(http.StatusBadRequest, "token", true, "bad request: "+tok.err.Error())
 	}
 
-	// Rows 8–10: TCPConnect starts a new session, whatever token it carries.
+	// A connection's class is fixed here and never re-derived: browser (the
+	// groups namespace) or non-browser (the sessions namespace). A TCPConnect
+	// is browser when it carries a cookie or an Origin — the first tab has no
+	// cookie yet, so Origin is its only mark; a bootstrap TCPConnect with
+	// neither, or one carrying a Bearer token, is non-browser (CPRS). A later
+	// request is non-browser only when it presents a Bearer token.
+	var browser bool
 	if msg.Command == "TCPConnect" {
-		return h.vistaStart(w, r, rt, rs, body, tok)
+		browser = tok.viaCookie || origin != ""
+	} else {
+		browser = !bearer
 	}
 
-	// Rows 11–12: a token naming a live session.
+	// Rows 8–10: TCPConnect starts a new connection (a browser one joins its
+	// cookie's group; a non-browser one is a lone session as today).
+	if msg.Command == "TCPConnect" {
+		return h.vistaStart(w, r, rt, rs, body, tok, browser)
+	}
+
+	// A non-browser later request: the Bearer token names its one session,
+	// and no OV-* header applies.
+	if !browser {
+		if r.Header.Get("OV-Session") != "" || r.Header.Get("OV-Patient") != "" || r.Header.Get("OV-End") != "" {
+			return fail(http.StatusBadRequest, "ov_header", true, "bad request: OV-* headers are for browser connections")
+		}
+		if tok.value == "" {
+			w.Header().Set(vistaEndedHeader, vistaEndUnknown)
+			return fail(http.StatusUnauthorized, "unknown", false, "no session")
+		}
+		s, cause := rs.lookup(tok.value)
+		if s == nil {
+			w.Header().Set(vistaEndedHeader, cause)
+			return fail(http.StatusUnauthorized, "unknown", false, "the session has ended")
+		}
+		vistaLogField(r, zap.String("vista_session", s.id))
+		return h.vistaRun(w, r, rs, s, l, body, msg, detail, tok, "")
+	}
+
+	// A browser later request: OV-* header forms, then end-all, then the
+	// group + OV-Session lookup.
+	ovSession := r.Header.Get("OV-Session")
+	ovPatient := r.Header.Get("OV-Patient")
+	ovEnd := r.Header.Get("OV-End")
+	if ovEnd != "" {
+		if ovEnd != "all" || ovSession != "" || msg.Command != "#BYE#" {
+			return fail(http.StatusBadRequest, "ov_header", true, "bad request: OV-End must be 'all' on a #BYE# with no OV-Session")
+		}
+		n := rs.endGroupAll(tok.value)
+		w.Header().Set("OV-Ended", strconv.Itoa(n))
+		w.Header().Add("Set-Cookie", vistaClearCookie)
+		vistaWriteBye(w)
+		return nil
+	}
+	if ovSession == "" || !vistaOVWellFormed(ovSession) {
+		return fail(http.StatusBadRequest, "ov_session", true, "bad request: a well-formed OV-Session is required")
+	}
+	if ovPatient != "" && !vistaValidDFN(ovPatient) {
+		return fail(http.StatusBadRequest, "ov_header", true, "bad request: a malformed OV-Patient")
+	}
 	if tok.value == "" {
 		w.Header().Set(vistaEndedHeader, vistaEndUnknown)
 		return fail(http.StatusUnauthorized, "unknown", false, "no session")
 	}
-	s, cause := rs.lookup(tok.value)
+	s, cause, groupLive := rs.lookupBrowser(tok.value, ovSession)
 	if s == nil {
 		w.Header().Set(vistaEndedHeader, cause)
-		return fail(http.StatusUnauthorized, "unknown", false, "the session has ended")
+		rs.refuse(refusalForGroup(groupLive), false)
+		// Clear the cookie only when it names no live group at all; a dead
+		// OV-Session in a live group leaves the other tabs' cookie alone.
+		if !groupLive {
+			w.Header().Add("Set-Cookie", vistaClearCookie)
+		}
+		http.Error(w, "the session has ended", http.StatusUnauthorized)
+		return nil
 	}
 	vistaLogField(r, zap.String("vista_session", s.id))
-	return h.vistaRun(w, r, rs, s, l, body, msg, detail, tok)
+	return h.vistaRun(w, r, rs, s, l, body, msg, detail, tok, ovPatient)
+}
+
+// refusalForGroup names the refusal row for a browser lookup miss.
+func refusalForGroup(groupLive bool) string {
+	if groupLive {
+		return "connection"
+	}
+	return "unknown"
+}
+
+// vistaWriteBye answers end-all with a 200 and the broker's #BYE# reply.
+func vistaWriteBye(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "application/x-xwb")
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(vistaBrokerBye))
 }
 
 // vistaWriteSecurity answers a refused message with a broker security
@@ -256,25 +339,21 @@ func vistaDialer(l *vistaLimits) *net.Dialer {
 	return d
 }
 
-// vistaStart admits, dials, and opens a session for a TCPConnect.
-func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSiteRoute, rs *vistaRouteState, body []byte, tok vistaToken) error {
+// vistaStart admits, dials, and opens a session for a TCPConnect. A browser
+// connection joins its cookie's group (or a fresh one); a non-browser one is
+// a lone session whose own token, if live, it replaces.
+func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSiteRoute, rs *vistaRouteState, body []byte, tok vistaToken, browser bool) error {
 	l := rt.limits
-	replaced := false
-	if tok.value != "" {
+	// A non-browser TCPConnect that carries a live token (CPRS reconnecting
+	// over Bearer) replaces its own prior session. A browser TCPConnect never
+	// reaches here with a token: a cookie makes it browser, and browser joins
+	// its group rather than replacing. So no cookie is cleared on this path.
+	if !browser && tok.value != "" {
 		if old, _ := rs.lookup(tok.value); old != nil {
 			old.end(vistaEndReplaced)
-			replaced = true
-		}
-	}
-	// A browser whose session this TCPConnect replaced holds a dead
-	// cookie; any answer without a new token clears it at once.
-	clearReplaced := func() {
-		if replaced && tok.viaCookie {
-			w.Header().Add("Set-Cookie", vistaClearCookie)
 		}
 	}
 	fail := func(code int, msg string) error {
-		clearReplaced()
 		http.Error(w, msg, code)
 		return nil
 	}
@@ -305,6 +384,7 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 	}
 	s := newVistaSession(rs, conn, key, peer.Addr().String(), h.app.state.vista.logger)
 	s.tcp = l.tcp
+	s.browser = browser
 	rs.add(s)
 	s.start()
 	vistaLogField(r, zap.String("vista_session", s.id))
@@ -329,9 +409,19 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 		}
 		return fail(status, "bad gateway")
 	case string(ex.reply) == "\x00\x00accept\x04":
-		token := vistaMintToken()
-		rs.bind(s, token, vistaEndRotated)
-		o.setCookie = vistaSetCookie(token)
+		if browser {
+			// Join the cookie's group (or open a fresh one). The new cookie
+			// is set only when a group was opened; a joining tab keeps it.
+			ov, newToken := rs.attachBrowser(s, tok.value)
+			w.Header().Set("OV-Session", ov)
+			if newToken != "" {
+				o.setCookie = vistaSetCookie(newToken)
+			}
+		} else {
+			token := vistaMintToken()
+			rs.bind(s, token, vistaEndRotated)
+			o.setCookie = vistaSetCookie(token)
+		}
 		s.armSignon(l.signonTimeout)
 		rs.c.started.Add(1)
 		fields := []zap.Field{zap.String("route", rs.key), zap.String("session", s.id),
@@ -350,9 +440,6 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 		// Sign-ons inhibited or the job limit reached: em ends the stream.
 		rs.c.rejected.Add(1)
 		s.end(vistaCauseRejected)
-		if replaced && tok.viaCookie {
-			o.setCookie = vistaClearCookie
-		}
 		o.release()
 		return nil
 	default:
@@ -363,11 +450,14 @@ func (h *Handler) vistaStart(w http.ResponseWriter, r *http.Request, rt *vistaSi
 	}
 }
 
-// vistaRun queues a request on its session and runs it.
-func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRouteState, s *vistaSession, l *vistaLimits, body []byte, msg xwbMessage, detail *xwbDetail, tok vistaToken) error {
+// vistaRun queues a request on its session and runs it. ovPatient is the
+// request's OV-Patient header (browser only, "" otherwise).
+func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRouteState, s *vistaSession, l *vistaLimits, body []byte, msg xwbMessage, detail *xwbDetail, tok vistaToken, ovPatient string) error {
 	ended := func(cause string) error {
 		w.Header().Set(vistaEndedHeader, cause)
-		if tok.viaCookie {
+		// Clear the shared cookie only when this is the group's last tab;
+		// a sibling tab still needs it (a non-browser cookie is always solo).
+		if tok.viaCookie && rs.groupSolo(s) {
 			w.Header().Add("Set-Cookie", vistaClearCookie)
 		}
 		http.Error(w, "the session has ended", http.StatusUnauthorized)
@@ -424,6 +514,16 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 			return nil
 		}
 	}
+	// A browser connection's advisory patient binding, judged under the turn
+	// on the state earlier requests left: the first type-0-literal ORWPT
+	// SELECT binds; a select of a different DFN, an OV-Patient naming a
+	// different DFN, or an ORWPT SELECT whose first parameter is not a literal
+	// DFN is refused unsent (a 200 security reply; the connection goes on).
+	if s.browser {
+		if h.vistaBindPatient(w, rs, s, msg, detail, ovPatient) {
+			return nil
+		}
+	}
 	rs.c.running.Add(1)
 	defer rs.c.running.Add(-1)
 	rs.c.requests.Add(1)
@@ -445,7 +545,9 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 		o.hold = true
 	}
 	bye := msg.Command == "#BYE#"
-	if bye && tok.viaCookie {
+	// A per-tab #BYE# clears the shared cookie only when no sibling tab is
+	// left in the group; end-all (handled in serveVista) clears it outright.
+	if bye && tok.viaCookie && rs.groupSolo(s) {
 		o.setCookie = vistaClearCookie
 	}
 	ex := s.exchange(body, judge, false, bye, l, deadline, o)
@@ -464,7 +566,7 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 		o.hold = false
 		w.Header().Del("Set-Cookie")
 		w.Header().Set(vistaEndedHeader, ex.cause)
-		if tok.viaCookie {
+		if tok.viaCookie && rs.groupSolo(s) {
 			w.Header().Add("Set-Cookie", vistaClearCookie)
 		}
 		status := http.StatusBadGateway
@@ -483,9 +585,85 @@ func (h *Handler) vistaRun(w http.ResponseWriter, r *http.Request, rs *vistaRout
 	panic(http.ErrAbortHandler)
 }
 
-// stripVistaCookie removes __Host-ov from a request the site forwards
-// anywhere but its vista routes; only the vista handler reads the token.
+// Broker security messages for a refused browser patient-binding request.
+const (
+	vistaMsgOtherPatient = "This connection is open for another patient"
+	vistaMsgSelectForm   = "This connection cannot select a patient this way"
+)
+
+// vistaBindPatient applies a browser connection's patient binding to one
+// request and reports that it answered (a security reply, unsent). It is
+// called under the session's turn, so the binding is read and set in order.
+func (h *Handler) vistaBindPatient(w http.ResponseWriter, rs *vistaRouteState, s *vistaSession, msg xwbMessage, detail *xwbDetail, ovPatient string) bool {
+	bound, isBound := rs.patientBound(s)
+	// OV-Patient is advisory: a declared patient that differs from the
+	// binding is refused before the RPC is sent; unbound, it is allowed.
+	if ovPatient != "" && isBound && ovPatient != bound {
+		rs.refuse("patient", false)
+		vistaWriteSecurity(w, vistaMsgOtherPatient)
+		return true
+	}
+	if msg.RPC != "ORWPT SELECT" {
+		return false
+	}
+	dfn, ok := vistaFirstLiteralDFN(detail)
+	if !ok {
+		// Fail closed: em accepts a type-1 reference from a signed-on client,
+		// so a hand-made page could select a patient without a literal DFN.
+		// A browser ORWPT SELECT must name its patient as a type-0 literal.
+		rs.refuse("patient", false)
+		vistaWriteSecurity(w, vistaMsgSelectForm)
+		return true
+	}
+	if isBound {
+		if dfn != bound {
+			rs.refuse("patient", false)
+			vistaWriteSecurity(w, vistaMsgOtherPatient)
+			return true
+		}
+		return false
+	}
+	rs.bindPatient(s, dfn)
+	return false
+}
+
+// vistaFirstLiteralDFN returns a walked message's first parameter when it is
+// a type-0 literal of a valid DFN, and whether it was.
+func vistaFirstLiteralDFN(d *xwbDetail) (string, bool) {
+	if d == nil || len(d.Params) == 0 {
+		return "", false
+	}
+	p := d.Params[0]
+	if p.Type != '0' {
+		return "", false
+	}
+	dfn := string(p.Value)
+	if !vistaValidDFN(dfn) {
+		return "", false
+	}
+	return dfn, true
+}
+
+// vistaValidDFN reports whether v is a syntactic DFN: ^[1-9][0-9]{0,15}$.
+func vistaValidDFN(v string) bool {
+	if len(v) < 1 || len(v) > 16 || v[0] < '1' || v[0] > '9' {
+		return false
+	}
+	for i := 1; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// stripVistaCookie removes __Host-ov and the OV-* request headers from a
+// request the site forwards anywhere but its vista routes; only the vista
+// handler reads them. X-OV stays — it is not sensitive.
 func stripVistaCookie(r *http.Request) {
+	r.Header.Del("OV-Session")
+	r.Header.Del("OV-Patient")
+	r.Header.Del("OV-End")
 	if !strings.Contains(r.Header.Get("Cookie"), vistaCookieName) && len(r.Header.Values("Cookie")) < 2 {
 		return
 	}

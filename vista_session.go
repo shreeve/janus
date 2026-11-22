@@ -83,6 +83,15 @@ type vistaSession struct {
 	bytesIn   atomic.Int64
 	bytesOut  atomic.Int64
 	eofClosed atomic.Bool
+
+	// Browser tab-session fields. browser, group, and ovSession are set at
+	// attach, before the connection serves any request; bound and boundDFN
+	// are guarded by route.mu. A non-browser connection leaves these zero.
+	browser   bool
+	group     *vistaGroup
+	ovSession string
+	bound     bool
+	boundDFN  string
 }
 
 func newVistaSession(rs *vistaRouteState, conn net.Conn, key netip.Prefix, client string, logger *zap.Logger) *vistaSession {
@@ -277,6 +286,22 @@ func (s *vistaSession) applySignon(v signonVerdict) bool {
 	return true
 }
 
+// onSignon acts on a just-signed-on connection's token (applySignon has
+// returned true): a browser connection rotates its group's cookie, but only
+// when it is the group's first sign-on; a non-browser connection rotates its
+// own token. It sets the new cookie on o when one was minted.
+func (s *vistaSession) onSignon(o *vistaResponder) {
+	if s.browser {
+		if token := s.route.rotateBrowser(s); token != "" {
+			o.setCookie = vistaSetCookie(token)
+		}
+		return
+	}
+	token := vistaMintToken()
+	s.route.bind(s, token, vistaEndRotated)
+	o.setCookie = vistaSetCookie(token)
+}
+
 // vistaResponder writes a reply to the client as it is read: headers with
 // the first byte (or, while holding, once released), each write under a
 // deadline and flushed. A client that fails a write is gone; the reply
@@ -421,9 +446,7 @@ func (s *vistaSession) exchange(body []byte, judge string, keep, bye bool, l *vi
 			if v, decided := judgeSignon(judge, sc.Clean(), sc.MError(), sc.DataPrefix(), done); decided {
 				judged, verdict = true, v
 				if s.applySignon(v) {
-					token := vistaMintToken()
-					s.route.bind(s, token, vistaEndRotated)
-					o.setCookie = vistaSetCookie(token)
+					s.onSignon(o)
 				}
 				o.release()
 			}
@@ -483,9 +506,7 @@ func (s *vistaSession) finish(sc xwbReplyScanner, judge string, judged bool, ver
 		v, _ := judgeSignon(judge, sc.Clean(), sc.MError(), sc.DataPrefix(), true)
 		verdict = v
 		if s.applySignon(v) {
-			token := vistaMintToken()
-			s.route.bind(s, token, vistaEndRotated)
-			o.setCookie = vistaSetCookie(token)
+			s.onSignon(o)
 		}
 		// A sign-on reply held its headers for the judgement; any other
 		// hold (TCPConnect's) is the caller's to release.
