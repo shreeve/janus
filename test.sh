@@ -258,6 +258,28 @@ require_ports_free() {
 	fi
 }
 
+# wait_ports_free PORTS… — wait, bounded (~5 s), for ports to be released after
+# stopping caddy. The process exiting does not mean the kernel has torn down its
+# listening sockets yet, so an immediate restart can race the admin port (2019)
+# and see it "already in use". Best-effort: returns once the ports are free or
+# the deadline passes (start_caddy's require_ports_free still fails loudly if a
+# port never frees). Pass only caddy's own ports, never the fixtures'.
+wait_ports_free() {
+	local i port held
+	for i in $(seq 1 100); do
+		held=0
+		for port in "$@"; do
+			if { lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null; lsof -nP -iUDP:"$port" 2>/dev/null | awk '$9 !~ /->/'; } | awk 'NR > 1 && $1 != "COMMAND" {print}' | grep -q .; then
+				held=1
+				break
+			fi
+		done
+		((held)) || return 0
+		sleep 0.05
+	done
+	return 0
+}
+
 start_caddy() {
 	printf '%s' "${JANUS_HEARTBEAT_TTL:-15s}" >"$TEST_RUN_DIR/heartbeat-ttl"
 	# Fixed ports must be exclusive. Killing an unknown listener is unsafe, and
@@ -301,16 +323,31 @@ stop_caddy() {
 		pid="$(<"$CADDY_PID_FILE")"
 	fi
 	if pid_is_owned "$pid" "$CADDY_BIN"; then
-		stop_owned_pid "$pid" "$CADDY_BIN"
-		wait "$pid" 2>/dev/null || true
+		stop_owned_pid "$pid" "$CADDY_BIN" # SIGTERM: graceful shutdown
 		local i
-		for i in $(seq 1 100); do
+		# A case runs in a command-substitution subshell, so `wait` cannot reap
+		# caddy (a child of the main shell); poll its liveness instead. Give the
+		# graceful drain a window, then force it down — the HTTP/3 + WebTransport
+		# stack can drain longer than a quick restart allows, and a lingering
+		# process keeps port 2019 bound, failing the next start_caddy.
+		for i in $(seq 1 60); do # up to ~3 s to exit gracefully
 			kill -0 "$pid" 2>/dev/null || break
 			sleep 0.05
+		done
+		if kill -0 "$pid" 2>/dev/null; then
+			kill -9 "$pid" 2>/dev/null || true
+			for i in $(seq 1 100); do # up to ~5 s for the kernel to reap it
+				kill -0 "$pid" 2>/dev/null || break
+				sleep 0.05
 			done
+		fi
+		wait "$pid" 2>/dev/null || true
 	elif [[ -n "$pid" ]]; then
 		stop_owned_pid "$pid" "$CADDY_BIN"
 	fi
+	# Then wait for caddy's own listeners to be released before a restart
+	# rebinds them, so start_caddy's require_ports_free does not race teardown.
+	wait_ports_free 443 2019 7600
 	rm -f "$CADDY_PID_FILE"
 	CADDY_PID=""
 }
