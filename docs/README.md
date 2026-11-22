@@ -24,6 +24,8 @@ are immutable.
 | [`20260928-200621-capability-webtransport.md`](20260928-200621-capability-webtransport.md) | Capability 10: webtransport (WebTransport datagram relay on UDP 443 to a config-fixed UDP target, with auth-gate tickets) |
 | [`20261010-232539-capability-vista.md`](20261010-232539-capability-vista.md) | Capability 11: vista (VistA's RPC Broker over HTTPS: one em per session behind `POST /rpc`, sign-on-aware caps, token rotation) |
 | [`20261114-142034-capability-vista-tcp.md`](20261114-142034-capability-vista-tcp.md) | Capability 11 extension: vista to a stock RPC Broker over TCP (`tcp/IP:PORT` targets, no PROXY line, Janus's message guard, failed sign-ons per client key) |
+| [`20261122-021439-capability-vista-tab-sessions.md`](20261122-021439-capability-vista-tab-sessions.md) | Capability 11 extension: vista tab sessions (a browser `__Host-ov` cookie names a group of per-chart-tab connections under one sign-on; advisory fail-closed patient binding) |
+| [`20261122-231500-security-contract.md`](20261122-231500-security-contract.md) | Edge-wide security contract and threat model, vista/PHI in focus: trust boundaries, controls (enforced + pinned), HITRUST/HIPAA mapping, non-goals, residual risk |
 | [`20260826-184613-v1.7-hardening.md`](20260826-184613-v1.7-hardening.md) | v1.7 authoritative addendum: throughput, reload lifecycle, security, and release hardening across the nine capabilities |
 | [`20260719-141200-tls-ask.md`](20260719-141200-tls-ask.md) | On-demand TLS gating via `/1.0/tls/ask` |
 | [`20260907-000352-exposure-modes.md`](20260907-000352-exposure-modes.md) | Exposure modes (`localhost` \| `lan` \| `wan`): the front-door contract, what holds it on each platform, the measured connection matrix, and the doors closed on the way |
