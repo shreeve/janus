@@ -193,16 +193,30 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { merge-multiple: true }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A CycloneDX Software Bill of Materials of the module's dependency
+      # graph, published alongside the archives: it says what is in the build,
+      # as the build-provenance attestation says who built it and govulncheck
+      # says none of it is reachably vulnerable. Pinned, platform-independent.
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0
+          "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json \
+            -output "janus-$GITHUB_REF_NAME-sbom.cdx.json" .
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           caddy_version=$(awk '$1 == "github.com/caddyserver/caddy/v2" { print $2 }' go.mod)
-          sha256sum janus-*.tar.gz janus-*.zip > "janus-$GITHUB_REF_NAME-checksums.txt"
+          sha256sum janus-*.tar.gz janus-*.zip "janus-$GITHUB_REF_NAME-sbom.cdx.json" > "janus-$GITHUB_REF_NAME-checksums.txt"
           gh release create "$GITHUB_REF_NAME" \
-            janus-*.tar.gz janus-*.zip "janus-$GITHUB_REF_NAME-checksums.txt" \
+            janus-*.tar.gz janus-*.zip "janus-$GITHUB_REF_NAME-sbom.cdx.json" "janus-$GITHUB_REF_NAME-checksums.txt" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Janus $GITHUB_REF_NAME" \
             --generate-notes \
-            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. The binary is named janus and bundles the Route 53 DNS provider for DNS-01 wildcard certificates. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes janus (on macOS as Janus.app with the command linked into it), Caddyfile.minimal, Caddyfile.example, README, and license; Unix archives also include install.sh."
+            --notes "Caddy $caddy_version with Janus $GITHUB_REF_NAME. The binary is named janus and bundles the Route 53 DNS provider for DNS-01 wildcard certificates. Five self-contained archives for macOS ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Each archive includes janus (on macOS as Janus.app with the command linked into it), Caddyfile.minimal, Caddyfile.example, README, and license; Unix archives also include install.sh. A CycloneDX SBOM (janus-$GITHUB_REF_NAME-sbom.cdx.json) lists the dependency graph."

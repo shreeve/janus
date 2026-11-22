@@ -32,7 +32,7 @@ jobs:
           go test -race ./...
 
   vuln:
-    name: Reachable vulnerabilities
+    name: Supply chain (vulnerabilities + SBOM)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +51,13 @@ jobs:
           govulncheck="$(go env GOPATH)/bin/govulncheck"
           "$govulncheck" ./...
           GOOS=darwin "$govulncheck" ./...
+      # Validate SBOM generation on every change so the release path (which
+      # publishes it as an asset) cannot silently rot. Same pinned tool.
+      - name: SBOM generates (CycloneDX)
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0
+          "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output /tmp/sbom.cdx.json .
+          test -s /tmp/sbom.cdx.json
 
   acceptance:
     name: Foreground acceptance
