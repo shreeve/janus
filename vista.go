@@ -5,6 +5,27 @@ package janus
 // tokens, the tombstones of ended ones, its caps' counts, and counters.
 // Routes are created on first use and removed when a committed generation
 // no longer declares them (docs/20261010-232539-capability-vista.md).
+//
+// Vocabulary — one struct, two maps, because clients come in two disjoint
+// classes fixed at a stream's start (see the tab-sessions contract,
+// docs/20261122-021439-capability-vista-tab-sessions.md):
+//
+//   - A *session* (vistaSession) is one broker stream: a single
+//     TCPConnect-to-#BYE# conversation with em or a stock broker. The status
+//     `sessions` count is rs.total — every stream, of either class — and the
+//     OV-Session header selects one stream within a browser group.
+//   - A *non-browser* client (Authorization: Bearer, the CPRS relay) is one
+//     token, one session: session == connection == sign-on. These live in
+//     rs.sessions, keyed by the token's HMAC.
+//   - A *browser* client's __Host-ov cookie names a *group* (vistaGroup): the
+//     shared sign-on, holding one *connection* per chart tab — each a session
+//     selected by its OV-Session. These live in rs.groups, keyed by the
+//     cookie's HMAC; the status `connections` count is their members and
+//     `groups` the distinct groups.
+//
+// So rs.sessions and rs.groups are two maps, not one, because the classes
+// have two shapes: a token resolves to one session; a cookie resolves to a
+// group of many. Neither map ever holds the other's connections.
 
 import (
 	"crypto/hmac"
