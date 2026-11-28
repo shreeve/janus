@@ -365,6 +365,14 @@ func (st *authStore) lookupAllowed(token, host string, ttl time.Duration, refres
 		st.expired.Add(1)
 		return "", time.Time{}, false
 	}
+	// Absolute lifetime cap: a session past authMaxLifetime from its minting
+	// ends however recently it was seen, so a kept-alive or replayed session
+	// cannot outlive the bound.
+	if now.Sub(s.issuedAt) > authMaxLifetime {
+		delete(st.sessions, key)
+		st.expired.Add(1)
+		return "", time.Time{}, false
+	}
 	if allow != nil && !allow[s.user] {
 		return "", time.Time{}, false
 	}
@@ -1108,6 +1116,19 @@ func (h *Handler) serveAuthWall(w http.ResponseWriter, r *http.Request) (*http.R
 		return r, true, nil
 	}
 
+	// A session admitted by a gate carries the user's identity to a
+	// root-trusted upstream. SameSite=Strict keeps the cookie off cross-site
+	// requests, but a sibling subdomain (forgejo.example.com → the gated
+	// app.example.com) is same-site, so an XSS on any co-hosted origin could
+	// drive this upstream with the victim's session — a POST, or a
+	// `new WebSocket(...)`. Require a state-bearing gated request (an unsafe
+	// method or an upgrade) to be same-origin before it reaches the upstream.
+	if authorized && !authSameOriginRequest(r) {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "cross-origin request to a gated resource refused", http.StatusForbidden)
+		return r, true, nil
+	}
+
 	// Fall-through (gated+authorized or outside every gate): strip on
 	// every proxied request when auth is on. The site handler already
 	// stripped client identity headers; the wall repeats it so its own
@@ -1198,6 +1219,41 @@ func authBrowserShaped(r *http.Request) bool {
 		return false
 	}
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// authSameOriginRequest reports whether a gated request may proceed under
+// the same-origin rule. A safe, non-upgrade read (GET/HEAD/OPTIONS) always
+// passes — it changes no state. A state-bearing request (any other method,
+// or a WebSocket upgrade) must prove it is same-origin: the browser-set
+// Sec-Fetch-Site metadata is same-origin or none, or, for a client that
+// sends no Sec-Fetch-Site, its Origin equals this site's own origin. A
+// same-site (sibling subdomain) or cross-site request is refused; a request
+// with neither header is a non-browser client (curl, a native app), which
+// cannot be a cross-origin browser attack carrying a victim's cookie, so it
+// passes. Sec-Fetch-Site is a forbidden header script cannot forge.
+func authSameOriginRequest(r *http.Request) bool {
+	stateBearing := websocket.IsWebSocketUpgrade(r)
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		// reads; only an upgrade among these bears state
+	default:
+		stateBearing = true
+	}
+	if !stateBearing {
+		return true
+	}
+	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
+		return sfs == "same-origin" || sfs == "none"
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	return normalizeHostHeader(u.Host) == normalizeHostHeader(r.Host)
 }
 
 // stripAuthCookies removes the wall's own cookies from the request

@@ -1,6 +1,8 @@
 # Janus security contract and threat model
 
-Status: **Contract** (2026-11-22). Janus terminates TLS and proxies for
+Status: **Contract** (2026-11-22; revised 2026-11-28 to correct the auth-wall
+non-goals, add the auth wall's own controls, and record the same-site
+boundary and its guards). Janus terminates TLS and proxies for
 applications, including **vista** (capability 11), which carries VistA RPC
 Broker traffic for a hospital information system — protected health
 information (PHI). This page states, for the whole edge with vista in
@@ -25,10 +27,17 @@ edge-wide: [`20260826-184613-v1.7-hardening.md`](20260826-184613-v1.7-hardening.
 3. **A registered upstream is trusted** as the application tier. Its Unix
    socket admits only Janus's user; a TCP broker target is trusted as
    configured. Janus hands it the client's true address in the PROXY line.
-4. **An origin is a shared trust domain.** Every app served on a host shares
-   that host's origin and can drive a browser session scoped to it. A vista
-   route therefore belongs on a host that carries only that route and the one
-   web client that uses it — nothing else untrusted.
+4. **An origin — and a site — is a shared trust domain.** Every app served on
+   a host shares that host's origin and can drive a browser session scoped to
+   it. A vista route therefore belongs on a host that carries only that route
+   and the one web client that uses it — nothing else untrusted. The cookie
+   trust domain is wider than the origin: `SameSite=Strict` does **not**
+   isolate sibling subdomains (`a.example.com` from `b.example.com`), which
+   are the same *site*, so an auth-walled app and any co-hosted sibling share
+   a CSRF / cross-site-WebSocket boundary. The auth wall narrows this with a
+   same-origin guard on state-changing gated requests (see "The auth wall"),
+   but host layout — one trust domain per sensitive app — remains the
+   operator's control.
 5. **Identity and patient-level authorization belong to VistA, not Janus.**
    VistA authenticates the user (sign-on) and decides what patient data a
    user may see. Janus admits transport and manages connections; it does not
@@ -71,12 +80,54 @@ foreground `./test.sh`), both run in CI on every PR and push, with a
   required for the *system* to meet the audit-trail control; it is called
   out here so it is not mistaken for a Janus gap or silently assumed.
 
+## The auth wall (capability 5)
+
+The auth wall is a **separate** mechanism from vista: a URL-prefix gate that
+puts a login in front of an app that has none (the Incus UI is one). Unlike
+vista, it authenticates the user itself and manages its own sessions. Its
+controls:
+
+- **Sign-on:** argon2id (`ConstantTimeCompare`), one message for every
+  failure cause (unknown user, wrong password, disallowed gate), unknown
+  users run the same KDF against a dummy — neither timing nor 429s enumerate
+  names.
+- **Session:** 128-bit `crypto/rand` token stored as an HMAC (per-boot key),
+  bound to the minting host; `__Host-janus`, Secure, HttpOnly,
+  `SameSite=Strict`; minted only at login (no fixation); a login or a
+  password change ends the prior session; **absolute 24h lifetime** cap on
+  top of the sliding idle `ttl`, so a kept-alive or replayed cookie cannot
+  live forever.
+- **CSRF / same-site:** signed double-submit token on the login and logout
+  forms; and a **same-origin guard** on every gated request that changes
+  state (any method but `GET`/`HEAD`/`OPTIONS`) or opens a WebSocket — it
+  must be `Sec-Fetch-Site: same-origin`/`none` or carry an `Origin` equal to
+  the site's own, so a same-*site* sibling cannot drive the walled upstream
+  with the victim's session (boundary 4).
+- **Host confinement:** a walled host is served only through its wall; a
+  wall-less (`auth off`) site answers 404 for a host an auth-enabled site
+  covers, closing the trailing-dot / host-normalization bypass.
+- **Login throttling:** a per-client ladder (IPv4 address or IPv6 /64) that
+  bans at 7 fails/24h, and a per-account ladder (short, capped wait) that
+  slows a distributed guesser without letting one lock the real owner out;
+  argon2 verification concurrency bounds aggregate cost.
+- **Observe and revoke over `/1.0/auth/sessions`** (GET lists, DELETE
+  revokes), and no secret — token, password, CSRF value, session id — in any
+  log line.
+
+Pinned in `auth_test.go`, `auth_harden_test.go`, `auth_security_test.go`, and
+the `./test.sh` auth group.
+
 ## Non-goals (deliberate)
 
-Janus does **not**, by design: enforce patient- or user-level authorization;
-log user or patient identity; provide session listing, inspection, or
-revocation over `/1.0`; authenticate the user itself; or treat co-hosted apps
-on one origin as mutually isolated. These are VistA's, or the operator's
+For the **vista** capability, Janus does **not**, by design: enforce patient-
+or user-level authorization; log user or patient identity; authenticate the
+VistA user itself (sign-on is VistA's); or provide vista session listing or
+revocation over `/1.0`. These are VistA's. (The auth wall above *does*
+authenticate its users and *does* list and revoke its sessions over
+`/1.0/auth/sessions` — a vista non-goal is not an edge-wide one.)
+
+Edge-wide, Janus does not treat co-hosted apps on one origin — or one site
+(sibling subdomains) — as mutually isolated: that is the operator's
 host-layout responsibility (boundary 4), not Janus's.
 
 ## Residual risk

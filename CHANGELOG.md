@@ -34,6 +34,29 @@ A hardening round. What an upgrading operator notices first:
   Host; both claim each attempt as they check it. A password
   change or a new sign-in ends the old session; an audit log records
   sign-ins, failures, throttles, and revocations.
+- **Auth, same-site hardening:** a gated request that changes state (any
+  method but `GET`/`HEAD`/`OPTIONS`) or opens a WebSocket must be
+  same-origin — `Sec-Fetch-Site: same-origin`/`none`, or an `Origin` equal
+  to the site's own. A sibling subdomain on the same site
+  (`forgejo.example.com` reaching the gated `incus.example.com`) is refused
+  403: `SameSite=Strict` keeps the session cookie off cross-*site* requests,
+  but a sibling is same-*site*, so this closes the cross-site-WebSocket and
+  same-site-`POST` path into an app that trusts the wall's injected
+  `Remote-User`. A client that sends neither header (curl, a native app) is
+  unaffected.
+- **Auth, absolute session lifetime:** a session ends 24h after it was
+  minted regardless of activity, so a polling tab or a replayed cookie can
+  no longer slide the idle `ttl` indefinitely; re-login restores it.
+- **Auth, host confusion:** a site with `auth off` answers 404 for a request
+  whose normalized host belongs to an auth-enabled site — a trailing-dot
+  `Host: incus.example.com.` that Caddy's exact matcher misses but the
+  registry would resolve to the gated app. The wall is the only path to a
+  walled host.
+- **Auth, account-ladder lockout:** the per-account login wait is capped
+  lower (15s) so a distributed guesser spraying a known username cannot hold
+  the real owner at a 429; the argon2 verification concurrency still bounds
+  aggregate guessing, and password strength remains the defense for a
+  specific account.
 - **One socket belongs to one app:** a path another app publishes is 409;
   upstream paths must be absolute and clean.
 - **The TCP control listeners refuse browsers** (any `Origin`, and on
