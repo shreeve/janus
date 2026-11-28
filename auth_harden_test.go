@@ -385,13 +385,25 @@ func TestAuthAccountLadderSlowsDistributedGuessing(t *testing.T) {
 	if blocked, _ := st.accountCheck("other.test", user); blocked {
 		t.Fatal("account ladder crossed hosts")
 	}
-	// The wait doubles to a cap and never becomes a ban.
+	// The wait doubles to a cap and never becomes a ban. Expected waits are
+	// derived from the ladder constants so a retune stays pinned to the
+	// doubling-with-cap behavior, not to magic numbers. The loop records the
+	// 2nd post-free failure onward (the 1st was the authAccountWaitFirst
+	// check above).
 	waits := []time.Duration{}
 	for i := 0; i < 8; i++ {
 		*now = now.Add(authAccountWaitMax + time.Second)
 		waits = append(waits, st.accountFail(host, user).wait)
 	}
-	want := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second}
+	want := make([]time.Duration, 8)
+	for i := range want {
+		over := i + 2
+		w := authAccountWaitMax
+		if over <= 4 {
+			w = min(authAccountWaitFirst<<(over-1), authAccountWaitMax)
+		}
+		want[i] = w
+	}
 	for i := range want {
 		if waits[i] != want[i] {
 			t.Fatalf("account waits = %v, want %v", waits, want)

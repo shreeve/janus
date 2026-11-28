@@ -242,6 +242,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 	}
 	host := normalizeHostHeader(r.Host)
+	// A host that belongs to an auth-enabled site must only ever be served
+	// through that site's wall. This handler has auth off, so a request that
+	// landed here naming such a host would bypass the wall entirely. It can:
+	// Caddy's host matcher compares the raw Host, but the registry resolves a
+	// normalized one (trailing dot stripped, lowercased), so `Host:
+	// incus.example.com.` misses the exact `incus.example.com` site and falls
+	// to a host-less/catch-all `auth off` site, which would then proxy the
+	// normalized host to its root-trusted upstream. Refuse it as unknown —
+	// the normalized host's own site is the only place it is served.
+	//
+	// authExactHostClaim guards the legitimate carve-out: an `auth off` site
+	// that is itself the exact matcher for the host (a public subdomain under
+	// an `auth on` wildcard) claims it directly and is not a bypass. Only a
+	// wildcard/catch-all `auth off` route that caught a host belonging to a
+	// more specific auth site is refused.
+	if h.authCfg == nil && h.app != nil && !frontDoor &&
+		!h.authExactHostClaim(host) && h.app.authCfgForHost(host) != nil {
+		facts.clearOwner()
+		return unknownHostError(w, fmt.Errorf("janus: host %q is served behind an auth wall; refusing a wall-less path", host))
+	}
 	var rec AppRecord
 	resolved := false
 	// The auth wall (after ping — /ping answers unauthenticated; before

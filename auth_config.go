@@ -30,6 +30,14 @@ import (
 const (
 	authDefaultTTL = 8 * time.Hour
 
+	// authMaxLifetime is the absolute cap on a session's age, measured from
+	// when it was minted and independent of activity. ttl is a sliding idle
+	// bound, which an open tab that keeps polling (or a stolen cookie
+	// replayed before each idle expiry) slides forever; this bounds that to
+	// one day. Always on: a security limit, not a tunable. A re-login past
+	// it is the cost of bounding a live session's worst-case lifetime.
+	authMaxLifetime = 24 * time.Hour
+
 	authCookieName     = "__Host-janus"
 	authCSRFCookieName = "__Host-janus_csrf"
 	authCSRFCookieAge  = 600 // seconds
@@ -51,9 +59,19 @@ const (
 	// Per-account ladder (any client, one host + username): free
 	// failures within the forget window, then a doubling 429 wait capped
 	// at authAccountWaitMax. Never a ban.
+	//
+	// The cap is deliberately short. This ladder exists so a distributed
+	// guesser rotating IPs (which evades the per-client ladder) cannot
+	// outrun the argon2 cost, but because a pre-verification throttle cannot
+	// tell the owner's own wrong password from an attacker's guess, a long
+	// wait here is a lockout an attacker can hold over the real owner with
+	// ~one bad login per window. A short cap keeps the owner's worst-case
+	// delay small while the global verification concurrency (authVerify*
+	// below) still bounds aggregate guessing. Primary defense against
+	// guessing a specific account remains the password's own strength.
 	authAccountFreeFails = 10
 	authAccountWaitFirst = 5 * time.Second
-	authAccountWaitMax   = 60 * time.Second
+	authAccountWaitMax   = 15 * time.Second
 	authAccountForget    = time.Hour
 
 	// Argon2 verification concurrency: at most authVerifyConcurrency
